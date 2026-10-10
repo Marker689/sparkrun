@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 import os
 from pathlib import Path
 from typing import Any, TYPE_CHECKING, Optional
@@ -179,6 +180,7 @@ class SparkrunConfig:
         if not isinstance(data, dict):
             raise ValueError("Configuration file %s must contain a mapping" % self.config_path)
         self._data = data
+        self._saved_data = deepcopy(data)
 
     @property
     def cache_dir(self) -> Path:
@@ -548,9 +550,40 @@ class SparkrunConfig:
 
     def save(self) -> None:
         """Persist the current config data to disk."""
+        from sparkrun.utils.fs import atomic_private_write, file_lock
+
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_path, "w") as f:
-            yaml.safe_dump(self._data, f, default_flow_style=False, sort_keys=False)
+        with file_lock(self.config_path.parent / "plugins.lock"):
+            journal = self.config_path.parent / "plugins-transaction.yaml"
+            if journal.exists():
+                pending = yaml.safe_load(journal.read_text())
+                if not isinstance(pending, dict) or pending.get("state") != "committed":
+                    raise ValueError("Interrupted plugin activation; recover it with sparkrun plugins before editing config")
+            current = read_yaml(str(self.config_path)) if self.config_path.exists() else {}
+            if current is None:
+                current = {}
+            if not isinstance(current, dict):
+                raise ValueError("Configuration must contain a mapping")
+
+            def merge_edits(before, edited, latest):
+                result = deepcopy(latest)
+                for key in before.keys() | edited.keys():
+                    if key in before and key in edited and before[key] == edited[key]:
+                        continue
+                    if key in edited and isinstance(before.get(key, {}), dict) and isinstance(edited[key], dict) and edited[key]:
+                        if not isinstance(result.get(key, {}), dict):
+                            raise ValueError("Configuration changed concurrently at %s" % key)
+                        result[key] = merge_edits(before.get(key, {}), edited[key], result.get(key, {}))
+                    elif key in edited:
+                        result[key] = deepcopy(edited[key])
+                    else:
+                        result.pop(key, None)
+                return result
+
+            data = merge_edits(getattr(self, "_saved_data", {}), self._data, current)
+            atomic_private_write(self.config_path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+            self._data = data
+            self._saved_data = deepcopy(data)
 
     @property
     def feature_channel(self) -> str:

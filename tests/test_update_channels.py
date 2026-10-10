@@ -202,7 +202,9 @@ def _run(monkeypatch, tmp_path, args, *, stored=None, new_json='{"version": "9.9
             import sys
 
             return mock.Mock(returncode=0, stdout="sparkrun v1 (%s)\n" % sys.prefix, stderr="")
-        if cmd == [owning_executable(), "setup", "version", "--json"]:
+        if "sparkrun.core.plugin_update" in cmd:
+            return mock.Mock(returncode=0, stdout='{"protocol":1,"host":{"core_version":"0.4.0"},"plugins":[]}', stderr="")
+        if cmd == __import__("sparkrun.cli._self_update", fromlist=["identity_probe_argv"]).identity_probe_argv():
             return mock.Mock(returncode=0, stdout=new_json, stderr="")
         return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -315,8 +317,8 @@ def test_update_noop_does_not_report_a_successful_self_upgrade(monkeypatch, tmp_
     assert event["self_upgrade_attempted"] is True
 
 
-def test_update_noop_skips_the_registry_update_subprocess(monkeypatch, tmp_path):
-    """A no-op update must not spawn `sparkrun registry update` (a full git fetch)."""
+def test_update_noop_refreshes_registries_in_fresh_process(monkeypatch, tmp_path):
+    """A no-op still audits plugins and refreshes registries outside the recovery process."""
     from sparkrun.core.version import installed_identity
 
     current_version = installed_identity()[0]
@@ -324,7 +326,7 @@ def test_update_noop_skips_the_registry_update_subprocess(monkeypatch, tmp_path)
 
     _, calls, _ = _captured_update_event(monkeypatch, tmp_path, ["update"], new_json=same)
 
-    assert [owning_executable(), "registry", "update"] not in calls
+    assert calls.count([owning_executable(), "registry", "update"]) == 1
 
 
 def test_update_with_a_real_upgrade_still_reports_and_shells_out(monkeypatch, tmp_path):
@@ -365,3 +367,22 @@ def test_setup_install_alpha_uses_git_and_persists(monkeypatch, tmp_path):
     installs = [c for c in calls if c[1:3] == ["tool", "install"]]
     assert installs and installs[0][3].endswith("@develop-next")
     assert _stored_channel(tmp_path) == "alpha"
+
+
+@pytest.mark.parametrize("route", [["update"], ["setup", "update", "--no-update-registries"]])
+@pytest.mark.parametrize("optout", [False, True])
+def test_both_update_routes_use_fresh_plugin_reconciliation(monkeypatch, tmp_path, route, optout):
+    result, calls = _run(monkeypatch, tmp_path, [*route, *(["--no-update-plugins"] if optout else [])])
+    assert result.exit_code == 0, result.output
+    helpers = [c for c in calls if "sparkrun.core.plugin_update" in c]
+    assert len(helpers) == 1
+    assert helpers[0][1:5] == ["-m", "sparkrun.core.plugin_update", "--protocol", "1"]
+    assert ("--no-update-plugins" in helpers[0]) is optout
+
+
+@pytest.mark.parametrize("route", [["update"], ["setup", "update", "--no-update-registries"]])
+def test_unverified_core_update_audits_without_repairs(monkeypatch, tmp_path, route):
+    result, calls = _run(monkeypatch, tmp_path, route, new_json="not JSON")
+    assert result.exit_code == 0, result.output
+    helper = next(c for c in calls if "sparkrun.core.plugin_update" in c)
+    assert "--no-update-plugins" in helper

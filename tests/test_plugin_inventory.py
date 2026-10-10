@@ -35,6 +35,7 @@ from sparkrun.core.plugin_inventory import (
     SOURCE_EXTERNAL,
     SOURCE_IN_TREE,
     VERSION_FROM_MODULE,
+    VERSION_FROM_SOURCE,
     list_plugins,
 )
 
@@ -150,13 +151,8 @@ def test_version_is_read_from_the_loaded_module(fake_in_tree):
     assert info.loaded is True
 
 
-def test_an_in_tree_plugin_never_inherits_sparkruns_own_version(fake_in_tree):
-    """The distribution fallback is out-of-tree only.
-
-    Every in-tree plugin's top-level package maps to the ``sparkrun``
-    distribution, so applying the fallback here would report sparkrun's version
-    as the plugin's — a fabricated answer where the honest one is "unknown".
-    """
+def test_an_undeclared_plugin_never_inherits_sparkruns_own_version(fake_in_tree):
+    """Namespace membership alone does not declare a plugin's version."""
     import sparkrun
 
     fake_in_tree("undeclared", "def register(v): pass")
@@ -177,18 +173,18 @@ def test_a_blank_version_attribute_reads_as_unknown(fake_in_tree):
     assert _by_name(list_plugins())["blank"].version is None
 
 
-def test_an_unloaded_plugin_reports_unknown_without_importing(fake_in_tree):
+def test_an_unloaded_plugin_reports_literal_version_without_importing(fake_in_tree):
     """Listing must never import a plugin the user has switched off."""
     fake_in_tree("disabled", "__version__ = '9.9'\n\nraise AssertionError('imported')", flag=False)
 
     info = _by_name(list_plugins())["disabled"]
     assert info.enabled is False
     assert info.loaded is False
-    assert info.version is None
+    assert (info.version, info.version_source) == ("9.9", VERSION_FROM_SOURCE)
     assert "inv_plugins.disabled" not in sys.modules
 
 
-def test_a_version_is_reported_only_for_a_module_we_loaded_as_a_plugin(tmp_path, monkeypatch):
+def test_static_version_comes_from_the_configured_source_not_a_foreign_module(tmp_path, monkeypatch):
     """``sys.modules`` is not the record.
 
     An external plugin's top-level name may be importable for unrelated
@@ -206,7 +202,7 @@ def test_a_version_is_reported_only_for_a_module_we_loaded_as_a_plugin(tmp_path,
 
     info = _by_name(list_plugins(config=config))["inv_ext_stranger"]
     assert info.loaded is False
-    assert info.version is None
+    assert (info.version, info.version_source) == ("1.2.3", VERSION_FROM_SOURCE)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +284,7 @@ def test_the_group_is_functional_even_when_hidden(runner, monkeypatch, fake_in_t
     monkeypatch.setattr(plugins_cli.setup_plugins, "hidden", True)
     fake_in_tree("cli_hidden", "def register(v): pass")
 
-    assert "plugins" not in runner.invoke(main, ["setup", "--help"]).output
+    assert "\n  plugins " not in runner.invoke(main, ["setup", "--help"]).output
     result = runner.invoke(main, ["setup", "plugins", "list"])
     assert result.exit_code == 0, result.output
     assert "cli_hidden" in result.output
@@ -308,6 +304,10 @@ def test_json_output_is_a_bare_array_of_plugin_objects(runner, tmp_path, fake_in
     payload = json.loads(result.output)
     assert isinstance(payload, list)
     row = next(r for r in payload if r["name"] == "cli_json")
+    assert row.pop("managed") is False
+    compatibility = row.pop("compatibility")
+    assert compatibility["status"] == "unknown"
+    assert compatibility["host"]["core_version"]
     assert row == {
         "name": "cli_json",
         "source": SOURCE_IN_TREE,
@@ -389,8 +389,7 @@ def test_features_json_is_a_bare_array_carrying_the_channel(runner):
 
 
 def test_an_enabled_plugin_that_failed_to_import_is_distinguishable(runner, fake_in_tree):
-    """``on`` and ``on (load failed)`` are the diagnostic; collapsing them hides
-    exactly the case someone runs this to find."""
+    """An enabled gate must not hide a recorded loading failure."""
     from sparkrun.cli import main
 
     fake_in_tree("cli_broken", "raise RuntimeError('boom')")
@@ -398,4 +397,123 @@ def test_an_enabled_plugin_that_failed_to_import_is_distinguishable(runner, fake
 
     result = runner.invoke(main, ["setup", "plugins", "list"])
     assert result.exit_code == 0, result.output
-    assert "on (load failed)" in result.output
+    assert "enabled (load failed)" in result.output
+    assert "Load failure:" in result.output
+    assert "boom" in result.output
+    assert "Compatibility:" in result.output
+    assert "missing range" in result.output
+
+
+def test_dynamic_version_remains_unknown_without_execution(fake_in_tree):
+    fake_in_tree("dynamic", "__version__ = str(9)\nraise AssertionError('imported')")
+    info = _by_name(list_plugins())["dynamic"]
+    assert info.version is None
+    assert info.loaded is False
+    assert "inv_plugins.dynamic" not in sys.modules
+
+
+def test_namespace_membership_does_not_grant_bundled_compatibility(tmp_path, monkeypatch):
+    from sparkrun.core.plugin_inventory import PluginInfo
+    from sparkrun.core.plugin_compatibility import HostSnapshot, evaluate_plugin_compatibility, metadata_for_plugin
+    from sparkrun.core.plugin_metadata import bundled_distribution, source_version
+
+    origin = tmp_path / "__init__.py"
+    origin.write_text("from sparkrun import __version__\nSPARKRUN_PLUGIN_API_VERSION = 1\nraise AssertionError('imported')")
+    monkeypatch.setattr("sparkrun.core.managed_plugins.physical_origin", lambda module: origin)
+    plugin = PluginInfo("k8s", SOURCE_IN_TREE, "sparkrun.plugins.k8s", True, False)
+    assert bundled_distribution(plugin.module, origin) is None
+    assert source_version(plugin.module, origin) == (None, None)
+    data = metadata_for_plugin(plugin)
+    assert "requires_sparkrun" not in data
+    assert evaluate_plugin_compatibility(data, HostSnapshot("0.4.0")).status == "unknown"
+
+
+@pytest.mark.parametrize("name", ["k8s", "lil", "oci_relay", "sparkarena"])
+def test_bundled_compatibility_checks_core_python_api_and_dependencies(name, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from sparkrun.core.plugin_inventory import PluginInfo
+    from sparkrun.core.plugin_compatibility import HostSnapshot, evaluate_plugin_compatibility, metadata_for_plugin
+
+    dist = SimpleNamespace(version="0.4.0", metadata={"Requires-Python": ">=3.12"}, requires=["fixture-dep>=2"])
+    monkeypatch.setattr("sparkrun.core.plugin_metadata.distributions.distribution", lambda package: dist)
+    data = metadata_for_plugin(PluginInfo(name, SOURCE_IN_TREE, "sparkrun.plugins." + name, True, False))
+    host = HostSnapshot("0.4.0", python_version="3.12.1", packages={"fixture-dep": "2.0"})
+    assert evaluate_plugin_compatibility(data, host).status == "compatible"
+    for changed, reason in (
+        (replace(host, core_version="0.5.0"), "Sparkrun 0.5.0"),
+        (replace(host, python_version="3.11.0"), "Python 3.11.0"),
+        (replace(host, plugin_api=2), "Plugin API"),
+        (replace(host, packages={}), "Missing dependency: fixture-dep"),
+    ):
+        result = evaluate_plugin_compatibility(data, changed)
+        assert result.status == "incompatible"
+        assert reason in "; ".join(result.reasons)
+    assert evaluate_plugin_compatibility(data, replace(host, core_version=None)).status == "unknown"
+
+
+def test_fresh_cli_reports_bundled_metadata_without_importing_plugins(tmp_path):
+    import os
+    import subprocess
+
+    script = """
+import json
+import sys
+from importlib.metadata import version
+from click.testing import CliRunner
+
+class RejectPluginImports:
+    def find_spec(self, fullname, *args):
+        if fullname.startswith("sparkrun.plugins."):
+            raise AssertionError("Listing imported " + fullname)
+sys.meta_path.insert(0, RejectPluginImports())
+from sparkrun.cli import main
+from sparkrun.core.config import SparkrunConfig
+from sparkrun.core.plugin_update import reconcile_plugins
+from sparkrun.core.in_tree_plugins import BUNDLED_PLUGIN_NAMES
+
+config = sys.argv[1]
+runner = CliRunner()
+text_result = runner.invoke(main, ["plugins", "list"], obj={"config_path": config})
+assert text_result.exit_code == 0, (text_result.output, text_result.exception)
+assert "not checked" not in text_result.output
+assert "enabled" in text_result.output
+assert "disabled" in text_result.output
+for route in (["plugins", "list", "--json"], ["setup", "plugins", "list", "--json"]):
+    result = runner.invoke(main, route, obj={"config_path": config})
+    assert result.exit_code == 0, (result.output, result.exception)
+    rows = {row["name"]: row for row in json.loads(result.output)}
+    for name in BUNDLED_PLUGIN_NAMES:
+        row = rows[name]
+        assert row["version"] == ("0.1.3" if name == "oci_relay" else version("sparkrun")), row
+        assert row["version_source"] == ("source" if name == "oci_relay" else "distribution"), row
+        assert row["compatibility"]["status"] == "compatible", row
+        assert row["package"] == "sparkrun", row
+        assert row["loaded"] is False, row
+    assert rows["k8s"]["enabled"] is True
+    assert rows["lil"]["enabled"] is False
+report = reconcile_plugins(SparkrunConfig(config), update=False)
+assert all(row["compatibility"]["status"] == "compatible" for row in report["plugins"] if row["name"] in BUNDLED_PLUGIN_NAMES)
+assert not any(name.startswith("sparkrun.plugins.") for name in sys.modules)
+print(text_result.output)
+"""
+    config = tmp_path / "config.yaml"
+    config.write_text("features:\n  integration.k8s: true\n  registry.lil: false\n")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SPARKRUN_FEATURE_")}
+    result = subprocess.run([sys.executable, "-c", script, str(config)], capture_output=True, text=True, env=env, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
+def test_invalid_source_compatibility_is_reported_without_crashing(tmp_path):
+    from sparkrun.core.plugin_inventory import PluginInfo
+    from sparkrun.core.plugin_compatibility import HostSnapshot, evaluate_plugin_compatibility, metadata_for_plugin
+
+    package = tmp_path / "invalidmetadata"
+    package.mkdir()
+    (package / "__init__.py").write_text("SPARKRUN_PLUGIN_API_VERSION = 1\nraise AssertionError('imported')")
+    (package / "plugin.toml").write_text("sparkrun = 42\n")
+    plugin = PluginInfo("invalidmetadata", SOURCE_EXTERNAL, "invalidmetadata", True, False, path=tmp_path)
+    result = evaluate_plugin_compatibility(metadata_for_plugin(plugin), HostSnapshot("0.4.0"))
+    assert result.status == "unknown"
+    assert "Invalid Sparkrun compatibility metadata" in "; ".join(result.reasons)

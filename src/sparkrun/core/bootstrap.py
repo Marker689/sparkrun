@@ -250,6 +250,10 @@ def _register_plugins(v: Variables, *, config=None) -> None:
     except Exception:  # noqa: BLE001 - a broken plugin dir must not kill the CLI
         logger.exception("External plugin loading failed")
 
+    from sparkrun.core.managed_plugins import load_managed_plugins
+
+    load_managed_plugins(v, config=config)
+
     from sparkrun.core.installed_plugins import load_installed_plugins
 
     load_installed_plugins(v, config=config)

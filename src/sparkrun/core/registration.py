@@ -125,6 +125,11 @@ def plugin_load_failure(source: tuple[str, str, str | None]) -> str | None:
     return _LOAD_FAILURES.get(source)
 
 
+def record_plugin_load_failure(source: tuple[str, str, str | None], error: BaseException) -> None:
+    """Record a discovery/origin failure before a module can be imported."""
+    _LOAD_FAILURES[source] = format_plugin_failure(error)
+
+
 def clear_plugin_load_failures() -> None:
     _LOAD_FAILURES.clear()
 

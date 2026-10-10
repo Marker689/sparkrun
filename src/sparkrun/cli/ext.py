@@ -159,6 +159,20 @@ class PluggableGroup(click.Group):
     built-in recovery commands remain dispatchable.
     """
 
+    def parse_args(self, ctx, args):
+        # This runs before command resolution (and before eager nested help).
+        # Root options are flags; do not inspect plugin command arguments as
+        # though they were a management route.
+        words = list(args)
+        while words and words[0].startswith("-") and words[0] != "--":
+            words.pop(0)
+        if words[:1] == ["--"]:
+            words.pop(0)
+        ctx.meta["plugin_management"] = bool(
+            words[:1] in (["plugins"], ["update"]) or (words[:1] == ["setup"] and words[1:2] in (["plugins"], ["update"], ["version"]))
+        )
+        return super().parse_args(ctx, args)
+
     def _main_shell_completion(self, *args, **kwargs):
         # Click owns the completion flag and enters this hook before building
         # contexts. Avoid loading an application profile merely to detect TAB.
@@ -171,6 +185,9 @@ class PluggableGroup(click.Group):
         # A command tree can be reused by embedded callers. Its discovery cache
         # must not bypass validation or binding of this invocation's config.
         _bind_application_config(ctx)
+        if ctx.meta.get("plugin_management"):
+            render_command_identity(self)
+            return
         if getattr(self, "_cli_ext_loaded", False):
             return
         # Set before running so the attach pass (which touches .commands, not

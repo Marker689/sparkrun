@@ -1,6 +1,6 @@
 """Enumerate the plugin *modules* sparkrun knows about, loaded or not.
 
-The console-free source behind ``sparkrun setup plugins list``. Bundled and
+The console-free source behind ``sparkrun plugins list``. Bundled and
 directory enumeration use their loaders' discovery helpers; installed rows use
 the installed loader's metadata inventory. Listing does not import plugins or
 invent a separate discovery policy.
@@ -12,28 +12,19 @@ Deliberately *not* every SAF extension — a runtime or
 an executor shipped in core has no version distinct from sparkrun's, and
 ``list-runtimes`` / ``list-executors`` already enumerate those.
 
-**Nothing here imports a plugin.**  Enumeration is directory-level, and a
-version is read only off a module some loader already imported.  So listing is
-safe with a plugin's gate off: the module stays unimported and its version is
-honestly reported as unknown rather than obtained by importing something the
-user has switched off.
-
-Version resolution follows the source:
-
-- Bundled modules use the loaded module's ``__version__``, otherwise unknown.
-- Directory modules use ``__version__`` only from the loaded module at that
-  exact path, otherwise unknown. A matching package name is not provenance.
-- Installed entry points use their owning distribution's metadata version.
-
-A bundled plugin never inherits the host package version: a vendored plugin
-such as SparkRoute has its own version.
+**Nothing here imports a plugin.** Versions come from a previously registered
+module, a literal source declaration, or owning distribution metadata. Bundled
+plugins that explicitly re-export Sparkrun's version use that distribution's
+version; independently versioned plugins keep their own version. Undeclared or
+dynamic versions remain unknown. Directory versions are always attributed to
+the configured path, never a same-named module from elsewhere.
 
 """
 
 from __future__ import annotations
 
 from sparkrun.core.registration import plugin_load_failure
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,6 +41,7 @@ SOURCE_INSTALLED = "installed"
 #: ``version_source`` values (``None`` when the version is unknown).
 VERSION_FROM_MODULE = "module"
 VERSION_FROM_DISTRIBUTION = "distribution"
+VERSION_FROM_SOURCE = "source"
 
 #: The attribute a plugin sets to declare its version.
 VERSION_ATTR = "__version__"
@@ -90,6 +82,8 @@ class PluginInfo:
     selection_source: str | None = None
     failure: str | None = None
     required: bool = False
+    managed: bool = False
+    management: dict = field(default_factory=dict)
 
     @property
     def version_display(self) -> str:
@@ -107,7 +101,7 @@ class PluginInfo:
         and emitting it here would be indistinguishable from a plugin that
         declared "unknown" as its version.
         """
-        return {
+        result = {
             "name": self.name,
             "package": self.package,
             "selected": self.enabled,
@@ -123,19 +117,22 @@ class PluginInfo:
             "version_source": self.version_source,
             "path": str(self.path) if self.path is not None else None,
         }
+        if self.managed:
+            result.update(managed=True, **{key: value for key, value in self.management.items() if key != "metadata"})
+        return result
 
 
 def _module_version(dotted: str, *, path: Path | None = None) -> tuple[str | None, str | None]:
-    """Read ``__version__`` off the module loaded as plugin *dotted*."""
+    """Read a registered version, falling back to the exact source declaration."""
     from sparkrun.core.external_plugins import loaded_plugin_module
 
     module = loaded_plugin_module(dotted, path=path)
-    if module is None:
-        return None, None
     raw = getattr(module, VERSION_ATTR, None)
     if isinstance(raw, str) and raw.strip():
         return raw.strip(), VERSION_FROM_MODULE
-    return None, None
+    from sparkrun.core.plugin_metadata import plugin_origin, source_version
+
+    return source_version(dotted, plugin_origin(dotted, path))
 
 
 def _in_tree_plugins(v: "Variables | None") -> list[PluginInfo]:
@@ -148,6 +145,8 @@ def _in_tree_plugins(v: "Variables | None") -> list[PluginInfo]:
         plugin_application_profile_failure,
     )
 
+    from sparkrun.core.plugin_metadata import bundled_distribution, plugin_origin
+
     out: list[PluginInfo] = []
     for name in iter_in_tree_plugin_names():
         dotted = "%s.%s" % (IN_TREE_PLUGIN_PACKAGE, name)
@@ -159,11 +158,13 @@ def _in_tree_plugins(v: "Variables | None") -> list[PluginInfo]:
         registered = flag is not None and get_feature(flag) is not None
         enabled = flag is not None and registered and feature_gate_enabled(flag, v)
         version, origin = _module_version(dotted)
+        dist = bundled_distribution(dotted, plugin_origin(dotted))
         out.append(
             PluginInfo(
                 name=name,
                 source=SOURCE_IN_TREE,
                 module=dotted,
+                package="sparkrun" if dist is not None else None,
                 enabled=enabled,
                 loaded=loaded_plugin_module(dotted) is not None,
                 feature_flag=flag if registered else None,
@@ -250,7 +251,53 @@ def list_plugins(config: "SparkrunConfig | None" = None, v: "Variables | None" =
         )
         for p in installed_plugin_inventory(config)
     )
+    if config is not None:
+        plugins.extend(_managed_plugins(config))
     return plugins
+
+
+def _managed_plugins(config) -> list[PluginInfo]:
+    from sparkrun.core.managed_plugins import managed_enabled
+    from sparkrun.core.plugin_store import PluginStore
+    from sparkrun.core.external_plugins import loaded_plugin_module
+
+    store = PluginStore(config)
+    config, records = store.snapshot()
+    out = []
+    for name, record in sorted(records.items()):
+        metadata = record["metadata"]
+        path = store.generation_path(name, record["active_generation"])
+        module = loaded_plugin_module(metadata["module"])
+        module_file = getattr(module, "__file__", None)
+        loaded = bool(module_file and Path(module_file).is_relative_to(path))
+        out.append(
+            PluginInfo(
+                name=name,
+                source=SOURCE_EXTERNAL,
+                module=metadata["module"],
+                enabled=managed_enabled(record, config),
+                loaded=loaded,
+                feature_flag=metadata.get("feature") or "core.external_plugins",
+                version=metadata["version"],
+                version_source="receipt",
+                path=path,
+                package=metadata["distribution"],
+                selection_source="managed",
+                managed=True,
+                failure=plugin_load_failure((SOURCE_EXTERNAL, metadata["module"], str(path))),
+                management={
+                    "metadata": metadata,
+                    "source_url": record["source"].get("url"),
+                    "source_ref": record["source"].get("ref"),
+                    "revision": record["revision"],
+                    "active_generation": record["active_generation"],
+                    "previous_generations": record["previous_generations"],
+                    "retain_generations": config.get("plugins.retain_generations", 2),
+                    "cleanup_pending": store.journal.exists(),
+                },
+            )
+        )
+    return out
 
 
 __all__ = [
@@ -261,5 +308,6 @@ __all__ = [
     "VERSION_ATTR",
     "VERSION_FROM_DISTRIBUTION",
     "VERSION_FROM_MODULE",
+    "VERSION_FROM_SOURCE",
     "list_plugins",
 ]

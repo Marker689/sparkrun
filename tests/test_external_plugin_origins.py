@@ -47,7 +47,8 @@ def test_duplicate_directory_names_rejected_before_import(tmp_path, clean_sys, p
     assert v.get("ORIGIN_INDEPENDENT") is True
     rows = [r for r in list_plugins(config, v) if r.name == name]
     assert len(rows) == 2
-    assert all(not r.loaded and r.version is None and "multiple directories" in r.failure for r in rows)
+    assert all(not r.loaded and "multiple directories" in r.failure for r in rows)
+    assert {str(r.path): r.version for r in rows} == {str(path): str(i) for i, path in enumerate(paths, 1)}
 
 
 @pytest.mark.parametrize("package", [False, True])
@@ -58,7 +59,7 @@ def test_loaded_origin_and_version_never_attributed_to_second_directory(tmp_path
     assert load_external_plugins(v, paths=[paths[1]]) == []
     first, second = sorted((r for r in list_plugins(config, v) if r.name == name), key=lambda r: str(r.path))
     assert first.loaded and first.version == "1" and first.failure is None
-    assert not second.loaded and second.version is None and "already imported from outside" in second.failure
+    assert not second.loaded and second.version == "2" and "already imported from outside" in second.failure
     assert v.get("ORIGIN_EXECUTED") == str(paths[0])
     assert load_external_plugins(v, paths=[paths[0]]) == [name]
 
@@ -73,5 +74,6 @@ def test_foreign_preimport_is_not_registered_as_directory_plugin(tmp_path, clean
     assert load_external_plugins(v, paths=[paths[1]]) == []
     assert sys.modules[name] is foreign and v.get("ORIGIN_EXECUTED") is None
     rows = [r for r in list_plugins(config, v) if r.name == name]
-    assert all(not r.loaded and r.version is None for r in rows)
+    assert all(not r.loaded for r in rows)
+    assert {str(r.path): r.version for r in rows} == {str(path): str(i) for i, path in enumerate(paths, 1)}
     assert next(r for r in rows if r.path == paths[1]).failure

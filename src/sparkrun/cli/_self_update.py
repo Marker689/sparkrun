@@ -104,30 +104,40 @@ def update_argv(uv: str, channel: str) -> list[str]:
     return install_argv(uv, channel)
 
 
-def new_binary_identity() -> tuple[str | None, str | None]:
-    """Query the freshly installed binary for ``(version, commit)`` via JSON.
+def owning_interpreter() -> str:
+    """Fresh Python from the tool environment, even after uv replaces it."""
+    return str(Path(sys.prefix) / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
 
-    After a uv reinstall the running process holds stale code, so we shell out
-    to the newly installed on-PATH binary's hidden ``setup version --json``.
-    """
+
+def identity_probe_argv() -> list[str]:
+    # Stdlib metadata only: older hosts may load plugins even for `setup version`.
+    # Pass the package as data, never interpolate it into executable code.
+    script = """import importlib.metadata as m, json, sys
+try:
+    d = m.distribution(sys.argv[1])
+    raw = d.read_text('direct_url.json')
     try:
-        res = subprocess.run(
-            [owning_executable(), "setup", "version", "--json"],
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None, None
-    if res.returncode != 0:
-        return None, None
+        commit = (json.loads(raw or '{}').get('vcs_info') or {}).get('commit_id')
+    except (ValueError, TypeError, AttributeError):
+        commit = None
+    print(json.dumps({'version': d.version, 'commit': commit}))
+except m.PackageNotFoundError:
+    print(json.dumps({'version': None, 'commit': None}))
+"""
+    return [owning_interpreter(), "-c", script, get_application_profile().package]
+
+
+def new_binary_identity() -> tuple[str | None, str | None]:
+    """Read the resulting application's identity without importing host/plugin code."""
     try:
+        res = subprocess.run(identity_probe_argv(), capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            return None, None
         data = json.loads(res.stdout.strip() or "{}")
-    except ValueError:
+        version, commit = data.get("version"), data.get("commit")
+        return version if isinstance(version, str) else None, commit if isinstance(commit, str) else None
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
         return None, None
-    identity = data.get("distribution")
-    if identity is not None and identity.get("id") != get_application_profile().id:
-        return None, None
-    return data.get("version"), data.get("commit")
 
 
 def identity_changed(
@@ -189,3 +199,75 @@ def warn_if_downgrade(current_channel: str, requested_channel: str) -> None:
 def capture_old_identity() -> tuple[str, str | None]:
     """Return the currently-running build's ``(version, commit)`` identity."""
     return installed_identity()
+
+
+def reconcile_plugin_updates(config_path, *, update: bool = True) -> bool:
+    """Run the versioned management helper in the actual resulting interpreter.
+
+    Its code and package metadata belong to the new host. Never fall back to
+    mutating plugins through this process's stale modules after a core install.
+    Returns whether plugin generations changed.
+    """
+    import os
+    from sparkrun.core.application_profile import child_environment
+
+    args = [owning_interpreter(), "-m", "sparkrun.core.plugin_update", "--protocol", "1"]
+    if not update:
+        args.append("--no-update-plugins")
+    try:
+        result = subprocess.run(args, env={**os.environ, **child_environment(config_path=config_path)}, capture_output=True, text=True)
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "host does not support plugin reconciliation")
+        report = json.loads(result.stdout)
+        if report.get("protocol") != 1 or not isinstance(report.get("plugins"), list) or not isinstance(report.get("host"), dict):
+            raise ValueError("host returned an unsupported plugin reconciliation response")
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError, AttributeError) as exc:
+        click.echo("Warning: plugin compatibility audit incomplete; no unverified repairs attempted: %s" % exc, err=True)
+        return False
+    changed = False
+    if report.get("warning"):
+        click.echo("Warning: " + report["warning"], err=True)
+    click.echo("Checking plugin compatibility against Sparkrun %s..." % report["host"].get("core_version", "unknown"))
+    for row in report["plugins"]:
+        outcome = row["outcome"]
+        changed = changed or bool(row.get("update", {}).get("history_pruned"))
+        compatibility = row.get("compatibility_after", row["compatibility"])
+        if outcome in {"updated", "installed", "rolled back"}:
+            changed = True
+            updated = row["update"]
+            click.echo("  %s: %s %s @ %s" % (row["name"], outcome, updated.get("version", ""), updated.get("revision", "")[:12]))
+        elif row.get("managed"):
+            click.echo("  %s: %s" % (row["name"], outcome))
+        if compatibility["status"] != "compatible":
+            click.echo(
+                "Warning: %s compatibility %s: %s" % (row["name"], compatibility["status"], "; ".join(compatibility["reasons"])), err=True
+            )
+        if row.get("error"):
+            click.echo("Warning: %s update failed; installed generation retained: %s" % (row["name"], row["error"]), err=True)
+        if row.get("update", {}).get("warning"):
+            click.echo("Warning: %s" % row["update"]["warning"], err=True)
+    if not update:
+        click.echo("Plugin fetches and updates skipped (--no-update-plugins or failed core update).")
+    if changed:
+        click.echo("Restart long-running plugin consumers; retained history may have been pruned.")
+    return changed
+
+
+def update_registries_after_core(config_path) -> None:
+    """Attempt registry refresh without importing plugins into the recovery command."""
+    import os
+    from sparkrun.core.application_profile import child_environment
+
+    click.echo()
+    click.echo("Updating recipe registries...")
+    try:
+        result = subprocess.run(
+            [owning_executable(), "registry", "update"],
+            env={**os.environ, **child_environment(config_path=config_path)},
+            capture_output=False,
+            timeout=300,
+        )
+        if result.returncode:
+            click.echo("Warning: registry update failed (non-fatal).", err=True)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        click.echo("Warning: registry update failed or timed out (non-fatal): %s" % exc, err=True)

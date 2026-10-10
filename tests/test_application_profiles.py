@@ -160,7 +160,8 @@ def test_channel_strategy_and_update_ownership(monkeypatch, tmp_path):
     assert update.is_uv_tool_install("uv")
     runner.return_value.stdout = '{"version":"1.0", "commit":null, "distribution":{"id":"alternate-test"}}'
     assert update.new_binary_identity() == ("1.0", None)
-    assert runner.call_args.args[0][0] == str(tmp_path / "tool/bin/alternate-test")
+    assert runner.call_args.args[0][0] == str(tmp_path / "tool/bin/python")
+    assert runner.call_args.args[0][-1] == "alternate-test"
 
 
 def test_recipe_identity_and_resource_coexistence():

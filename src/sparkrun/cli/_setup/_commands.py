@@ -183,14 +183,15 @@ def setup_install(ctx, shell, no_update_registries, stable, beta, alpha, yolo):
 
 
 @setup.command("update")
+@click.option("--no-update-plugins", is_flag=True, help="Audit compatibility without fetching or updating plugins")
 @click.option("--no-update-registries", is_flag=True, help="Skip updating recipe registries")
 @click.option("--stable", is_flag=True, help="Switch to and update the stable channel from its configured source")
 @click.option("--beta", is_flag=True, help="Switch to and update the beta channel from its configured source")
 @click.option("--alpha", is_flag=True, help="Switch to and update the alpha channel from its configured source")
 @click.option("--yolo", is_flag=True, help="Alias for --alpha")
 @click.pass_context
-def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo):
-    """Update {app_command} to the latest version.
+def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo, no_update_plugins=False):
+    """Update {app_command} and compatible managed plugins.
 
     Requires {app_command} to have been installed via ``uv tool install``. With no
     channel flag, updates the currently configured channel; a channel flag
@@ -203,7 +204,8 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo):
     import subprocess
 
     from sparkrun.cli._self_update import (
-        owning_executable,
+        update_registries_after_core,
+        reconcile_plugin_updates,
         capture_old_identity,
         channel_from_flags,
         describe_change,
@@ -223,7 +225,9 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo):
     except Exception:
         emit_update_event = None
 
-    config = _get_context(ctx).config
+    from sparkrun.cli._plugins import management_config
+
+    config = management_config(ctx)
     current = config.self_update_channel
     requested = channel_from_flags(stable, beta, alpha, yolo)
     channel = requested if requested is not None else current
@@ -231,10 +235,12 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo):
 
     uv = resolve_uv()
     if not uv:
+        reconcile_plugin_updates(config.config_path, update=False)
         click.echo("Error: uv not found. Install uv first: https://docs.astral.sh/uv/", err=True)
         sys.exit(1)
 
     if not is_uv_tool_install(uv):
+        reconcile_plugin_updates(config.config_path, update=False)
         click.echo(
             f"Error: {get_application_profile().command} was not installed via 'uv tool install'.\n"
             "Cannot safely upgrade — manage updates through your package manager instead.",
@@ -255,6 +261,7 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo):
         text=True,
     )
     if result.returncode != 0:
+        reconcile_plugin_updates(config.config_path, update=False)
         click.echo(f"Error updating {get_application_profile().command}: %s" % result.stderr.strip(), err=True)
         sys.exit(1)
 
@@ -265,17 +272,10 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo):
     new_version = new_identity[0]
     click.echo(describe_change(channel, old_identity, new_identity))
 
-    # Update recipe registries from the newly installed binary — the
-    # running process still has old code, so we must shell out.
+    reconcile_plugin_updates(config.config_path, update=not no_update_plugins and bool(new_identity[0]))
+
     if not no_update_registries:
-        click.echo()
-        click.echo("Updating recipe registries...")
-        reg_result = subprocess.run(
-            [owning_executable(), "registry", "update"],
-            capture_output=False,
-        )
-        if reg_result.returncode != 0:
-            click.echo("Warning: registry update failed (non-fatal).", err=True)
+        update_registries_after_core(config.config_path)
 
     if emit_update_event is not None:
         try:
@@ -308,7 +308,9 @@ def setup_version(ctx, as_json):
 
     from sparkrun.core.version import version_diagnostics
 
-    data = version_diagnostics(_get_context(ctx).config)
+    from sparkrun.cli._plugins import management_config
+
+    data = version_diagnostics(management_config(ctx))
     if as_json:
         click.echo(_json.dumps(data))
         return

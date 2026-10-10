@@ -1,9 +1,129 @@
 # Cross-cutting plugins
 
-`sparkrun.plugins` is the in-tree half of the plugin system; `plugins.paths`
-loads the out-of-tree half. Both register the same way, so a first-party
-integration has no capability an external one lacks. See `CLAUDE.md` for how
-each is discovered.
+Sparkrun loads bundled plugins, managed external plugins, manually configured
+`plugins.paths`, and installed entry-point integrations. They share the same
+registration interfaces. See `CLAUDE.md` for the extension architecture.
+
+## Install and manage external plugins
+
+```sh
+sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin
+sparkrun plugins add https://github.com/sparksq/sparkrun-coldsnap-plugin --enable
+sparkrun plugins list
+sparkrun plugins list --json
+sparkrun plugins update sparkroute
+sparkrun plugins update --all
+sparkrun plugins rollback sparkroute
+sparkrun plugins remove sparkroute
+```
+
+`plugins` alone lists plugins. The hidden `setup plugins` alias remains available
+with identical subcommands. Management commands inspect metadata without loading
+plugins, so they can repair an installation whose plugin fails at import. Use
+`list --check` to additionally check managed plugins in a bounded child process.
+The state column reports the effective feature gate (`enabled` or `disabled`).
+Compatibility is checked on every listing; it does not imply a successful load.
+
+`add` asks you to trust the supplied source before executing its code. Plugins
+run with your permissions. This grants standing consent to future compatible
+updates from that source, including updates during `sparkrun update`. Use
+`--trust` for explicit noninteractive consent. A general `--yes` is not a trust
+grant. Changes to the source's declared module, distribution, package path,
+repository, or capability require renewed consent.
+
+Adding a plugin enables `core.external_plugins` if needed. If that would also
+activate existing `plugins.paths`, their activation needs separate confirmation;
+noninteractive users must review and enable those paths beforehand. The plugin's
+own capability flag keeps its configured/default value unless you pass `--enable`.
+Unknown flags default off. Environment feature overrides and
+`SPARKRUN_NO_EXTERNAL_PLUGINS` still take precedence. Installing ColdSnap does
+not trust the recipe registries it declares; use the separate registry trust flow.
+
+Git sources default to `main`, resolved once to an immutable commit. Select a
+branch, tag, or full commit with `--ref`:
+
+```sh
+sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin --ref main
+sparkrun plugins update sparkroute --ref refs/tags/v0.2.1
+sparkrun plugins add https://github.com/sparksq/sparkrun-coldsnap-plugin --dry-run
+```
+
+Branches track new commits even when the plugin's version string is unchanged.
+Tags and commits are pinned. Explicit updates detect moved tags and refuse them;
+automatic updates leave pins alone. Ambiguous tag/branch names require a fully
+qualified ref. Select managed plugins by their stable name or an unambiguous
+saved source URL. Removing needs confirmation (`--yes` for automation). Dry runs
+may fetch metadata but do not trust, execute, activate, or prune plugins.
+
+This release supports Git source snapshots. Wheel/PyPI acquisition is a separate
+planned phase. Git installs read existing `plugin.toml` and `pyproject.toml` as
+data: no custom registry definition and no build backend execution. They require
+static project metadata, a pure Python package with a literal
+`SPARKRUN_PLUGIN_API_VERSION`, explicit Python and Sparkrun ranges, and dependencies
+already satisfied by the host. Both top-level packages and
+`sparkrun.plugins.<package>` layouts are supported. Symlinks, submodules, compiled
+payloads, conflicting providers, and unsupported layouts are rejected. Package
+resources and declared license files are preserved.
+
+## Updating Sparkrun and compatibility
+
+Both `sparkrun update` and `sparkrun setup update` check every plugin's declared
+compatibility, including disabled and unmanaged plugins. By default they update
+trusted managed plugins to compatible revisions within their saved source/ref
+policy, including repairs for plugins made incompatible by the new core.
+
+```sh
+sparkrun update                      # core, compatible managed plugins, registries
+sparkrun update --no-update-plugins   # local plugin audit only; no plugin fetch/write
+sparkrun setup update --no-update-plugins --no-update-registries
+```
+
+A fresh process checks the resulting core, Python, plugin/profile APIs, and
+installed dependency constraints. Incompatible or unknown candidates and failed
+load tests leave the active plugin intact. Other plugin updates continue after a
+failure. Core-update warnings are nonfatal; an explicit `plugins update` reports
+failure with a nonzero exit status. Unmanaged plugins are audited but never
+modified. Failed core installs or unverifiable resulting identities permit only
+an audit, not repairs. An older core without the reconciliation helper reports
+that the audit is incomplete.
+
+The same compatibility evaluator is used by add, update, rollback, list, and core
+updates. Ordinary startup performs no new version-range/dependency audit or
+network update. Existing feature, plugin API, and application-profile guards
+still apply. Missing declarations are reported as unknown rather than assumed
+compatible. The opt-out does not check whether an update is available.
+
+## Storage and rollback
+
+Managed plugins live beside the active config file, outside Sparkrun's Python
+environment, under `plugins/<name>/<generation>/`. `plugins.yaml` records source
+trust, the exact revision, active generation, and ordered previous generations.
+Changing or reinstalling Sparkrun does not replace these files. Alternate config
+roots keep separate plugin stores.
+
+By default each plugin keeps two generations: current and previous. Configure a
+positive integer in `config.yaml` to change the total retained count:
+
+```yaml
+plugins:
+  retain_generations: 2
+```
+
+`1` disables rollback history. Larger values retain the most recently active
+distinct generations. Updates prune only after activation succeeds. Rollback
+validates the previous payload and swaps it with current without copying; the
+saved source/ref stays unchanged, so a later update may advance it again. Use
+`update --ref` to pin an older revision.
+
+Lowering the limit takes effect across the store at the next successful mutation,
+including a no-op update. Listing, dry runs, startup, and `--no-update-plugins`
+never prune. An interrupted activation is recovered by the next mutating command.
+If deletion fails after commit, the update reports cleanup pending and blocks
+further installation until cleanup succeeds. `remove` deletes manager-owned
+payloads and history even when a plugin cannot load, while preserving capability
+flags, runtime data, and user recipe-registry settings. Long-running plugin
+consumers should be restarted after replacement, rollback, removal, or pruning;
+retained history does not indefinitely preserve files for running processes.
 
 This document covers the seams a *cross-cutting* integration uses — one that is
 not "a runtime" or "an executor" and so has no single extension point of its
@@ -356,26 +476,31 @@ Set `__version__` on your plugin's top-level module or package:
 __version__ = "0.2.0"
 ```
 
-`sparkrun setup plugins list` reports it beside the plugin's source and gate
-state:
+`sparkrun plugins list` reports it beside the plugin's source, gate state,
+and compatibility:
 
 ```
-NAME              VERSION  SOURCE    STATE  FLAG
-oci_relay         0.1.3    in-tree   on     plugins.oci_relay
-sparkrun_thunder  0.2.0    external  off    core.external_plugins
+NAME         VERSION  SOURCE   STATE    COMPATIBILITY  FLAG
+k8s          0.4.0    in-tree  enabled  compatible     integration.k8s
+lil          0.4.0    in-tree  enabled  compatible     registry.lil
+oci_relay    0.1.3    in-tree  enabled  compatible     plugins.oci_relay
+sparkarena   0.4.0    in-tree  enabled  compatible     integration.arena
 ```
 
-It is optional, and a plugin that declares nothing is reported `unknown` rather
-than being given a version it did not claim. Two consequences of that rule:
+Versions come from registered modules or literal source declarations, without
+importing plugin code. Bundled integrations that explicitly re-export
+Sparkrun's version (k8s, lil, and sparkarena) report the installed core version.
+Independently versioned plugins such as OCI Relay keep their declared version.
+Undeclared or dynamic versions remain `unknown`. Directory versions come from
+the exact configured source, never a same-named module from another directory.
+Installed entry-point rows use their owning distribution's metadata version.
 
-- **Directory versions require matching source provenance.** Only the loaded
-  module at that configured directory supplies its `__version__`; a same-named
-  installed package does not supply a fallback. Installed entry-point rows use
-  their owning package's metadata version. Bundled modules use their declared
-  version, never the host package version.
-- **Listing never imports a plugin for its version.** An unattempted or failed
-  source has an unknown module version. A previously loaded source can still
-  report its version after its gate is disabled.
+Release-owned bundled plugins are checked against their owning Sparkrun release,
+its Python and dependency requirements, and the plugin API declaration. An
+arbitrary package under `sparkrun.plugins` does not inherit that compatibility.
+These checks use the same evaluator as external plugins and `sparkrun update`.
+Incompatible or unknown results are explained after the complete table in a
+plugin diagnostics section, grouped by plugin with one reason per line.
 
 Duplicate top-level module names in different configured plugin directories are
 rejected before those modules are imported. Unambiguous plugins still load. A
@@ -384,10 +509,10 @@ use distinct module names or separate application processes. Inventory attribute
 loaded status and version to the actual source path and retains each rejected
 source's diagnostic. Listing itself does not import plugins.
 
-The `STATE` column separates the gate from the outcome. `on (load failed)`
-means the flag resolves on but the import raised — run with `-v` for the
-traceback. `off` means the plugin was never imported at all, which is the
-point of the gate.
+The `STATE` column shows `enabled` or `disabled`; a recorded loading failure
+appears as `enabled (load failed)` with its diagnostic after the table. A disabled
+plugin may still have been loaded earlier in the process. JSON reports `loaded`
+separately; metadata compatibility does not execute a runtime load test.
 
 `--json` emits the same rows as an array, where an unknown version is `null`
 rather than the string `"unknown"` — the latter is a display rendering, and

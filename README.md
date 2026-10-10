@@ -64,7 +64,7 @@ See the [full CLI reference](https://sparkrun.dev/cli/overview/) for all command
 sparkrun update
 ```
 
-Upgrades sparkrun (when installed via `uv tool`) and refreshes recipe registries.
+Upgrades sparkrun (when installed via `uv tool`), applies compatible updates to trusted managed plugins, and refreshes recipe registries. Use `--no-update-plugins` for a local plugin compatibility audit without plugin updates. See [plugin management](docs/PLUGINS.md#install-and-manage-external-plugins).
 
 ### Update channels (advanced)
 

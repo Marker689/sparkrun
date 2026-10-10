@@ -5468,10 +5468,9 @@ class TestUpdateCommand:
     def test_update_no_uv(self, runner, monkeypatch):
         """update skips self-upgrade when uv is not on PATH and runs registry update."""
         monkeypatch.setattr("shutil.which", lambda name: None)
-        with mock.patch("sparkrun.cli._registry.registry_update") as mock_reg:
-            # Make the Click command callable via ctx.invoke by wrapping
-            mock_reg.return_value = None
+        with mock.patch("sparkrun.cli._self_update.update_registries_after_core") as mock_reg:
             result = runner.invoke(main, ["update"])
+            mock_reg.assert_called_once()
         assert result.exit_code == 0
         assert "uv not found" in result.output
 
@@ -5502,7 +5501,7 @@ class TestUpdateCommand:
                 return mock.Mock(returncode=0, stdout="sparkrun v1.0.0 (%s)\n" % __import__("sys").prefix, stderr="")
             if cmd[1:3] == ["tool", "upgrade"]:
                 return mock.Mock(returncode=0, stdout="", stderr="")
-            if cmd == [str(Path(__import__("sys").prefix) / "bin" / "sparkrun"), "setup", "version", "--json"]:
+            if cmd == __import__("sparkrun.cli._self_update", fromlist=["identity_probe_argv"]).identity_probe_argv():
                 return mock.Mock(
                     returncode=0,
                     stdout='{"version": "1.1.0", "channel": "stable", "commit": null}',

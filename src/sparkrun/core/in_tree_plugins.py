@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 #: Package scanned for first-party plugin subpackages.
 IN_TREE_PLUGIN_PACKAGE = "sparkrun.plugins"
 
+#: Plugins shipped and tested with this Sparkrun release. Namespace membership
+#: alone is not ownership: separately installed plugins can live there too.
+BUNDLED_PLUGIN_NAMES = frozenset({"k8s", "lil", "oci_relay", "sparkarena"})
+
 #: In-tree plugin module name -> the feature flag gating it.
 #:
 #: Adding a plugin means adding an entry here. Kept as data rather than read

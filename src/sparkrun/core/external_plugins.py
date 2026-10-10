@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING
 from scitrera_app_framework import ext_parse_bool, register_plugin
 from scitrera_app_framework.util import find_types_in_modules
 
-from sparkrun.core.features import FEATURE_CORE_EXTERNAL_PLUGINS, feature_gate_enabled
+from sparkrun.core.features import FEATURE_CORE_EXTERNAL_PLUGINS
 
 if TYPE_CHECKING:
     from scitrera_app_framework import Variables
@@ -290,10 +290,20 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
         if _external_plugins_disabled():
             logger.debug("External plugin auto-load disabled via %s", _DISABLE_ENV)
             return []
-        if not feature_gate_enabled(FEATURE_CORE_EXTERNAL_PLUGINS.name, v):
+        from sparkrun.core.config import SparkrunConfig, resolve_config_path
+        from sparkrun.core.plugin_store import PluginStore
+        from sparkrun.core.plugin_manifest import PluginError
+        from sparkrun.core.features import is_feature_enabled
+
+        try:
+            config, _records = PluginStore(SparkrunConfig(resolve_config_path(v))).snapshot()
+        except PluginError as exc:
+            logger.warning("External plugin loading deferred: %s", exc)
+            return []
+        if not is_feature_enabled(FEATURE_CORE_EXTERNAL_PLUGINS.name, config=config):
             logger.debug("External plugin auto-load disabled (feature %r off)", FEATURE_CORE_EXTERNAL_PLUGINS.name)
             return []
-        paths = _configured_paths(v)
+        paths = config.external_plugin_paths
 
     # Inspect all candidates before imports so duplicate module names cannot
     # silently select one directory through sys.modules or sys.path precedence.

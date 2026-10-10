@@ -13,7 +13,7 @@ from ._common import (
     REGISTRY_NAME,
     RUNTIME_NAME,
     _setup_logging,
-    _get_context,
+    _get_context as _get_context,
     install_termination_handlers,
     dry_run_option,
     host_options,
@@ -28,9 +28,10 @@ from ._export import export
 from ._proxy import proxy
 from . import _proxy_systemd as _proxy_systemd  # noqa: E402, F401  — registers `proxy systemd`
 from ._recipe import recipe, recipe_list, recipe_search, recipe_show
-from ._registry import registry, registry_update
+from ._registry import registry, registry_update as registry_update
 from ._run import run
 from ._setup import setup
+from ._plugins import plugins
 from ._stop_logs import logs_cmd, stop
 from ._tune import tune
 
@@ -86,6 +87,7 @@ main.add_command(model_cache)
 main.add_command(stop)
 main.add_command(logs_cmd)
 main.add_command(setup)
+main.add_command(plugins)
 main.add_command(tune)
 main.add_command(cluster)
 main.add_command(adv)
@@ -160,26 +162,28 @@ def status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json):
 
 
 @main.command("update")
+@click.option("--no-update-plugins", is_flag=True, help="Audit compatibility without fetching or updating plugins")
 @click.option("--stable", is_flag=True, help="Switch to and update the stable channel from its configured source")
 @click.option("--beta", is_flag=True, help="Switch to and update the beta channel from its configured source")
 @click.option("--alpha", is_flag=True, help="Switch to and update the alpha channel from its configured source")
 @click.option("--yolo", is_flag=True, help="Alias for --alpha")
 @click.pass_context
-def update(ctx, stable, beta, alpha, yolo):
-    """Update {app_command} and recipe registries.
+def update(ctx, stable, beta, alpha, yolo, no_update_plugins=False):
+    """Update {app_command}, managed plugins, and recipe registries.
 
     Attempts to upgrade {app_command} via uv if it was installed that way, then
     always updates recipe registries from git. With no channel flag, updates
     the currently configured channel; a channel flag switches channels.
 
     If {app_command} was not installed via uv (e.g. pip, pipx, editable
-    install), the self-upgrade step is skipped and only registries
-    are updated.
+    install), the self-upgrade step is skipped; compatible managed plugins
+    and registries are still updated.
     """
     import subprocess
 
     from sparkrun.cli._self_update import (
-        owning_executable,
+        update_registries_after_core,
+        reconcile_plugin_updates,
         capture_old_identity,
         channel_from_flags,
         describe_change,
@@ -200,8 +204,9 @@ def update(ctx, stable, beta, alpha, yolo):
     except Exception:
         emit_update_event = None
 
-    sctx = _get_context(ctx)
-    config = sctx.config
+    from sparkrun.cli._plugins import management_config
+
+    config = management_config(ctx)
     current = config.self_update_channel
     requested = channel_from_flags(stable, beta, alpha, yolo)
     channel = requested if requested is not None else current
@@ -211,6 +216,8 @@ def update(ctx, stable, beta, alpha, yolo):
     old_version = old_identity[0]
     new_version: str | None = old_version
     self_upgrade_attempted = False
+    core_identity_verified = True
+    core_update_failed = False
 
     # --- Step 1: Try self-upgrade via uv (best-effort) ---
     uv = resolve_uv()
@@ -229,15 +236,16 @@ def update(ctx, stable, beta, alpha, yolo):
         if result.returncode == 0:
             config.set_self_update_channel(channel)
             new_identity = new_binary_identity()
+            core_identity_verified = bool(new_identity[0])
             new_version = new_identity[0] or new_version
             click.echo(describe_change(channel, old_identity, new_identity))
             # A zero exit only says uv ran: `uv tool upgrade` exits 0 on "Nothing to
             # upgrade", and git channels reinstall with --force every time. Keying
             # `upgraded` off the exit code therefore reported every no-op update as a
-            # successful self-upgrade *and* spawned a needless `sparkrun registry
-            # update` subprocess (a full git fetch of every registry) below.
+            # successful self-upgrade. Compare identities for reporting/telemetry.
             upgraded = identity_changed(channel, old_identity, new_identity)
         else:
+            core_update_failed = True
             click.echo(f"Warning: {get_application_profile().command} upgrade failed: %s" % result.stderr.strip(), err=True)
             click.echo("Continuing with registry update...", err=True)
     elif uv:
@@ -245,21 +253,11 @@ def update(ctx, stable, beta, alpha, yolo):
     else:
         click.echo("uv not found — skipping self-upgrade.")
 
-    # --- Step 2: Always update registries ---
-    if upgraded:
-        # After uv upgrade, the running process has stale code — shell out
-        # to the newly installed binary for registry update.
-        click.echo()
-        click.echo("Updating recipe registries...")
-        reg_result = subprocess.run(
-            [owning_executable(), "registry", "update"],
-            capture_output=False,
-        )
-        if reg_result.returncode != 0:
-            click.echo("Warning: registry update failed.", err=True)
-    else:
-        click.echo()
-        ctx.invoke(registry_update)
+    reconcile_plugin_updates(config.config_path, update=not no_update_plugins and not core_update_failed and core_identity_verified)
+
+    # Registry refresh also needs the resulting environment and may load plugins.
+    # Keep that execution out of the recovery command, including no-op updates.
+    update_registries_after_core(config.config_path)
 
     if emit_update_event is not None:
         try:

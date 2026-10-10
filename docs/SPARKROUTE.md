@@ -1,18 +1,23 @@
 # Optional SparkRoute integration
 
-SparkRoute is not bundled with Sparkrun. Install and update the plugin separately
-using the [SparkRoute plugin instructions](https://github.com/sparksq/sparkrun-sparkroute-plugin).
+SparkRoute is not bundled with Sparkrun. Its source and releases are documented in the [SparkRoute plugin instructions](https://github.com/sparksq/sparkrun-sparkroute-plugin).
 ColdSnap is also distributed separately through its
 [plugin repository](https://github.com/sparksq/sparkrun-coldsnap-plugin).
 OCI Relay remains bundled with Sparkrun.
 
+Managed plugins live outside the Sparkrun installation and receive compatible
+updates during `sparkrun update` by default. Install ColdSnap with
+`sparkrun plugins add https://github.com/sparksq/sparkrun-coldsnap-plugin --enable`.
+See [plugin management](PLUGINS.md#install-and-manage-external-plugins) for source
+trust, pins, `--no-update-plugins`, and rollback.
+
 ## Choose SparkRoute
 
 LiteLLM is the default gateway on stable, beta, and alpha. After installing a
-compatible SparkRoute plugin in the Python environment running Sparkrun:
+compatible SparkRoute plugin, select it explicitly:
 
 ```sh
-sparkrun setup features enable gateway.sparkroute
+sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin --enable
 sparkrun proxy start --gateway sparkroute --host 127.0.0.1
 ```
 
