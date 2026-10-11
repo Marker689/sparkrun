@@ -154,6 +154,7 @@ def list_clusters(*, sctx: SparkrunContext | None = None) -> list[CatalogCluster
             "name": cluster.name,
             "description": cluster.description or "",
             "host_count": len(cluster.hosts),
+            "hosts": list(cluster.hosts),
             "default": cluster.name == default,
         }
         for cluster in manager.list_clusters()

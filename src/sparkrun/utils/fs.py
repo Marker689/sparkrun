@@ -46,11 +46,27 @@ def atomic_private_write(path: str | os.PathLike, content: str, *, overwrite: bo
     fd, temporary = tempfile.mkstemp(prefix=".%s." % path.name, dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            if os.name == "nt":
+                from sparkrun.utils.windows import secure_path
+
+                secure_path(temporary)
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
         if overwrite:
-            os.replace(temporary, path)
+            # On Windows a concurrent reader can briefly deny replacement.
+            # Preserve atomic publication; never fall back to truncating in place.
+            import time
+
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    os.replace(temporary, path)
+                    break
+                except PermissionError as exc:
+                    if os.name != "nt" or getattr(exc, "winerror", None) not in {5, 32} or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
         else:
             try:
                 os.link(temporary, path)
@@ -62,7 +78,7 @@ def atomic_private_write(path: str | os.PathLike, content: str, *, overwrite: bo
 
 
 @contextmanager
-def file_lock(path):
+def file_lock(path, *, blocking=True):
     """Hold an exclusive process lock; retain the lock file after release.
 
     Callers handle reentrancy. The separate inode remains stable when the data
@@ -74,11 +90,24 @@ def file_lock(path):
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            import time
+
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    import errno
+
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    if not blocking:
+                        raise BlockingIOError("Lock is already held") from exc
+                    time.sleep(0.05)
         else:
             import fcntl
 
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:

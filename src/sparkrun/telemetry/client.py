@@ -38,6 +38,10 @@ def prepare_event(config: SparkrunConfig, event: TelemetryEvent) -> TelemetryEve
         "sparkrun_version": __version__,
     }
     envelope.update(event)
+    from sparkrun.core.operation import CURRENT
+
+    operation = CURRENT.get()
+    envelope["via_daemon"] = bool(operation is not None and operation.via_daemon)
     return envelope
 
 

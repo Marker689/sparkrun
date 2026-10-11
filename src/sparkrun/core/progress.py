@@ -185,6 +185,9 @@ class LaunchProgress:
 
         Emits ``[N/6] Label`` at PROGRESS level (always visible).
         """
+        from sparkrun.core.operation import emit
+
+        emit("progress", stage="phase", phase=num, message=label or PHASE_LABELS.get(num, str(num)))
         if self._current_phase is not None:
             self._auto_close_phase()
         self._current_phase = num
@@ -204,6 +207,9 @@ class LaunchProgress:
         runtimes call :meth:`step` without ever calling :meth:`step_done`,
         so the phase boundary is what ends the last step.
         """
+        from sparkrun.core.operation import emit
+
+        emit("progress", stage="phase_end")
         if self._phase_t0 is not None:
             dt = elapsed if elapsed is not None else (time.monotonic() - self._phase_t0)
             self._log.log(PROGRESS, "  done (%.1fs)", dt)
@@ -219,6 +225,9 @@ class LaunchProgress:
 
         Always emits a single line so phase numbering stays continuous.
         """
+        from sparkrun.core.operation import emit
+
+        emit("progress", stage="phase_skip", phase=num, reason=reason)
         label = PHASE_LABELS.get(num, "Phase %d" % num)
         suffix = " (%s)" % reason if reason else ""
         if self.timeline is not None:
@@ -238,6 +247,9 @@ class LaunchProgress:
         Returns ``time.monotonic()`` so callers can pass it to
         :meth:`step_done` for elapsed-time reporting.
         """
+        from sparkrun.core.operation import emit
+
+        emit("progress", stage="step", message=label)
         self._step_current += 1
         if self.timeline is not None:
             # A step ends when the next one begins; runtimes never call
@@ -264,7 +276,10 @@ class LaunchProgress:
 
     def step_done(self, t0: float) -> None:
         """Optionally log elapsed time for the most recent step (detail level)."""
+        from sparkrun.core.operation import emit
+
         dt = time.monotonic() - t0
+        emit("progress", stage="step_done", elapsed=dt)
         if self.timeline is not None and self._step_span is not None:
             self.timeline.end(self._step_span)
             self._step_span = None

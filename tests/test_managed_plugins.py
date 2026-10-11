@@ -610,3 +610,23 @@ def test_rollback_preserves_pin_and_update_restores_it(repository, manager, pin_
     assert state(manager)["revision"] == target
     assert state(manager)["source"] == pinned
     assert len(generations(manager)) == 2
+
+
+def test_live_generation_lease_defers_eviction_without_exceeding_retention(repository, manager):
+    from sparkrun.core.runtime_lease import runtime_lease
+
+    root, commit, _ = repository
+    first = manager.add(str(root), trust=True)["generation"]
+    with runtime_lease(manager.config, kind="test-daemon"):
+        commit("1.1")
+        second = manager.update("managedfixture")["generation"]
+        assert generations(manager) == sorted([first, second])
+        commit("1.2")
+        with pytest.raises(PluginError, match="in use"):
+            manager.update("managedfixture")
+        assert state(manager)["active_generation"] == second
+        assert generations(manager) == sorted([first, second])
+        with pytest.raises(PluginError, match="in use"):
+            manager.remove("managedfixture")
+    third = manager.update("managedfixture")["generation"]
+    assert generations(manager) == sorted([second, third])

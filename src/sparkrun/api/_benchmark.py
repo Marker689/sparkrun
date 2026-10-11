@@ -6,6 +6,8 @@ Terminal presentation is supplied by the CLI adapter.
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 from sparkrun.benchmarking._measurement import (
     capture_launch_context,
     persist_measurement_context,
@@ -1643,6 +1645,7 @@ def _resume_benchmark(
         return _notify_complete(result, emitter)
 
 
+@operation_boundary(mutation=True)
 def resume_benchmark(
     benchmark_id: str,
     *,
@@ -2022,6 +2025,7 @@ def _resume_locked(
 # ---------------------------------------------------------------------------
 
 
+@operation_boundary(mutation=True)
 def benchmark(
     options: BenchmarkOptions,
     *,

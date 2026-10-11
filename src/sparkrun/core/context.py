@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from scitrera_app_framework import Variables
 
     from sparkrun.core.cluster_manager import ClusterDefinition, ClusterManager
+    from sparkrun.core.operation import OperationState
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.core.progress import LaunchProgress
     from sparkrun.core.registry import RegistryManager
@@ -31,6 +32,8 @@ class SparkrunContext:
     config: SparkrunConfig
     verbose: bool = False
     progress: LaunchProgress | None = None
+    events: Callable[[dict], None] | None = None
+    operation: OperationState | None = None
     timing: Timeline | None = None
     """Optional span collector spanning more than one launch.
 

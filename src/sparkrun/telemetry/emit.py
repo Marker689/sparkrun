@@ -10,9 +10,19 @@ from sparkrun.core.config import SparkrunConfig
 from .benchmark import build_benchmark_event
 from .client import send_event
 from .config import telemetry_enabled
-from .events import build_run_event, build_setup_wizard_event, build_update_event
+from .events import build_daemon_serve_event, build_run_event, build_setup_wizard_event, build_update_event
 
 logger = logging.getLogger(__name__)
+
+
+def emit_daemon_serve_telemetry(config: SparkrunConfig, **details) -> None:
+    """Best-effort, once-per-start readiness event using the usual policy."""
+    try:
+        if not telemetry_enabled(config):
+            return
+        send_event(config, build_daemon_serve_event(**details))
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK
+        logger.debug("Failed to emit daemon serving telemetry", exc_info=True)
 
 
 def emit_update_event(

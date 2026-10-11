@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -671,7 +673,8 @@ class LlamaCppRuntime(RuntimePlugin):
                         env=ctx.env_for_host(host),
                         detached=True,
                     )
-                    future = pool.submit(
+                    future = _operation_submit(
+                        pool,
                         run_remote_script,
                         host,
                         exec_script,

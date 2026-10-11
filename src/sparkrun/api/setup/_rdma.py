@@ -23,6 +23,8 @@ Three things here are policy rather than mechanism, and each is deliberate:
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import logging
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
@@ -414,7 +416,8 @@ def _run_round(
     a printed table alone does not certify that the transfer completed.
     """
     with ThreadPoolExecutor(max_workers=2) as pool:
-        server_fut = pool.submit(
+        server_fut = _operation_submit(
+            pool,
             _run_commands,
             server_host,
             server_cmds,
@@ -423,7 +426,8 @@ def _run_round(
             timeout=timeout,
             retries=0,
         )
-        client_fut = pool.submit(
+        client_fut = _operation_submit(
+            pool,
             _run_commands,
             client_host,
             client_cmds,
@@ -633,7 +637,7 @@ def _run_pairs(
                     if busy.intersection(pair.key):
                         continue
                     busy.update(pair.key)
-                    active[pool.submit(copy_context().run, run_pair, pair)] = pair
+                    active[_operation_submit(pool, copy_context().run, run_pair, pair)] = pair
                     pending.remove(pair)
                 if pending:
                     # Preserve matching priority: later pairs must not steal

@@ -8,6 +8,8 @@ job — these functions take an already-resolved ``host_list`` + ``ssh_kwargs``
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 import logging
 from dataclasses import dataclass
 
@@ -143,6 +145,7 @@ def _resolve_settings(sctx: SparkrunContext, *, tag: str | None, ephemeral: bool
 # ---------------------------------------------------------------------------
 
 
+@operation_boundary(mutation=True)
 def join(
     sctx: SparkrunContext,
     host_list: list[str],
@@ -252,6 +255,7 @@ def status(sctx: SparkrunContext, host_list: list[str], ssh_kwargs: dict) -> Sta
 # ---------------------------------------------------------------------------
 
 
+@operation_boundary(mutation=True)
 def expose(
     sctx: SparkrunContext,
     *,
@@ -364,6 +368,7 @@ def _expose_head(sctx: SparkrunContext, head_host: str, ssh_kwargs: dict, *, por
 # ---------------------------------------------------------------------------
 
 
+@operation_boundary(mutation=True)
 def down(
     sctx: SparkrunContext,
     host_list: list[str],

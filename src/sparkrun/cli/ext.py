@@ -168,8 +168,10 @@ class PluggableGroup(click.Group):
             words.pop(0)
         if words[:1] == ["--"]:
             words.pop(0)
+        ctx.meta["daemon_management"] = words[:1] == ["daemon"]
         ctx.meta["plugin_management"] = bool(
-            words[:1] in (["plugins"], ["update"]) or (words[:1] == ["setup"] and words[1:2] in (["plugins"], ["update"], ["version"]))
+            words[:1] in (["plugins"], ["update"], ["daemon"])
+            or (words[:1] == ["setup"] and words[1:2] in (["plugins"], ["update"], ["version"]))
         )
         return super().parse_args(ctx, args)
 
@@ -184,7 +186,8 @@ class PluggableGroup(click.Group):
 
         # A command tree can be reused by embedded callers. Its discovery cache
         # must not bypass validation or binding of this invocation's config.
-        _bind_application_config(ctx)
+        if not ctx.meta.get("daemon_management"):
+            _bind_application_config(ctx)
         if ctx.meta.get("plugin_management"):
             render_command_identity(self)
             return

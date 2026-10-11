@@ -48,6 +48,20 @@ def _search_recipes(ctx, query, *, registry, runtime, show_all, unique_names=Fal
         # back empty; search_recipes resolves again internally, which keeps it
         # safe to call without any pre-resolution.
         scoped_registry, remaining_query = api.resolve_recipe_filter(query, registry=registry, sctx=sctx)
+        from sparkrun.daemon.passthrough import query as daemon_query
+
+        handled, remote = daemon_query(
+            "search_recipes",
+            {
+                "query": query,
+                "registry": registry,
+                "runtime": runtime,
+                "include_hidden": show_all,
+                "unique_names": unique_names,
+            },
+        )
+        if handled:
+            return remote, scoped_registry, remaining_query
         recipes = api.search_recipes(
             query,
             registry=registry,

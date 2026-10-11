@@ -7,6 +7,8 @@ their particular launch and teardown flows.
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import logging
 from typing import TYPE_CHECKING
 
@@ -526,7 +528,8 @@ def cleanup_containers_by_host(
     results: dict[str, RemoteResult] = {}
     with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(host_containers), max_workers)) as pool:
         futures = {
-            pool.submit(
+            _operation_submit(
+                pool,
                 run_command_on_host,
                 host,
                 executor.teardown_script(names),

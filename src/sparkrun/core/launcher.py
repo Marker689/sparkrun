@@ -2549,7 +2549,7 @@ class ReadinessWatcher:
         return self.readiness
 
 
-def post_launch_lifecycle(
+def complete_post_launch(
     result: LaunchResult,
     remote_cache_dir: str,
     trust: bool = False,
@@ -2557,7 +2557,8 @@ def post_launch_lifecycle(
     progress: LaunchProgress | None = None,
     *,
     readiness: ServeReadiness | None = None,
-) -> None:
+    report=None,
+) -> bool:
     """Run post-serve lifecycle: port polling, health checks, hooks, conditional stop.
 
     Called after a successful detached launch when recipe defines post_exec or post_commands.
@@ -2576,9 +2577,7 @@ def post_launch_lifecycle(
         dry_run: Show what would be done without executing.
         readiness: A completed readiness check to reuse instead of probing again.
     """
-    import sys
-
-    import click
+    report = report or (lambda message, **kwargs: logger.info(message))
 
     from sparkrun.orchestration.hooks import (
         build_hook_context,
@@ -2601,7 +2600,7 @@ def post_launch_lifecycle(
     _ssh_kw = build_ssh_kwargs(config)
 
     if readiness is None:
-        click.echo("Waiting for server to become ready...")
+        report("Waiting for server to become ready...")
         readiness = wait_for_serve_ready(result, ssh_kwargs=_ssh_kw, dry_run=dry_run)
     head_host = readiness.head_host
     head_ip = readiness.head_ip
@@ -2610,12 +2609,12 @@ def post_launch_lifecycle(
 
     if not readiness.ready:
         if readiness.reason == "port":
-            click.echo("Error: Server port %d never became ready" % effective_port, err=True)
+            report("Error: Server port %d never became ready" % effective_port, err=True)
         elif readiness.reason == "inference":
-            click.echo("Error: Server did not pass streaming inference readiness", err=True)
+            report("Error: Server did not pass streaming inference readiness", err=True)
         else:
-            click.echo("Error: Server health check never passed at %s" % readiness.health_url, err=True)
-        sys.exit(1)
+            report("Error: Server health check never passed at %s" % readiness.health_url, err=True)
+        raise RuntimeError("Post-launch readiness or hooks failed")
 
     config_chain = recipe.build_config_chain(overrides)
 
@@ -2653,7 +2652,7 @@ def post_launch_lifecycle(
     try:
         # Run post_exec inside head container
         if recipe.post_exec:
-            click.echo("Running post_exec commands...")
+            report("Running post_exec commands...")
             run_post_exec(
                 head_host,
                 head_container,
@@ -2668,23 +2667,38 @@ def post_launch_lifecycle(
 
         # Run post_commands on control machine
         if recipe.post_commands:
-            click.echo("Running post_commands on control machine...")
+            report("Running post_commands on control machine...")
             run_post_commands(recipe.post_commands, hook_context, dry_run=dry_run, trust=_is_trusted, launch_context=launch_context)
     except RuntimeError as e:
-        click.echo("Error in post hooks: %s" % e, err=True)
-        sys.exit(1)
+        report("Error in post hooks: %s" % e, err=True)
+        raise RuntimeError("Post-launch readiness or hooks failed") from e
 
-    click.echo("Post hooks completed successfully.")
+    report("Post hooks completed successfully.")
     if p:
         p.phase_end()
 
     # If stop_after_post, stop the workload and exit
     if recipe.stop_after_post:
-        click.echo("Stopping workload (stop_after_post=true)...")
+        report("Stopping workload (stop_after_post=true)...")
         runtime.stop(
             hosts=host_list,
             cluster_id=result.cluster_id,
             config=config,
             dry_run=dry_run,
         )
+        return True
+
+    return False
+
+
+def post_launch_lifecycle(result, remote_cache_dir, trust=False, dry_run=False, progress=None, *, readiness=None):
+    """Legacy CLI renderer around console-free post-launch orchestration."""
+    import click
+    import sys
+
+    try:
+        stopped = complete_post_launch(result, remote_cache_dir, trust, dry_run, progress, readiness=readiness, report=click.echo)
+    except RuntimeError:
+        sys.exit(1)
+    if stopped:
         sys.exit(0)

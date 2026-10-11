@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import re
 import socket
 import sys
@@ -199,7 +201,7 @@ def _run_on_hosts(
         return
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_one, h) for h in hosts]
+        futures = [_operation_submit(pool, _one, h) for h in hosts]
         for fut in as_completed(futures):
             yield fut.result()
 

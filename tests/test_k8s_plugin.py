@@ -107,7 +107,10 @@ def _assert_policy(data, *, enabled):
         assert data["plugin"]["version"] == __version__
     else:
         assert "integration.k8s" in data["error"]
-        assert data["plugin"]["version"] is None
+        from sparkrun import __version__
+
+        # Static release metadata is available even when the plugin is gated off.
+        assert data["plugin"]["version"] == __version__
 
 
 @pytest.mark.parametrize("application", ["sparkrun", "alternate"])

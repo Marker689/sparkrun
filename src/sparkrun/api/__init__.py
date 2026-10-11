@@ -244,3 +244,18 @@ __all__ = [
     "benchmark",
     "resume_benchmark",
 ]
+
+from sparkrun.api import model_cache
+from sparkrun.api._lifecycle import wait_ready, post_launch, discover_endpoints
+from sparkrun.api._clusters import create_cluster, update_cluster, delete_cluster, set_default_cluster
+
+__all__ += [
+    "model_cache",
+    "wait_ready",
+    "post_launch",
+    "discover_endpoints",
+    "create_cluster",
+    "update_cluster",
+    "delete_cluster",
+    "set_default_cluster",
+]

@@ -35,6 +35,19 @@ dependencies = [
     "packaging==26.0", # PEP 440 comparison for recipe minimum core versions
     "huggingface-hub==1.8.0",
     "textual==8.2.5",
+    "fastapi==0.143.0",
+    "uvicorn==0.54.0",
+    "starlette==1.7.0",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "anyio==4.12.1",
+    "h11==0.16.0",
+    "annotated-types==0.8.0",
+    "typing-inspection==0.4.4",
+    "opentelemetry-api==1.45.1",
+    "psutil==7.2.2", # portable process creation identities and descendant cleanup
+    "pywin32==312; sys_platform == 'win32'", # native ACLs and worker Job Objects
+
 ]
 
 [project.optional-dependencies]
@@ -100,6 +113,7 @@ dev = [
     "pytest-timeout>=2.4",
     "ruff==0.16.6",
     "pyright[nodejs]==1.1.414",
+    "httpx>=0.28.1",
 ]
 
 [tool.pyright]

@@ -24,6 +24,8 @@ reported as success:
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 import logging
 from typing import TYPE_CHECKING
 
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@operation_boundary(mutation=True)
 def stop_all(
     hosts: list[str] | tuple[str, ...],
     *,

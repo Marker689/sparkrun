@@ -126,6 +126,7 @@ class CatalogCluster(TypedDict):
     name: str
     description: str
     host_count: int
+    hosts: NotRequired[list[str]]
     default: bool
 
 

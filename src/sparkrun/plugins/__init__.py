@@ -75,3 +75,7 @@ __all__ = [
     "register_default_registry",
     "register_recipe_item",
 ]
+
+from sparkrun.core.daemon_registry import DaemonOp, DaemonRoute, register_daemon_op, register_daemon_route, registered_daemon_ops
+
+__all__ += ["DaemonOp", "DaemonRoute", "register_daemon_op", "register_daemon_route", "registered_daemon_ops"]

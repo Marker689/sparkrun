@@ -425,3 +425,5 @@ FEATURE_PLUGIN_OCI_RELAY = register_feature(
         default=True,
     )
 )
+
+register_feature(FeatureFlag("daemon", "Local durable API service", channel_defaults={CHANNEL_ALPHA: True}))

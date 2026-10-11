@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import locked_document
+
 import logging
 import re
 from dataclasses import dataclass, field
@@ -624,6 +626,7 @@ class ClusterManager:
         """Get path to cluster YAML file."""
         return self.clusters_dir / f"{name}.yaml"
 
+    @locked_document
     def create(
         self,
         name: str,
@@ -742,6 +745,7 @@ class ClusterManager:
 
         return self._read_cluster(cluster_path)
 
+    @locked_document
     def update(
         self,
         name: str,
@@ -912,6 +916,7 @@ class ClusterManager:
         logger.debug("Listed %d clusters", len(clusters))
         return clusters
 
+    @locked_document
     def delete(self, name: str) -> None:
         """Delete a cluster definition.
 
@@ -934,6 +939,7 @@ class ClusterManager:
             self.unset_default()
             logger.debug("Cleared default pointer as it referenced deleted cluster '%s'", name)
 
+    @locked_document
     def set_default(self, name: str) -> None:
         """Set the default cluster.
 
@@ -949,6 +955,7 @@ class ClusterManager:
         self.default_file.write_text(name)
         logger.info("Set default cluster to '%s'", name)
 
+    @locked_document
     def unset_default(self) -> None:
         """Clear the default cluster marker.
 

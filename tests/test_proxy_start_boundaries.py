@@ -70,7 +70,13 @@ def gateway(request, tmp_path, monkeypatch):
 
 def generated_files(context, engine):
     roots = (engine.state_dir, context.proxy_config.config_path.parent)
-    return {path: path.read_bytes() for root in roots for path in root.rglob("*") if path.is_file()}
+    # Execution reservation bookkeeping is separate from generated gateway config.
+    return {
+        path: path.read_bytes()
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file() and not path.name.startswith("operations.sqlite3")
+    }
 
 
 @pytest.mark.parametrize("restart", [False, True])

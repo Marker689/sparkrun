@@ -1002,6 +1002,18 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json, c
     # idle hosts, pending ops).  The *effective* cluster is forwarded (see
     # ``HostContext``) so a default-cluster sweep keeps that cluster's
     # executor pin and hardware instead of resolving to an anonymous one.
+    if output_json:
+        from sparkrun.daemon.passthrough import query as daemon_query
+
+        handled, out = daemon_query("status_report", {"hosts": host_list, "cluster": hctx.cluster_name})
+        if handled:
+            for cid, group_data in out["groups"].items():
+                group_data["label"] = format_job_label(group_data["meta"], cid)
+            for entry_data in out["solo_entries"]:
+                entry_data["label"] = format_job_label(entry_data["meta"], entry_data["cluster_id"])
+            print_json(out)
+            return
+
     result = api.status_report(host_list, cluster=hctx.cluster_name, ssh_kwargs=ssh_kwargs, sctx=sctx)
 
     if output_json:

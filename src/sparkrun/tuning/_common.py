@@ -6,6 +6,8 @@ This is a private module — external code should import from
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import logging
 from pathlib import Path
 from collections.abc import Callable
@@ -408,7 +410,7 @@ class BaseTuner:
             return tp, rc, time.monotonic() - t0
 
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            futures = {executor.submit(_tune_one, tp): tp for tp in needed_tp}
+            futures = {_operation_submit(executor, _tune_one, tp): tp for tp in needed_tp}
             for future in as_completed(futures):
                 tp, rc, elapsed = future.result()
                 tp_timings.append((tp, elapsed))

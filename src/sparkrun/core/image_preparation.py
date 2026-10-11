@@ -8,6 +8,8 @@ identities through the shared distribution transaction below.
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import logging
@@ -331,7 +333,7 @@ def resolve_content_images(
         for index, (host, image) in enumerate(zip(host_list, images_by_node, strict=True)):
             image = resolve_distributed_image(image, host, ssh_kwargs=ssh_kwargs)
             preserve = bool(_PINNED_IMAGE.fullmatch(image) or _IMAGE_ID.fullmatch(image))
-            pending[pool.submit(_resolve_host_image_id, host, image, ssh_kwargs or {}, preserve)] = index
+            pending[_operation_submit(pool, _resolve_host_image_id, host, image, ssh_kwargs or {}, preserve)] = index
         for future in as_completed(pending):
             resolved[pending[future]] = future.result()
 

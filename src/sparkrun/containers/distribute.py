@@ -12,6 +12,8 @@ transfer so hosts that already have the correct image are skipped.
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import logging
 
 from sparkrun.containers.registry import ensure_image, get_image_identity
@@ -117,7 +119,8 @@ def _check_remote_image_identities(
 
     with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(hosts))) as executor:
         futures = {
-            executor.submit(
+            _operation_submit(
+                executor,
                 run_remote_command,
                 host,
                 cmd,

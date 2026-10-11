@@ -6,6 +6,8 @@ from remote git repositories using sparse checkouts for efficiency.
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import locked_document
+
 from sparkrun.core.application_profile import remote_cache_path
 from sparkrun.core.config import resolve_sparkrun_cache_dir
 
@@ -1714,6 +1716,7 @@ class RegistryManager:
             changed = True
         return changed
 
+    @locked_document
     def _load_registries(self, *, allow_discovery: bool = True) -> list[RegistryEntry]:
         """Load registries from YAML configuration.
 
@@ -2181,6 +2184,7 @@ class RegistryManager:
             # Single registry for this URL — use original clone behavior
             return self._clone_or_pull_single(entry)
 
+    @locked_document
     def add_registry(self, entry: RegistryEntry) -> None:
         """Add a new registry.
 
@@ -2309,6 +2313,7 @@ class RegistryManager:
                 raise RegistryError("Manifest in %s declares no usable registries (all entries were rejected)" % url)
             return entries
 
+    @locked_document
     def add_registry_from_url(self, url: str, trust: bool = False) -> list[RegistryEntry]:
         """Add registries by discovering them from a repo's .sparkrun/registry.yaml manifest.
 
@@ -2365,6 +2370,7 @@ class RegistryManager:
             )
             entry.declared_by = ""
 
+    @locked_document
     def remove_registry(self, name: str) -> None:
         """Remove a registry by name.
 
@@ -2412,6 +2418,7 @@ class RegistryManager:
         normalized = _normalize_registry_url(url)
         return any(normalized == _normalize_registry_url(dep_url) for dep_url in DEPRECATED_REGISTRIES)
 
+    @locked_document
     def restore_missing_defaults(self) -> list[str]:
         """Add default registry entries that are missing from the config.
 
@@ -2443,6 +2450,7 @@ class RegistryManager:
 
         return added
 
+    @locked_document
     def cleanup_deprecated(self) -> list[str]:
         """Remove deprecated registries and their caches.
 
@@ -2493,6 +2501,7 @@ class RegistryManager:
 
         return cleaned
 
+    @locked_document
     def clear_cache(self) -> int:
         """Remove all cached registry clones for a clean slate.
 
@@ -2516,6 +2525,7 @@ class RegistryManager:
         logger.debug("Cleared %d cache entries from %s", count, self.cache_root)
         return count
 
+    @locked_document
     def reset_to_defaults(self) -> list[RegistryEntry]:
         """Delete the registries config, clear cache, and re-initialize from defaults.
 
@@ -2547,6 +2557,7 @@ class RegistryManager:
         logger.info("Reset registries to defaults (%d entries)", len(entries))
         return entries
 
+    @locked_document
     def _set_registry_enabled(self, name: str, enabled: bool) -> None:
         """Set the enabled state of a registry by name.
 
@@ -2583,6 +2594,7 @@ class RegistryManager:
         """
         self._set_registry_enabled(name, False)
 
+    @locked_document
     def _set_registry_trusted(self, name: str, trusted: bool) -> None:
         """Set the trusted state of a registry by name.
 
@@ -2646,6 +2658,7 @@ class RegistryManager:
                 return entry
         raise RegistryError(f"Registry {name!r} not found")
 
+    @locked_document
     def update(
         self,
         name: str | None = None,
@@ -2709,6 +2722,7 @@ class RegistryManager:
 
         return results
 
+    @locked_document
     def ensure_initialized(self) -> None:
         """Ensure registries are initialized.
 

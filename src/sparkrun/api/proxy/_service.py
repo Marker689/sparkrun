@@ -14,6 +14,8 @@ caller can collect it its own way.
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 import logging
 import os
 import shutil
@@ -152,6 +154,7 @@ def spec_from_record(record: Any) -> "UnitSpec | None":
 # -- Install -----------------------------------------------------------------------
 
 
+@operation_boundary(mutation=True)
 def install_service(options: ProxyServiceOptions | None = None, *, sctx: "SparkrunContext | None" = None) -> ProxyServiceInstallResult:
     """Install (or update) the caller's proxy unit and enable it.
 
@@ -437,6 +440,7 @@ def _grant_works(spec: "UnitSpec") -> bool | None:
     return result.returncode == 0
 
 
+@operation_boundary(mutation=True)
 def uninstall_service(
     scope: str | None = None, *, dry_run: bool = False, sudo_password: str | None = None, sctx: "SparkrunContext | None" = None
 ) -> ProxyServiceUninstallResult:

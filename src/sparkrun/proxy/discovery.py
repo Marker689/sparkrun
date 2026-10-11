@@ -22,6 +22,8 @@ identical to the previous implementation.
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import json
 import logging
 import urllib.error
@@ -239,7 +241,7 @@ def _endpoint_from_job(
 def _check_health_parallel(endpoints: list[DiscoveredEndpoint]) -> None:
     """Run health checks in parallel using ThreadPoolExecutor."""
     with ThreadPoolExecutor(max_workers=min(len(endpoints), 8)) as pool:
-        futures = {pool.submit(_check_single_health, ep): ep for ep in endpoints}
+        futures = {_operation_submit(pool, _check_single_health, ep): ep for ep in endpoints}
         for future in as_completed(futures):
             ep = futures[future]
             try:

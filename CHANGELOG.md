@@ -12,6 +12,25 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Add the opt-in `sparkrun daemon` API with authenticated TCP on Linux, macOS,
+  and Windows, plus Linux Unix sockets and remote TLS
+  listeners, durable independently supervised jobs, reconnectable events,
+  cancellation, approval/credential prompts, and systemd user service management.
+  Share operation state, resource coordination, and runtime/plugin-generation
+  leases across daemon and standalone API calls. Include explicit wire schemas,
+  plugin registration, optional read-only CLI passthrough, and discovery watching.
+  Portable local discovery and authenticated shutdown preserve
+  workers across API restarts; Windows uses private ACLs and worker-owned Job
+  Objects. Remote plaintext TCP requires explicit `serve --allow-insecure`;
+  authentication remains required and restart preserves the opt-in. Developer
+  client commands (`call`, `status`, `jobs`) accept explicit HTTP(S)/Unix endpoints,
+  bearer tokens or token files, and custom HTTPS CA certificates without local
+  fallback. Preserve run/benchmark usage telemetry with shared `via_daemon`
+  attribution, emit one `daemon_serve` event per successful API startup, and
+  forward telemetry environment overrides to systemd workers. See
+  [the daemon guide](docs/DAEMON.md) for limits and recovery.
+
+
 - `sparkrun setup wizard` no longer re-prompts for an SSH mesh and CX7
   configuration that already work. A mesh every leg of which passes is skipped.
   A CX7 phase whose checks pass runs the read-only cluster plan without asking:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1258,7 +1260,7 @@ def _distribute_image_plan(
 
     failed: list[str] = []
     with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(image_plan))) as pool:
-        futures = {pool.submit(copy_context().run, _one, name, targets): name for name, targets in image_plan}
+        futures = {_operation_submit(pool, copy_context().run, _one, name, targets): name for name, targets in image_plan}
         for future in as_completed(futures):
             name = futures[future]
             try:

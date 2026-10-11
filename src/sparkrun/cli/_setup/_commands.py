@@ -255,11 +255,18 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo, no_update
     old_identity = capture_old_identity()
     old_version = old_identity[0]
     click.echo("Checking for updates (current: %s)..." % old_version)
-    result = subprocess.run(
-        install_argv(uv, channel) if switching else update_argv(uv, channel),
-        capture_output=True,
-        text=True,
-    )
+    from sparkrun.core.runtime_lease import guarded_update
+
+    try:
+        result = guarded_update(
+            config,
+            subprocess.run,
+            install_argv(uv, channel) if switching else update_argv(uv, channel),
+            capture_output=True,
+            text=True,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     if result.returncode != 0:
         reconcile_plugin_updates(config.config_path, update=False)
         click.echo(f"Error updating {get_application_profile().command}: %s" % result.stderr.strip(), err=True)

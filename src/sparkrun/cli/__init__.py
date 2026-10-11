@@ -32,6 +32,7 @@ from ._registry import registry, registry_update as registry_update
 from ._run import run
 from ._setup import setup
 from ._plugins import plugins
+from ._daemon import daemon
 from ._stop_logs import logs_cmd, stop
 from ._tune import tune
 
@@ -88,6 +89,7 @@ main.add_command(stop)
 main.add_command(logs_cmd)
 main.add_command(setup)
 main.add_command(plugins)
+main.add_command(daemon)
 main.add_command(tune)
 main.add_command(cluster)
 main.add_command(adv)
@@ -228,11 +230,18 @@ def update(ctx, stable, beta, alpha, yolo, no_update_plugins=False):
             warn_if_downgrade(current, channel)
             click.echo("Switching to the %s channel..." % channel)
         click.echo(f"Checking for {get_application_profile().command} updates (current: %s)..." % old_version)
-        result = subprocess.run(
-            install_argv(uv, channel) if switching else update_argv(uv, channel),
-            capture_output=True,
-            text=True,
-        )
+        from sparkrun.core.runtime_lease import guarded_update
+
+        try:
+            result = guarded_update(
+                config,
+                subprocess.run,
+                install_argv(uv, channel) if switching else update_argv(uv, channel),
+                capture_output=True,
+                text=True,
+            )
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
         if result.returncode == 0:
             config.set_self_update_channel(channel)
             new_identity = new_binary_identity()

@@ -9,6 +9,8 @@ distributed.
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import dataclasses
 import logging
 import threading
@@ -295,7 +297,8 @@ def _stop_ranked_containers_parallel(
         for host in target_hosts:
             container_name = executor.node_container_name(ctx.cluster_id, rank_by_host.get(host, 0))
             futures[
-                pool.submit(
+                _operation_submit(
+                    pool,
                     run_remote_command,
                     host,
                     executor.stop_cmd(container_name),
@@ -672,7 +675,8 @@ def launch_containers_parallel(
                 extra_docker_opts=extra_docker_opts,
                 sparkrun_labels=sparkrun_labels or None,
             )
-            future = pool.submit(
+            future = _operation_submit(
+                pool,
                 run_remote_script,
                 host,
                 script,
@@ -1157,7 +1161,8 @@ def run_native_cluster(
                     detached=True,
                     sparkrun_labels=worker_sparkrun_labels or None,
                 )
-                future = pool.submit(
+                future = _operation_submit(
+                    pool,
                     run_remote_script,
                     host,
                     worker_exec_script,

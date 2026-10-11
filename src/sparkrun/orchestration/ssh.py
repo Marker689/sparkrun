@@ -14,6 +14,8 @@ the fan-out helpers can honour them via ``allow_local=True``.
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 from sparkrun.core.application_profile import product_env
 
 import logging
@@ -963,7 +965,7 @@ def run_remote_scripts_parallel(
     t0 = time.monotonic()
     results: list[RemoteResult] = []
     with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(hosts), max_workers)) as executor:
-        futures = {executor.submit(_dispatch, host): host for host in hosts}
+        futures = {_operation_submit(executor, _dispatch, host): host for host in hosts}
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
@@ -1473,7 +1475,8 @@ def run_pipeline_to_remotes_parallel(
     results: list[RemoteResult] = []
     with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(hosts), max_workers)) as executor:
         futures = {
-            executor.submit(
+            _operation_submit(
+                executor,
                 run_pipeline_to_remote,
                 host,
                 local_cmd,
@@ -1576,7 +1579,8 @@ def run_rsync_parallel(
     results: list[RemoteResult] = []
     with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(hosts), max_workers)) as executor:
         futures = {
-            executor.submit(
+            _operation_submit(
+                executor,
                 run_rsync,
                 source_path,
                 host,

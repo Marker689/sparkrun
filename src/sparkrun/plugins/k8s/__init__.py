@@ -31,6 +31,9 @@ def _run(options, sctx, *, plan, started_at, before_start):
 
 
 def register(v):
+    from .daemon import register as register_daemon
+
+    register_daemon()
     from sparkrun.core.cli_registry import register_cli_command
     from sparkrun.core.run_handlers import RunHandler, register_run_handler
 

@@ -102,6 +102,16 @@ class _EndpointRemovalGrace:
         return effective, deferred
 
 
+def sync_discovered(endpoints, removal_grace, sctx):
+    """One shared reconciliation, retaining credentials only in process memory."""
+    from sparkrun import api
+
+    effective, deferred = removal_grace.reconcile([ep for ep in endpoints if ep.healthy])
+    sctx.proxy_config._load()
+    result = api.proxy.sync(endpoints=effective, aliases=sctx.proxy_config.aliases, require_running=True, sctx=sctx)
+    return result, deferred
+
+
 def _handle_signal(signum, _frame):
     global _SHUTDOWN
     _SHUTDOWN = True
@@ -148,7 +158,6 @@ def run_autodiscover(config_path: str) -> None:
     cache_dir = cfg.get("cache_dir")
     cluster_name = cfg.get("cluster")
 
-    from sparkrun import api
     from sparkrun.api._context import default_sctx
     from sparkrun.proxy._supervisor import GatewayState
     from sparkrun.proxy.discovery import discover_endpoints
@@ -204,25 +213,9 @@ def run_autodiscover(config_path: str) -> None:
                 cache_dir=cache_dir,
                 cluster_def=cluster_def,
             )
-            healthy = [ep for ep in endpoints if ep.healthy]
-            effective, deferred_removals = removal_grace.reconcile(healthy)
+            result, deferred_removals = sync_discovered(endpoints, removal_grace, sctx)
             if deferred_removals:
-                logger.info(
-                    "Auto-discover: deferring removal of %d endpoint(s) during health grace",
-                    deferred_removals,
-                )
-
-            # Models and aliases are reconciled in ONE gateway-neutral call:
-            # for a config-file gateway they share a single file, so applying
-            # them separately would rewrite and restart the proxy twice per
-            # sweep.  The config is re-read each sweep so an alias added by
-            # another CLI process between sweeps is picked up.
-            sctx.proxy_config._load()
-            result = api.proxy.sync(
-                endpoints=effective,
-                aliases=sctx.proxy_config.aliases,
-                sctx=sctx,
-            )
+                logger.info("Auto-discover: deferring removal of %d endpoint(s) during health grace", deferred_removals)
             if result.added or result.removed:
                 logger.info(
                     "Auto-discover: gateway reconciled (+%d/-%d model entries)",

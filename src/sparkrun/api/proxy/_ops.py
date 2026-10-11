@@ -18,6 +18,8 @@ requires a loaded implementation; process recovery cannot reconcile models.
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 import logging
 import os
 import signal
@@ -381,6 +383,7 @@ def _engine_config_kwargs(gateway: str, sctx: "SparkrunContext | None") -> dict[
 # --------------------------------------------------------------------------
 
 
+@operation_boundary(mutation=True)
 def start(options: ProxyStartOptions | None = None, *, sctx: "SparkrunContext | None" = None) -> ProxyStartResult:
     """Discover endpoints, write the gateway config, and start the gateway.
 
@@ -540,6 +543,7 @@ def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext") -> ProxyStart
     return ProxyStartResult(started=True, restarted=restarted, **common)
 
 
+@operation_boundary(mutation=True)
 def stop(*, dry_run: bool = False, sctx: "SparkrunContext | None" = None) -> ProxyStopResult:
     """Stop the running proxy and its auto-discover daemon.
 
@@ -633,6 +637,7 @@ def _gateway_update_errors():
         raise ProxyUpdateFailed(str(exc)) from exc
 
 
+@operation_boundary(mutation=True)
 def sync(
     *,
     endpoints: "list[DiscoveredEndpoint] | None" = None,
@@ -678,6 +683,7 @@ def sync(
         return ProxySyncResult(added=added, removed=removed, proxy_running=running)
 
 
+@operation_boundary(mutation=True)
 def register_loaded_model(
     recipe: str,
     *,
@@ -705,6 +711,7 @@ def register_loaded_model(
         return ProxySyncResult(added=added, removed=removed, proxy_running=True)
 
 
+@operation_boundary(mutation=True)
 def unregister_loaded_model(
     recipe: str,
     *,
@@ -737,6 +744,7 @@ def list_aliases(*, sctx: "SparkrunContext | None" = None) -> dict[str, str]:
     return resolve_sctx(sctx).proxy_config.aliases
 
 
+@operation_boundary(mutation=True)
 def add_alias(alias: str, target: str, *, sctx: "SparkrunContext | None" = None) -> ProxyAliasResult:
     """Add (or update) an alias and apply it to a running proxy.
 
@@ -763,6 +771,7 @@ def add_alias(alias: str, target: str, *, sctx: "SparkrunContext | None" = None)
     )
 
 
+@operation_boundary(mutation=True)
 def remove_alias(alias: str, *, sctx: "SparkrunContext | None" = None) -> ProxyAliasResult:
     """Remove an alias and drop it from a running proxy.
 

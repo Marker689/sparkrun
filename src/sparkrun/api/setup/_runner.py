@@ -1,6 +1,8 @@
 """Public error boundary for the shared setup runner."""
 
 from __future__ import annotations
+
+from sparkrun.core.coordination import operation_boundary
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 from sparkrun.api._errors import SparkrunError
@@ -16,6 +18,7 @@ if TYPE_CHECKING:
     from sparkrun.core.setup_manifest import ManifestManager, SetupManifest
 
 
+@operation_boundary(mutation=True)
 def run_setup_steps(
     states: dict[str, HostState],
     context: CheckContext,
@@ -56,6 +59,7 @@ def run_setup_steps(
         raise SetupFailed("Setup failed: %s" % exc) from exc
 
 
+@operation_boundary(mutation=True)
 def run_setup_undo(
     manifest: SetupManifest,
     action_context: SetupActionContext,

@@ -120,7 +120,33 @@ class _HubState:
         self.disabled = False
 
 
-_STATE = _HubState()
+_GLOBAL_STATE = _HubState()
+
+
+class _OperationHubState:
+    def _current(self):
+        from sparkrun.core.operation import CURRENT
+
+        operation = CURRENT.get()
+        if operation is None:
+            return _GLOBAL_STATE
+        if operation.hub is None:
+            # The operation is initialized before fan-out by operation_scope.
+            with _GLOBAL_STATE.lock:
+                if operation.hub is None:
+                    operation.hub = _HubState()
+        return operation.hub
+
+    def __getattr__(self, name) -> Any:
+        if name == "client_configured":
+            return _GLOBAL_STATE.client_configured
+        return getattr(self._current(), name)
+
+    def __setattr__(self, name, value):
+        setattr(_GLOBAL_STATE if name == "client_configured" else self._current(), name, value)
+
+
+_STATE = _OperationHubState()
 
 
 def reset_hub_state() -> None:
@@ -179,7 +205,7 @@ def configure_hub_client(config: Any = None) -> None:
     library on its own (unbounded) client, which is exactly today's behaviour —
     so this can only ever improve on the status quo, never break a working setup.
     """
-    with _STATE.lock:
+    with _GLOBAL_STATE.lock:
         if _STATE.client_configured:
             return
         _STATE.client_configured = True  # one attempt per process, success or not
@@ -433,7 +459,10 @@ def _run_with_deadline(fn: Callable[[], T | None], deadline_s: float, label: str
         except BaseException as e:  # noqa: BLE001 — re-raised on the calling thread
             box["error"] = e
 
-    worker = threading.Thread(target=_target, name="sparkrun-hub-%s" % label, daemon=True)
+    from contextvars import copy_context
+
+    context = copy_context()
+    worker = threading.Thread(target=lambda: context.run(_target), name="sparkrun-hub-%s" % label, daemon=True)
     worker.start()
     worker.join(deadline_s)
 

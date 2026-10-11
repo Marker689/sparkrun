@@ -132,6 +132,13 @@ def read_log_command(cmd: list[str], source: LogSource, *, check: bool = False) 
 def _terminate(proc: subprocess.Popen) -> None:
     """Reap the reader session, including children that outlive their shell."""
     try:
+        if os.name == "nt":
+            from sparkrun.core.process_identity import process_identity, terminate_tree
+
+            if proc.poll() is None:
+                terminate_tree(process_identity(proc.pid))
+            proc.wait(timeout=1)
+            return
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:

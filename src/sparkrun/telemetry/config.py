@@ -130,3 +130,15 @@ def ensure_installation_id(config: SparkrunConfig) -> str:
     except OSError:
         logger.debug("Failed to persist telemetry installation id", exc_info=True)
     return installation_id
+
+
+def worker_environment() -> dict[str, str]:
+    """Forward explicit telemetry policy/routing into independently supervised workers."""
+    from sparkrun.core.application_profile import env_name
+
+    profile = get_application_profile()
+    names = {NO_TELEMETRY_ENV, TELEMETRY_TIMEOUT_ENV}
+    for setting in ("NO_TELEMETRY", "TELEMETRY_ENDPOINT", "TELEMETRY_KEY"):
+        names.add(env_name(setting))
+        names.update(profile.env_aliases.get(setting, ()))
+    return {name: os.environ[name] for name in sorted(names) if name in os.environ}

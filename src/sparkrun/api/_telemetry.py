@@ -99,7 +99,9 @@ class LiveMonitorSession:
         self._status_error = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._poller = threading.Thread(target=self._poll_loop, daemon=True)
+        from contextvars import copy_context
+
+        self._poller = threading.Thread(target=copy_context().run, args=(self._poll_loop,), daemon=True)
         self._poller.start()
 
     def _poll_once(self) -> None:

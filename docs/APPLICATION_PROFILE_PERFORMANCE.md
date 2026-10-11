@@ -69,3 +69,41 @@ From a prepared Sparkrun development environment:
 
 No external application checkout or hardware plugin is required. There is no
 automated timing threshold on a shared controller.
+
+
+## Daemon integration check (2026-10-10)
+
+Compared the daemon implementation worktree with pre-daemon `857c784` using
+this same script, Python 3.12, two warmups and ten interleaved samples per
+variant/scenario. No other test suite ran during the measured rounds. Timing is
+local wall time with warm filesystem/bytecode caches, not a release threshold.
+
+| Request | Pre-daemon median (ms) | Daemon worktree median (ms) | Delta (ms) |
+| --- | ---: | ---: | ---: |
+| help | 206.30 | 217.14 | +10.84 |
+| root-completion | 213.55 | 218.97 | +5.42 |
+| nested-completion | 214.73 | 224.05 | +9.31 |
+| option-completion | 220.66 | 223.94 | +3.28 |
+
+The measured increase is 1.5–5.3%. Fresh-process import guards separately prove
+that CLI/completion, API bootstrap, plugin registration and worker startup do
+not import FastAPI, Starlette, uvicorn, Pydantic or AnyIO. The implementation
+adds framework-free command/coordination metadata; the web stack loads only on
+server startup. This sample measures the complete change, not a causal breakdown
+of those imports. Large catalogs, network calls, inference and RSS are outside
+this comparison. It does not justify introducing reusable workers; v1 retains
+a fresh isolated process per mutating/long operation.
+
+```bash
+.venv/bin/python scripts/benchmark-cli-startup.py \
+  --baseline 857c784 --samples 10 --warmups 2 \
+  --output /tmp/daemon-cli-startup.json
+```
+
+A separate empty-catalog check compared 30 warm local `Client.call` requests
+(including authenticated identity verification) with ten fresh-process
+`initialize()` + `api.list_clusters()` calls, after two warmups each. Medians
+were **11.78 ms warm** and **202.35 ms cold**; API startup was 396 ms. This fixture
+uses no remote hosts or registry network access. It demonstrates query bootstrap
+reuse, not inference speed or a case for reusable mutation workers. Measurements
+are saved locally in `/tmp/daemon-warm-benchmark.json`.

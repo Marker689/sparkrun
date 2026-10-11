@@ -17,6 +17,8 @@ Sparkrun's role:
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 from sparkrun.core.config import resolve_sparkrun_cache_dir
 
 from sparkrun.core.application_profile import remote_cache_path
@@ -426,7 +428,7 @@ class VllmTuner:
             return tp, rc, time.monotonic() - t0
 
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            futures = {executor.submit(_tune_one, tp): tp for tp in tp_sizes}
+            futures = {_operation_submit(executor, _tune_one, tp): tp for tp in tp_sizes}
             for future in as_completed(futures):
                 tp, rc, elapsed = future.result()
                 tp_timings.append((tp, elapsed))

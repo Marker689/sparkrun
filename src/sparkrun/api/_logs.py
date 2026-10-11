@@ -41,6 +41,7 @@ def logs(
     tail: int | None = None,
     cache_dir: str | None = None,
     sctx: "SparkrunContext | None" = None,
+    cancel=None,
 ) -> Iterator[LogLine]:
     """Yield :class:`LogLine` records from a running workload.
 
@@ -133,6 +134,8 @@ def logs(
             target_hosts = list(hosts)
         elif meta and meta.get("hosts"):
             target_hosts = list(meta["hosts"])
+        elif cluster is not None:
+            target_hosts = list(resolve_cluster(cluster, sctx=sctx).hosts)
         else:
             raise JobNotFound("No hosts known for cluster_id %r" % cluster_id)
         # No explicit cluster → recover the one the job was launched on, so
@@ -191,12 +194,14 @@ def logs(
     )
     _verify_log_source_alive(executor, all_sources, ssh_kwargs, cluster_id, cache_dir, scope=scope)
 
+    cancel = cancel if cancel is not None else getattr(getattr(sctx, "operation", None), "cancel", None)
     return read_log_sources(
         executor,
         sources,
         follow=follow,
         tail=tail,
         ssh_kwargs=ssh_kwargs,
+        **({"cancel": cancel} if cancel is not None else {}),
     )
 
 

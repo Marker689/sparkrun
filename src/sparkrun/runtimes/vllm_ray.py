@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.core.operation import submit as _operation_submit
+
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -495,7 +497,8 @@ class VllmRayRuntime(VllmRuntimeBase):
                         sparkrun_labels=_worker_labels or None,
                     )
                     _wfutures[
-                        _wpool.submit(
+                        _operation_submit(
+                            _wpool,
                             run_remote_script,
                             _whost,
                             _wscript,

@@ -29,6 +29,8 @@ Invalid programmatic inputs may raise ValueError/TypeError; interrupts propagate
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 from sparkrun.core.offline import resolve_offline
 from sparkrun.core.status_observation import RunningSnapshot
 
@@ -501,6 +503,7 @@ def _apply_recipe_overrides_for_plan(recipe, options: RunOptions, *, runtime, cl
     return resolution
 
 
+@operation_boundary(mutation=True)
 def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: RunPlan | None = None) -> RunResult:
     """Launch the workload described by *options* and return a :class:`RunResult`.
 
@@ -595,7 +598,9 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
 
     if any(getattr(recipe, name, None) for name in ("pre_exec", "post_exec", "post_commands")):
         if not resolve_recipe_trust(recipe, options.trust, sctx=sctx):
-            raise SparkrunError("Recipe hooks require explicit authorization: pass RunOptions(trust=True) (CLI: --trust).")
+            from sparkrun.api._errors import TrustRejected
+
+            raise TrustRejected("Recipe hooks require explicit authorization: pass RunOptions(trust=True) (CLI: --trust).")
 
     # Recipe-owned execution strategies are selected only from top-level items
     # present in this recipe.  Preparation happens before the shared launcher

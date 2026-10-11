@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 from copy import copy, deepcopy
 from dataclasses import replace
 import logging
@@ -80,6 +82,7 @@ def plan_build(options: BuildOptions, *, sctx=None) -> BuildPlan:
     return BuildPlan(recipe, runtime, cluster, hosts, target, executor.needs_image, options, tuple(issues))
 
 
+@operation_boundary(mutation=True)
 def build(options: BuildOptions, *, plan: BuildPlan | None = None, sctx=None) -> BuildResult:
     """Prepare a recipe's images or native environment and distribute assets.
 

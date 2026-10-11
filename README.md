@@ -113,6 +113,11 @@ Docker now stages a custom seccomp profile allowing io_uring on each launch node
 see [executor configuration](docs/EXECUTORS.md#docker-seccomp-profiles-04).
 vLLM no longer sets `OMP_NUM_THREADS` by default; recipes can set it explicitly.
 
+The [daemon guide](docs/DAEMON.md) covers the authenticated local API, durable
+jobs, desktop integration, and systemd deployment. Daemon
+serving supports local TCP on Linux, macOS, and Windows behind the `daemon`
+feature flag; Linux also supports peer-authenticated Unix sockets.
+
 ## Spark Arena
 [Spark Arena](https://spark-arena.com) is the community hub for DGX Spark recipe benchmarks — browse benchmark results, then run them directly with sparkrun.
 

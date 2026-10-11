@@ -17,6 +17,8 @@ removed and any per-host errors.
 
 from __future__ import annotations
 
+from sparkrun.core.coordination import operation_boundary
+
 import logging
 from typing import TYPE_CHECKING
 
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@operation_boundary(mutation=True)
 def stop(
     *,
     cluster_id: str | None = None,
@@ -121,6 +124,8 @@ def stop(
             target_hosts = list(hosts)
         elif meta and meta.get("hosts"):
             target_hosts = list(meta["hosts"])
+        elif cluster is not None:
+            target_hosts = list(resolve_cluster(cluster, sctx=sctx).hosts)
         else:
             target_hosts = []
 

@@ -267,6 +267,9 @@ class PluginStore:
                 for name, record in before_records.items()
                 for identifier in [record["active_generation"], *record["previous_generations"]]
             ]
+            from sparkrun.core.runtime_lease import assert_generations_available
+
+            assert_generations_available(self.root, records)
             journal = {
                 "owned_generations": owned,
                 "schema_version": 1,
@@ -316,6 +319,9 @@ class PluginStore:
         self.journal.unlink()
 
     def _prune(self, records: dict[str, dict], *, owned=()):
+        from sparkrun.core.runtime_lease import assert_generations_available
+
+        assert_generations_available(self.root, records)
         owned = {(safe_name(name), generation_id(identifier)) for name, identifier in owned}
         if not self.directory.exists():
             return

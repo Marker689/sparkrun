@@ -23,6 +23,32 @@ _MODEL_QUANTIZATION_KEYS = ("quantization", "quant_bits", "model_dtype", "kv_dty
 logger = logging.getLogger(__name__)
 
 
+def build_daemon_serve_event(
+    *,
+    unix_socket: bool,
+    tcp: bool,
+    tls: bool,
+    remote_tcp: bool,
+    worker_supervisor: str,
+    parent_managed: bool,
+    startup_ms: int,
+) -> TelemetryEvent:
+    """Summarize a ready listener without addresses, paths, or credentials."""
+    if worker_supervisor not in {"process", "systemd"}:
+        raise ValueError("Unknown worker supervisor")
+    return {
+        "event_type": "daemon_serve",
+        "unix_socket": bool(unix_socket),
+        "tcp": bool(tcp),
+        "tls": bool(tls),
+        "remote_tcp": bool(remote_tcp),
+        "worker_supervisor": worker_supervisor,
+        "parent_managed": bool(parent_managed),
+        "startup_ms": max(0, int(startup_ms)),
+        "system": system_info(),
+    }
+
+
 def build_update_event(
     *,
     command: str,
