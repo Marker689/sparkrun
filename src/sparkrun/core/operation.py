@@ -19,6 +19,25 @@ class OperationState:
     deadline: float | None = None
     hub: Any = None
     via_daemon: bool = False
+    _feedback_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    _feedback_local: threading.local = field(default_factory=threading.local, repr=False, compare=False)
+
+    def feedback(self, payload):
+        """Deliver advisory feedback without letting a UI callback fail work."""
+        if getattr(self._feedback_local, "busy", False):
+            return
+        with self._feedback_lock:
+            if self.events is not None:
+                self._feedback_local.busy = True
+                try:
+                    self.events({**payload, "operation_id": self.id})
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).warning("Operation feedback subscriber failed", extra={"sparkrun_feedback": True})
+                finally:
+                    self._feedback_local.busy = False
 
     def check(self):
         if self.cancel.is_set():
@@ -28,7 +47,9 @@ class OperationState:
 
     def emit(self, kind, **data):
         self.check()
-        if self.events is not None:
+        if kind in {"progress", "feedback", "warning", "log"}:
+            self.feedback({"type": kind, **data})
+        elif self.events is not None:
             self.events({"type": kind, "operation_id": self.id, **data})
 
 
@@ -46,7 +67,15 @@ def operation_scope(sctx=None, *, state=None):
     token = CURRENT.set(state)
     try:
         state.check()
-        yield state
+        from contextlib import nullcontext
+        from sparkrun.core.feedback_logging import forward_operation_logs
+
+        if sctx is not None and getattr(sctx, "progress", None) is None and state.events is not None:
+            from sparkrun.core.progress import LaunchProgress
+
+            sctx.progress = LaunchProgress(timeline=getattr(sctx, "timing", None))
+        with forward_operation_logs() if state.events is not None else nullcontext():
+            yield state
     finally:
         CURRENT.reset(token)
 

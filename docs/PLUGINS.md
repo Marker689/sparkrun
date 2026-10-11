@@ -1105,3 +1105,10 @@ permits builtin fallback **only before mutation**, when the provider opts in via
 operation. Registering an image provider, including OCI Relay, does not register
 a model provider. See [model cache operations](MODEL_CACHE.md) for configuration,
 selection, migration and the runtime validation barrier.
+
+## Structured operation feedback
+
+Plugins can publish progress, warnings, per-host counters, and nested activities
+through the public [feedback API](FEEDBACK.md). It works for standard launch
+providers and custom execution pipelines, with the same messages in the CLI and
+structured events for library and daemon consumers.

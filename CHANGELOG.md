@@ -12,6 +12,12 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Add public structured plugin feedback with operation-bound reporters, nested
+  activities, per-host counters, explicit exact/upper-bound totals, and heartbeats.
+  Forward legacy operation progress/warnings into daemon job events without
+  duplicating structured messages, and enable launch phase feedback for library
+  subscribers. OCI Relay now publishes structured transfer/verification feedback.
+
 - Add the opt-in `sparkrun daemon` API with authenticated TCP on Linux, macOS,
   and Windows, plus Linux Unix sockets and remote TLS
   listeners, durable independently supervised jobs, reconnectable events,

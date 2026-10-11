@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sparkrun.feedback import FeedbackReporter, get_feedback
+
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
@@ -42,6 +44,9 @@ class ModelTarget:
 
 @dataclass(frozen=True)
 class ModelCopyRequest:
+    feedback: FeedbackReporter | None = field(
+        default_factory=lambda: get_feedback("model-distribution"), repr=False, compare=False, kw_only=True
+    )
     manifest: ModelArtifactManifest
     source_host: str | None
     source_cache_root: str

@@ -3,6 +3,7 @@
 """Bounded host setup with a completion barrier before operation cleanup."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 
 
 def parallel(items, operation):
@@ -15,7 +16,7 @@ def parallel(items, operation):
     if not items:
         return {}
     with ThreadPoolExecutor(max_workers=min(8, len(items)), thread_name_prefix="oci-relay-setup") as pool:
-        pending = {pool.submit(operation, item): item for item in items}
+        pending = {pool.submit(copy_context().run, operation, item): item for item in items}
         try:
             results = {pending[future]: future.result() for future in as_completed(pending)}
         except BaseException:

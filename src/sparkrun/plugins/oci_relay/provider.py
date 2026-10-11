@@ -23,7 +23,7 @@ from .disk import registry_cache_budget
 from .host import Lines, OperationError, Runner, pump
 from .parallel import parallel
 from .paths import arguments as path_arguments, qualify as qualify_paths
-from .progress import PROGRESS, Progress
+from .progress import PROGRESS as PROGRESS, status, Progress
 from .release import BinaryUnavailable, acquire, acquire_decoder
 from .source_policy import SourceUnavailable, detect, validate
 from .tuning import limits, probe
@@ -192,7 +192,7 @@ class RelayProvider:
             raise OperationError("offline mode cannot fetch a fresh pinned image")
         if request.dry_run:
             return self.copy(request, registry=registry)
-        logger.log(PROGRESS, "OCI Relay: checking verified registry pin on receivers: %s", request.image)
+        status(logger, 'source', 'OCI Relay: checking verified registry pin on receivers: %s', request.image)
         runner = Runner(request.session, settings)
         with progress_heartbeat(logger, "OCI Relay: checking verified registry pin"):
             try:
@@ -202,7 +202,7 @@ class RelayProvider:
                 if time.monotonic() - started >= timeout:
                     raise OperationError("pinned cache checks exceeded operation deadline")
                 if present and all(present.values()):
-                    logger.log(PROGRESS, "OCI Relay: pinned image already verified on all %d receiver(s); no transfer", len(present))
+                    status(logger, 'source', 'OCI Relay: pinned image already verified on all %d receiver(s); no transfer', len(present))
                     return ImageCopyResult(dict.fromkeys(request.targets, "already_present"), runtime_images=present)
                 if not registry:
                     # Offline/local mode can reuse a verified pin on a receiver,
@@ -218,7 +218,7 @@ class RelayProvider:
             finally:
                 runner.close()
         if registry:
-            logger.log(PROGRESS, "OCI Relay: fetching exact registry pin and distributing directly to receivers: %s", request.image)
+            status(logger, 'source', 'OCI Relay: fetching exact registry pin and distributing directly to receivers: %s', request.image)
         remaining = timeout - (time.monotonic() - started)
         if remaining < 1:
             raise OperationError("pinned source selection exceeded operation deadline")
@@ -243,7 +243,7 @@ class RelayProvider:
             raise ValueError("relay timeout must be between 1 and 86400 seconds")
         cached_image = None
         if not request.dry_run and not request.force_pull and settings.get("source_mode") != "registry" and (request.source_host is not None or platform.system() == "Linux"):
-            logger.log(PROGRESS, "OCI Relay: checking source image on %s", request.source_host or "controller")
+            status(logger, 'source', 'OCI Relay: checking source image on %s', request.source_host or 'controller')
             runner = Runner(request.session, settings)
             try:
                 inspected = runner.connection(request.source_host).execute(
@@ -255,7 +255,7 @@ class RelayProvider:
                     refresh = (request.source_host is None and is_pullable_image_ref(request.image)
                                and ref.tag in {None, "latest"})
                     if not refresh:
-                        logger.log(PROGRESS, "OCI Relay: using existing source image %s", request.image)
+                        status(logger, 'source', 'OCI Relay: using existing source image %s', request.image)
                         return None
                     cached_image = inspected.stdout.decode().strip()
                     if not re.fullmatch(r"sha256:[0-9a-f]{64}", cached_image):
@@ -265,7 +265,7 @@ class RelayProvider:
         if not ref.tag:
             request = replace(request, image=request.image + ":latest")
         action = "refreshing latest image from registry" if cached_image else "pulling from registry"
-        logger.log(PROGRESS, "OCI Relay: %s and distributing directly to receivers: %s", action, request.image)
+        status(logger, 'source', 'OCI Relay: %s and distributing directly to receivers: %s', action, request.image)
         remaining = timeout - (time.monotonic() - started)
         if remaining < 1:
             raise OperationError("registry source selection exceeded operation deadline")
@@ -353,7 +353,7 @@ class RelayProvider:
         deadline = operation_start + timeout
         timings = {}
         completed = False
-        progress = Progress(request.image)
+        progress = Progress(request.image, feedback=getattr(request, "feedback", None))
         source_image = source_image or request.image
         pin = pins.digest(request.image)
         destination = pins.retention_tag(request.image) if pin else request.image
@@ -368,7 +368,7 @@ class RelayProvider:
         source_process = None
         try:
             if pin:
-                progress.phase("checking registry pin metadata storage")
+                progress.phase("checking registry pin metadata storage", stage="pin")
                 parallel(request.targets, lambda host: pins.preflight(runner, host, request.image))
             execution_hosts = list(dict.fromkeys([request.source_host, *request.targets]))
             architectures = parallel(execution_hosts, runner.architecture)
@@ -387,7 +387,7 @@ class RelayProvider:
                 helpers = parallel([host for host in supported if decoders[architectures[host]] is not None],
                                    lambda host: runner.stage_decoder(host, *decoders[architectures[host]]))
             mark("binaries")
-            progress.phase("selecting source and network routes")
+            progress.phase("selecting source and network routes", stage="routes")
             source_host = request.source_host
             if settings.get("source_mode") == "registry":
                 target_arches = {architectures[host] for host in request.targets}
@@ -520,7 +520,7 @@ class RelayProvider:
             if parts.scheme != "https" or not parts.port:
                 raise OperationError("invalid source endpoint")
             mark("preparation")
-            progress.phase("checking receiver connections")
+            progress.phase("checking receiver connections", stage="connect")
             routes = {}
             target_routes = {}
             ready_paths = {}
@@ -579,7 +579,7 @@ class RelayProvider:
                 target_routes[identity] = chosen
                 logger.info("OCI Relay route %s -> %s: %s", source_host or "controller", host, chosen[0])
             mark("preflight")
-            progress.phase("checking receiver caches and starting transfers")
+            progress.phase("checking receiver caches and starting transfers", stage="transfer")
 
             peers = {}
             peer_diagnostics = {}
@@ -680,7 +680,7 @@ class RelayProvider:
             mark("transfer_import")
             receivers_complete = all(value in {"complete", "already_present"} for value in result.values())
             if pin and receivers_complete:
-                progress.phase("saving verified registry pin records")
+                progress.phase("saving verified registry pin records", stage="pin")
                 try:
                     parallel(request.targets, lambda host: pins.record(
                         runner, host, request.image, runtime_images[host], ready["config_digest"],
@@ -698,7 +698,7 @@ class RelayProvider:
             return ImageCopyResult(result, errors)
         finally:
             cleanup_start = time.monotonic()
-            progress.phase("cleaning up transfer resources")
+            progress.phase("cleaning up transfer resources", stage="cleanup")
             cleanup = None
             try:
                 heartbeat_stop.set()

@@ -86,3 +86,26 @@ def test_oci_relay_unavailable_download_defaults_to_builtin(monkeypatch, kind):
             invoke(**arguments)
     finally:
         api._CONFIG.reset(token)
+
+
+def test_relay_structured_feedback_retains_upper_bound_and_verified_outcome():
+    from sparkrun.core.operation import OperationState, operation_scope
+    from sparkrun.plugins.oci_relay.progress import Progress
+
+    seen = []
+    with operation_scope(state=OperationState(events=seen.append)):
+        p = Progress('example/image', interval=0)
+        p.bind({'receiver': 'host-a'})
+        try:
+            p.event({'receiver_progress': {'receiver': {
+                'sequence': 1, 'phase': 'transferring', 'inventory_ready': True,
+                'received_bytes': 4, 'expected_bytes': 8, 'bytes_per_second': 2,
+            }}})
+            p.outcome('receiver', {'progress': {'wire_bytes': 4}}, False)
+        finally:
+            p.close(False, False)
+    event = next(v for v in seen if v.get('stage') == 'transferring')
+    assert event['type'] == 'feedback' and event['source'] == 'oci-relay'
+    assert event['host'] == 'host-a' and event['total_kind'] == 'upper_bound'
+    assert event['current'] == 4 and event['total'] == 8
+    assert seen[-1]['status'] == 'failed'

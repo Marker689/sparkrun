@@ -5,7 +5,7 @@
 
 import logging
 
-from .progress import PROGRESS, size
+from .progress import status, size
 
 logger = logging.getLogger(__name__)
 DEFAULT_CACHE_BYTES = 16 << 30
@@ -26,9 +26,8 @@ def registry_cache_budget(runner, host, directory, settings):
         if available < 0 or len(fields) < 6:
             raise ValueError("invalid disk availability")
     except Exception:
-        logger.log(PROGRESS, "OCI Relay: disk headroom unavailable; registry cache disabled")
+        status(logger, 'cache', 'OCI Relay: disk headroom unavailable; registry cache disabled')
         return 0
     budget = min(requested, max(0, available - FREE_RESERVE_BYTES))
-    logger.log(PROGRESS, "OCI Relay: registry disk cache up to %s; %s available, keeping %s free",
-               size(budget), size(available), size(FREE_RESERVE_BYTES))
+    status(logger, 'cache', 'OCI Relay: registry disk cache up to %s; %s available, keeping %s free', size(budget), size(available), size(FREE_RESERVE_BYTES))
     return budget

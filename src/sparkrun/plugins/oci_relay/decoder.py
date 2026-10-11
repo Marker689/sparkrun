@@ -5,7 +5,7 @@
 import logging
 
 from .host import OperationError
-from .progress import PROGRESS, size
+from .progress import status, size
 from .source_policy import docker_facts
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ def arguments(runner, host, helper, settings, facts, peer_limits):
     def unavailable(reason):
         if mode == "unpigz":
             raise OperationError(reason)
-        logger.log(PROGRESS, "OCI Relay: %s: compressed import (%s)", host, reason)
+        status(logger, 'decode', 'OCI Relay: %s: compressed import (%s)', host, reason)
         return []
 
     if helper is None:
@@ -45,6 +45,6 @@ def arguments(runner, host, helper, settings, facts, peer_limits):
     if cap < 4 << 20:
         return unavailable("insufficient decoder disk headroom")
     workers = settings.get("decode_workers", min(8, peer_limits["source_streams"], max(1, int(facts.get("cpus", 4)))))
-    logger.log(PROGRESS, "OCI Relay: %s: bundled unpigz, %d workers, up to %s scratch", host, workers, size(cap))
+    status(logger, 'decode', 'OCI Relay: %s: bundled unpigz, %d workers, up to %s scratch', host, workers, size(cap))
     return ["--decoder", mode, "--unpigz", helper, "--decode-spool-dir", directory,
             "--decode-workers", str(workers), "--max-decode-bytes", str(cap), "--decode-reserve-bytes", str(reserve)]

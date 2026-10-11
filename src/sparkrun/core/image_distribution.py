@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from sparkrun.feedback import FeedbackReporter, get_feedback
+
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
@@ -28,6 +30,9 @@ _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 
 @dataclass(frozen=True)
 class ImageCopyRequest:
+    feedback: FeedbackReporter | None = field(
+        default_factory=lambda: get_feedback("image-distribution"), repr=False, compare=False, kw_only=True
+    )
     image: str
     source_host: str | None
     targets: tuple[str, ...]

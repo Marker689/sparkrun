@@ -5,10 +5,10 @@ version = "0.1.3"
 module = "sparkrun.plugins.oci_relay"
 feature = "plugins.oci_relay"
 repository = "https://github.com/spark-arena/oci-relay.git"
-commit = "8cc901e1245be4b6eb6bbc30d9262cd2c9b9d561"
-tree = "9f5754c2aff4a36bed4003a91b558c45d1bdcb4a"
+commit = "0c42bc447cd4629aa8776116a1936a2b9492f469"
+tree = "9ae6329ecf0aaf00431a4d1a38373041860aa887"
 sparkrun = ">=0.4.0,<0.5"
-content_sha256 = "a50eda097014d2fec63e7a550ec2b4b95f36edcc1a1e94d22b3f186ed0b4956e"
+content_sha256 = "4c6a00d6e4e3497b3b4f841dfc3cf1769ceeadcf73ccc9a4cce5ab46a98269db"
 image_distribution_api = 1
 image_pull_api = 1
 
@@ -22,7 +22,7 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/README.md"
-sha256 = "7d90ae3cab197b2b5ae8a704e1505f99bfae904c9d397d7998b2daacc5d61d0f"
+sha256 = "e4b231472d351e5c1666a74d12a0cb1f8dee83972e49ac4d909f5fde57fccf0a"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/__init__.py"
@@ -30,11 +30,11 @@ sha256 = "611b289cb30aaf2a556be4ea18a2a5cee0eb63b510d0395411f70a6caacb8a4e"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/decoder.py"
-sha256 = "138b85ce398fcc90c85622ba065901bc80c046e54b2bc9afd1dc664c16770656"
+sha256 = "2fe7a0728427b38b8cd4b2d5363a6a3629ccc5a65e491ff91f837b52634993df"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/disk.py"
-sha256 = "0782ac9da03b21cfc388df55639146930d47c38b2c71198b0f0802a0564180ac"
+sha256 = "c33f86e0ea641b5458decedaa521322c96e6ddd55427f64c3897bd19f5662473"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/host.py"
@@ -42,7 +42,7 @@ sha256 = "2099b0345351365536a3474c11c8713e34e0bf99ab11b008f4a7570fc33cf7a2"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/parallel.py"
-sha256 = "2e59434200688dcf5a0607aaf06a0ccf176052113fc2e752e3b08fd417852cea"
+sha256 = "69b6f531ee00057637ffc3c741930112313d50d043f1e46c9e737d83755741fd"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/paths.py"
@@ -54,11 +54,11 @@ sha256 = "37b6356b7d4c1aeb7f182e1c03c938480bb1856aeebc4609233abca488c07450"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/progress.py"
-sha256 = "b04691bcce8eca16990ceeeb922ffd4f65a39fd8ef0fdc1352a33c93d0136758"
+sha256 = "39024eec4b250cb35d15c5c2279dff49871acf937d7a55393fd366ca5ee91ba9"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/provider.py"
-sha256 = "fe60aedc0a95f0226de09fcd7167ffcf1f8534d432fcbb8b594ffbf17dc50003"
+sha256 = "97ed5446057b4b98884cdce17c64d77fca8c1f31da5aac4b0a997e81df5483e8"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/registry_ranges.py"
@@ -82,4 +82,4 @@ sha256 = "05971a42063d652b01777fd7dc6214db9a33f63f2bd6991551a2d0d54a6e4538"
 
 [[files]]
 path = "tests/vendor/oci_relay/test_oci_relay_contract.py"
-sha256 = "0ce6ac1a59e498cf53c317c030c6505604efdfaba5e149b4f25b491a8638e072"
+sha256 = "50f3a91cc39d9b4c05e676fe1a3d139b2a286f065553f0fdeb400f23a55f93da"

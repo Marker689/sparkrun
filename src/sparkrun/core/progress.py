@@ -28,11 +28,12 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from enum import IntEnum
+
+from sparkrun.feedback import LOG_EXTRA, get_feedback
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -65,21 +66,8 @@ def progress_heartbeat(
     display-only counterpart to the session guard: it never affects the work,
     it only reports that the work is still there.
     """
-    stopped = threading.Event()
-    started = time.monotonic()
-
-    def report() -> None:
-        while not stopped.wait(interval):
-            current_label = label() if callable(label) else label
-            logger.log(PROGRESS, "%s — still running (%.0fs)", current_label, time.monotonic() - started)
-
-    thread = threading.Thread(target=report, name="sparkrun-progress-heartbeat", daemon=True)
-    thread.start()
-    try:
+    with get_feedback(logger.name, logger=logger).heartbeat(label, interval=interval):
         yield
-    finally:
-        stopped.set()
-        thread.join(timeout=max(1.0, interval))
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +175,9 @@ class LaunchProgress:
         """
         from sparkrun.core.operation import emit
 
-        emit("progress", stage="phase", phase=num, message=label or PHASE_LABELS.get(num, str(num)))
         if self._current_phase is not None:
             self._auto_close_phase()
+        emit("progress", stage="phase", phase=num, message=label or PHASE_LABELS.get(num, str(num)))
         self._current_phase = num
         self._phase_t0 = time.monotonic()
         self._step_total = 0
@@ -198,7 +186,7 @@ class LaunchProgress:
         if self.timeline is not None:
             self._phase_span = self.timeline.begin(phase_span_name(num), parent=self._root_span, phase=num, label=effective_label)
             self._step_span = None
-        self._log.log(PROGRESS, "[%d/%d] %s", num, TOTAL_PHASES, effective_label)
+        self._log.log(PROGRESS, "[%d/%d] %s", num, TOTAL_PHASES, effective_label, extra=LOG_EXTRA)
 
     def phase_end(self, elapsed: float | None = None, *, status: str = "ok") -> None:
         """Close the current phase with a done line.
@@ -209,10 +197,10 @@ class LaunchProgress:
         """
         from sparkrun.core.operation import emit
 
-        emit("progress", stage="phase_end")
+        emit("progress", stage="phase_end", phase=self._current_phase, status=status)
         if self._phase_t0 is not None:
             dt = elapsed if elapsed is not None else (time.monotonic() - self._phase_t0)
-            self._log.log(PROGRESS, "  done (%.1fs)", dt)
+            self._log.log(PROGRESS, "  done (%.1fs)", dt, extra=LOG_EXTRA)
         if self.timeline is not None and self._phase_span is not None:
             self.timeline.end(self._phase_span, status=status)
         self._phase_span = None
@@ -232,7 +220,7 @@ class LaunchProgress:
         suffix = " (%s)" % reason if reason else ""
         if self.timeline is not None:
             self.timeline.skipped(phase_span_name(num), parent=self._root_span, reason=reason, phase=num, label=label)
-        self._log.log(PROGRESS, "[%d/%d] %s — skipped%s", num, TOTAL_PHASES, label, suffix)
+        self._log.log(PROGRESS, "[%d/%d] %s — skipped%s", num, TOTAL_PHASES, label, suffix, extra=LOG_EXTRA)
 
     # -- Step API (runtime sub-steps within phase 5) ------------------------
 
@@ -269,9 +257,10 @@ class LaunchProgress:
                 self._step_current,
                 self._step_total,
                 label,
+                extra=LOG_EXTRA,
             )
         else:
-            self._log.log(PROGRESS, "  Step %d: %s", self._step_current, label)
+            self._log.log(PROGRESS, "  Step %d: %s", self._step_current, label, extra=LOG_EXTRA)
         return time.monotonic()
 
     def step_done(self, t0: float) -> None:

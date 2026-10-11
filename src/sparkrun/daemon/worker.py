@@ -205,6 +205,9 @@ class Worker:
 
                 containment = WorkerJob(process_identity())
             with ExitStack() as stack:
+                from sparkrun.core.feedback_logging import forward_operation_logs
+
+                stack.enter_context(forward_operation_logs(worker=self.operation))
                 config = SparkrunConfig(self.binding.config_path)
                 stack.enter_context(runtime_lease(config, kind="worker", expected=self.job["runtime"]))
                 sctx = initialize(config_path=self.binding.config_path)

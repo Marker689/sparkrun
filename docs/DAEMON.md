@@ -401,3 +401,11 @@ include live Python/session helpers, TTY `ssh-copy-id`, arbitrary low-level k8s
 launcher specifications, and credential-bearing proxy UI/token helpers. Readiness
 and hooks are exposed as steps of `run`, not serializable live handles. Explicit
 DTO allowlists/schemas live in `api/_wire*.py`; unsupported objects fail closed.
+
+## Plugin feedback
+
+Job event streams include versioned `type: "feedback"` events from the public
+[plugin feedback API](FEEDBACK.md), plus operation-scoped legacy `type: "log"`
+messages. Both expose a top-level `message`; structured feedback also identifies
+activities, stages, hosts, counters, and metrics. These describe the operation
+(e.g. image transfer or ColdSnap restore), not container log output.

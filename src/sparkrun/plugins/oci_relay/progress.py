@@ -16,6 +16,16 @@ PROGRESS = 25
 logger = logging.getLogger(__name__)
 
 
+def status(log, stage, message, *args):
+    """Publish a preparation status on new hosts, retaining old-host logging."""
+    try:
+        from sparkrun.plugins import get_feedback
+    except ImportError:
+        log.log(PROGRESS, message, *args)
+    else:
+        get_feedback("oci-relay", logger=log).progress(message % args if args else message, stage=stage)
+
+
 def size(value):
     value = max(0, value)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
@@ -29,7 +39,18 @@ def layers(value):
 
 
 class Progress:
-    def __init__(self, image, *, interval=30, heartbeat=30):
+    def __init__(self, image, *, interval=30, heartbeat=30, feedback=None):
+        # Older hosts and dependency-isolated plugin tests retain text feedback.
+        try:
+            from sparkrun.plugins import get_feedback
+        except ImportError:
+            self.feedback = None
+        else:
+            self.feedback = (feedback.child(source="oci-relay", logger=logger) if feedback is not None
+                             else get_feedback("oci-relay", logger=logger))
+        self.receiver_feedback = {}
+        self.registry_feedback = self.feedback.child() if self.feedback else None
+        self.stage = "prepare"
         self.started = time.monotonic()
         self.interval = interval
         self.heartbeat = heartbeat
@@ -53,24 +74,33 @@ class Progress:
         self.thread = threading.Thread(target=self._heartbeat, name="oci-relay-progress", daemon=True)
         self.thread.start()
 
-    def _log(self, message):
-        logger.log(PROGRESS, "OCI Relay: %s", message)
+    def _log(self, message, *, reporter=None, **fields):
+        reporter = reporter or self.feedback
+        if reporter is None:
+            logger.log(PROGRESS, "OCI Relay: %s", message)
+        else:
+            reporter.progress("OCI Relay: " + message, **fields)
         self.last_output = time.monotonic()
 
     def _heartbeat(self):
         while not self.stopped.wait(min(1, self.heartbeat)):
             with self.lock:
                 if time.monotonic() - self.last_output >= self.heartbeat:
-                    self._log(f"{self.label}; running {time.monotonic() - self.started:.0f}s")
+                    self._log(f"{self.label}; running {time.monotonic() - self.started:.0f}s",
+                              stage=self.stage, status="running",
+                              metrics={"heartbeat": True, "elapsed_seconds": time.monotonic() - self.started})
 
-    def phase(self, label):
+    def phase(self, label, *, stage="prepare"):
         with self.lock:
             self.label = label
-            self._log(label)
+            self.stage = stage
+            self._log(label, stage=stage, status="running")
 
     def bind(self, hosts):
         with self.lock:
             self.hosts = dict(hosts)
+            if self.feedback:
+                self.receiver_feedback = {identity: self.feedback.child(host=host) for identity, host in hosts.items()}
 
     def event(self, event):
         with self.lock:
@@ -80,7 +110,8 @@ class Progress:
                     continue
                 self.pending.add(identity)
                 label = "import finished" if result.get("state") == "COMPLETE" else "receiver stopped"
-                self._log(f"{self.hosts[identity]}: {label}; awaiting final checks")
+                self._log(f"{self.hosts[identity]}: {label}; awaiting final checks",
+                          reporter=self.receiver_feedback.get(identity), stage="verify", status="running")
             for identity, observation in event.get("receiver_progress", {}).items():
                 if identity not in self.hosts or identity in self.finished or identity in self.pending:
                     continue
@@ -126,12 +157,20 @@ class Progress:
                         detail += f", last advance {age:.0f}s ago"
                 if observation.get("extracted_layers"):
                     detail += f"; {observation['extracted_layers']} layers extracted"
-                self._log(f"{self.hosts[identity]}: {label}{detail}; {observation.get('elapsed_seconds', 0):.0f}s")
+                metrics = {key: observation[key] for key in (
+                    "bytes_per_second", "wire_bytes", "elapsed_seconds", "reused_layers", "extracting_layer",
+                    "extract_current", "extract_total", "extract_seconds", "extract_update_age_seconds", "extracted_layers",
+                ) if key in observation}
+                counters = (dict(current=received, total=expected, total_kind="upper_bound", unit="bytes")
+                            if observation.get("inventory_ready") else {})
+                self._log(f"{self.hosts[identity]}: {label}{detail}; {observation.get('elapsed_seconds', 0):.0f}s",
+                          reporter=self.receiver_feedback.get(identity), stage=phase, status="running", metrics=metrics, **counters)
             metrics = event.get("registry_metrics")
             if metrics is not None:
                 errors = metrics.get("disk_cache_write_errors", 0)
                 if errors > self.registry_cache_errors:
-                    self._log("registry disk cache write failed; continuing without new cache files (late receivers may redownload)")
+                    self._log("registry disk cache write failed; continuing without new cache files (late receivers may redownload)",
+                              reporter=self.registry_feedback, stage="registry", metrics={"disk_cache_write_errors": errors})
                     self.registry_cache_errors = errors
                 current = metrics.get("upstream_blob_bytes", 0)
                 self.registry_bytes = current
@@ -140,7 +179,8 @@ class Progress:
                     if self.registry_sample is not None:
                         dt = now - self.registry_sample[0]
                         detail = f", {size(max(0, current - self.registry_sample[1]) / dt)}/s"
-                    self._log(f"registry download: {size(current)}{detail}")
+                    self._log(f"registry download: {size(current)}{detail}", reporter=self.registry_feedback,
+                              stage="registry", status="running", current=current, unit="bytes")
                     self.registry_sample = (now, current)
 
     def outcome(self, identity, observation, valid):
@@ -161,7 +201,13 @@ class Progress:
                 self.cleanup_incomplete = True
                 label += "; cleanup incomplete"
             detail = f"; {size(p['wire_bytes'])} transferred" if p else ""
-            self._log(f"{self.hosts[identity]}: {label}{detail}; {layers(reused)}")
+            metrics = {"reused_layers": reused, "already_present": bool(observation.get("already_present")),
+                       "cleanup_incomplete": bool(observation.get("cleanup_error"))}
+            if p:
+                metrics["wire_bytes"] = p.get("wire_bytes", 0)
+            self._log(f"{self.hosts[identity]}: {label}{detail}; {layers(reused)}",
+                      reporter=self.receiver_feedback.get(identity), stage="verify",
+                      status="succeeded" if valid else "failed", metrics=metrics)
 
     def close(self, completed, cleanup):
         self.stopped.set()
@@ -175,4 +221,10 @@ class Progress:
                         if self.wire_known and self.hosts and len(self.finished) == len(self.hosts)
                         else "receiver byte total unavailable")
             self._log(f"{label} in {time.monotonic() - self.started:.1f}s; "
-                      f"{transfer}; {layers(self.reused_layers)}{upstream}")
+                      f"{transfer}; {layers(self.reused_layers)}{upstream}", stage="complete",
+                      status="succeeded" if completed else "failed", metrics={
+                          "elapsed_seconds": time.monotonic() - self.started,
+                          "reused_layers": self.reused_layers,
+                          "wire_bytes": self.wire_bytes if self.wire_known and len(self.finished) == len(self.hosts) else None,
+                          "registry_bytes": self.registry_bytes, "cleanup_incomplete": bool(cleanup or self.cleanup_incomplete),
+                      })

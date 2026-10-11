@@ -320,6 +320,19 @@ def controlled_plugin(binding, monkeypatch):
                 sctx.operation.emit("child", pid=child.pid)
                 while True: time.sleep(.1)
             secret = prompt("secret", "Fixture credential", default=None)
+            if args.get("mode") == "feedback":
+                import logging, threading
+                from sparkrun.plugins import get_feedback
+                feedback = get_feedback("fixture", sctx=sctx)
+                def report():
+                    feedback.progress("Receiving " + secret, stage="transfer", current=4, total=8,
+                                      total_kind="upper_bound", unit="bytes", metrics={"bytes_per_second": 2})
+                    logging.getLogger("legacy.plugin").warning("Legacy warning " + secret)
+                thread = threading.Thread(target=report)
+                thread.start()
+                thread.join()
+                feedback.progress("Verified", stage="verify", status="succeeded")
+                return {"accepted": True}
             sctx.operation.emit("progress", credential_echo=secret)
             approved = prompt("approval", "Continue?", default=False)
             if not approved:
@@ -495,3 +508,18 @@ def test_actual_systemd_api_restart_preserves_independent_worker(controlled_plug
         if job:
             subprocess.run(["systemctl", "--user", "stop", f"sparkrun-job-{binding.key}-{job}"], capture_output=True, timeout=20)
         subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True, timeout=20)
+
+
+def test_real_plugin_feedback_is_replayable_redacted_and_not_duplicated(controlled_plugin):
+    binding = controlled_plugin
+    with real_server(binding) as (_, client):
+        job = client.call("fixture.wait", {"mode": "feedback"})["job_id"]
+        assert client.wait(job, timeout=15, prompt=lambda _: "private-feedback-token") == {"accepted": True}
+        events = list(client.events(job))
+        feedback = [event for event in events if event["type"] in {"feedback", "log"}]
+        assert [event["message"] for event in feedback] == ["Receiving [redacted]", "Legacy warning [redacted]", "Verified"]
+        assert feedback[0]["total_kind"] == "upper_bound" and feedback[0]["metrics"]["bytes_per_second"] == 2
+        assert all(event["operation_id"] == job for event in feedback)
+        assert "private-feedback-token" not in json.dumps(events)
+    with real_server(binding) as (_, client):
+        assert list(client.events(job, after=feedback[0]["id"])) == [event for event in events if event["id"] > feedback[0]["id"]]
