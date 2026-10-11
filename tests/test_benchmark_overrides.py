@@ -141,7 +141,7 @@ def test_tp_flag_places_on_four_nodes(runner, bench_env):
     plan = captured["plan"]
     assert plan.is_solo is False
     assert len(plan.host_list) == 4
-    assert "Mode:                  cluster (4 nodes)" in result.output
+    assert "Placement: 4 hosts from" in result.output
 
 
 def test_without_the_flag_the_recipe_value_still_wins(runner, bench_env):

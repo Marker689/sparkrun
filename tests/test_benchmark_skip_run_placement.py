@@ -283,8 +283,8 @@ def test_skip_run_banner_names_the_workloads_host(runner, bench_env, cluster_sta
     result = _invoke(runner, ["--skip-run"], arm=cluster_status)
 
     assert result.exit_code == 0, result.output
-    assert "Hosts:                 %s" % _RUNNING_HOST in result.output
-    assert "Mode:                  solo" in result.output
+    assert "Hosts:     %s" % _RUNNING_HOST in result.output
+    assert "Mode:      solo" in result.output
     assert "cluster (4 nodes)" not in result.output
 
 
@@ -301,7 +301,7 @@ def test_without_skip_run_placement_is_unchanged(runner, bench_env, cluster_stat
     result = _invoke(runner, [])
 
     assert result.exit_code == 0, result.output
-    assert "Mode:                  solo" in result.output
+    assert "Placement: solo on" in result.output
     assert "no running workload matched" not in result.output
 
 

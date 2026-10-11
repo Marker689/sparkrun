@@ -19,7 +19,6 @@ from sparkrun.api._benchmark import _ProgressEmitter
 from ._common import (
     PROFILE_NAME,
     RECIPE_NAME,
-    _display_vram_estimate,
     _enter_offline_mode,
     _get_context,
     dry_run_option,
@@ -28,6 +27,8 @@ from ._common import (
     with_host_context,
     HIDE_ADVANCED_OPTIONS,
 )
+
+from ._run_presentation import describe_host_source, echo_run_identity, planning_output, render_run_plan
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +40,55 @@ if TYPE_CHECKING:
 class _CliEmitter(_ProgressEmitter):
     """Shared terminal adapter for benchmark run, resume, and stop."""
 
-    def __init__(self, *, show_recipe=False, decision_callback=None):
+    def __init__(self, *, show_recipe=False, host_source="localhost", verbose=False, decision_callback=None):
         super().__init__(decision_callback or _cli_decision)
         self.show_recipe = show_recipe
+        self.host_source = host_source
+        self.verbose = verbose
 
-    def on_recipe_resolved(self, recipe, overrides, *, local_cache_dir=None):
-        if self.show_recipe:
-            try:
-                _display_vram_estimate(recipe, cli_overrides=overrides, auto_detect=True, cache_dir=local_cache_dir)
-            except Exception:
-                logger.debug("Recipe display failed", exc_info=True)
+    def planning(self, recipe, runtime):
+        if not self.show_recipe:
+            return super().planning(recipe, runtime)
+        echo_run_identity(recipe, runtime)
+        return planning_output()
+
+    def on_run_planned(self, plan, options) -> bool:
+        if not self.show_recipe:
+            return False
+        return render_run_plan(plan, options, host_source=self.host_source, verbose=self.verbose)
+
+    def benchmark_summary(self, *, recipe, runtime, fw, profile, host_list, is_solo, served_model_name, bench_args, skip_run):
+        if not self.show_recipe:
+            return super().benchmark_summary(
+                recipe=recipe,
+                runtime=runtime,
+                fw=fw,
+                profile=profile,
+                host_list=host_list,
+                is_solo=is_solo,
+                served_model_name=served_model_name,
+                bench_args=bench_args,
+                skip_run=skip_run,
+            )
+        if skip_run:
+            echo_run_identity(recipe, runtime)
+            click.echo()
+            click.echo("Target:    existing deployment (--skip-run)")
+            click.echo("Hosts:     %s" % ", ".join(host_list))
+            click.echo("Mode:      %s" % ("solo" if is_solo else "cluster (%d nodes)" % len(host_list)))
+            click.echo()
+        click.echo("Recipe:    %s" % recipe.qualified_name)
+        if served_model_name != recipe.model:
+            click.echo("Served as: %s" % served_model_name)
+        click.echo("Benchmark: %s" % fw.framework_name)
+        if profile:
+            click.echo("Profile:   %s" % profile)
+        click.echo()
+        click.echo("Benchmark args:")
+        for key, value in bench_args.items():
+            display_value = "***REDACTED***" if "api_key" in key.lower() else value
+            click.echo("  %-35s %s" % (key + ":", display_value))
+        click.echo()
 
     def schedule_progress(self, **kwargs):
         from sparkrun.benchmarking.progress_ui import BenchmarkProgressUI
@@ -585,7 +625,14 @@ def _run_benchmark(
         offline=offline,
     )
 
-    emitter = _CliEmitter(show_recipe=True, decision_callback=decision_callback)
+    emitter = _CliEmitter(
+        show_recipe=True,
+        host_source=describe_host_source(
+            hosts=hosts, hosts_file=hosts_file, cluster_name=cluster_name, cluster_mgr=cluster_mgr, config=sctx.config
+        ),
+        verbose=(ctx.find_root().obj or {}).get("verbose", 0) >= 1,
+        decision_callback=decision_callback,
+    )
 
     try:
         bench_result = _execute_benchmark(opts, sctx=sctx, emitter=emitter)

@@ -1052,7 +1052,7 @@ class TestRunCommand:
     def test_run_platform_homogeneous_dgx_spark(self, runner, reset_bootstrap):
         """Platform line shows homogeneous DGX Spark when all hosts have GB10 hardware."""
         with mock.patch.object(SglangRuntime, "run", return_value=0):
-            with mock.patch("sparkrun.cli._run._summarize_platforms") as mock_sp:
+            with mock.patch("sparkrun.cli._run_presentation._summarize_platforms") as mock_sp:
                 mock_sp.return_value = ("DGX Spark (NVIDIA GB10, NCCL)", None)
                 result = runner.invoke(
                     main,
@@ -1071,7 +1071,7 @@ class TestRunCommand:
     def test_run_platform_heterogeneous(self, runner, reset_bootstrap):
         """Platform line shows 'mixed' with per-host details for heterogeneous clusters."""
         with mock.patch.object(SglangRuntime, "run", return_value=0):
-            with mock.patch("sparkrun.cli._run._summarize_platforms") as mock_sp:
+            with mock.patch("sparkrun.cli._run_presentation._summarize_platforms") as mock_sp:
                 mock_sp.return_value = (
                     "mixed",
                     [

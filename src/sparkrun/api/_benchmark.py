@@ -96,14 +96,43 @@ class _ProgressEmitter:
     def event(self, ev: ProgressEvent) -> None:
         pass
 
-    def on_recipe_resolved(self, recipe, overrides: dict, *, local_cache_dir: str | None = None) -> None:
-        """Hook fired once after the recipe is loaded and overrides applied.
+    def planning(self, recipe, runtime):
+        """Optional presentation around planning; library use stays headless."""
+        return contextlib.nullcontext()
 
-        CLI overrides this to render a VRAM estimate; library callers no-op.
-        Lives on the emitter so the orchestration loads the recipe exactly
-        once.
-        """
-        pass
+    def on_run_planned(self, plan, options) -> bool:
+        """Return True only when hardware evidence has been presented."""
+        return False
+
+    def benchmark_summary(self, *, recipe, runtime, fw, profile, host_list, is_solo, served_model_name, bench_args, skip_run):
+        """Keep the library's banner events independent of terminal layout."""
+        from sparkrun import __version__
+
+        self.banner("=" * 60)
+        self.banner("sparkrun v%s — benchmark" % __version__)
+        self.banner("=" * 60)
+        self.banner("Recipe:                %s" % recipe.qualified_name)
+        self.banner("Model:                 %s" % recipe.model)
+        # The banner is what a reader checks the target against, and under an alias
+        # the model id is *not* what the requests carry — naming only the id is how
+        # a whole suite of 404s reads as a model-quality result (issue #298).
+        if served_model_name != recipe.model:
+            self.banner("Served as:             %s" % served_model_name)
+        self.banner("Runtime:               %s" % runtime.runtime_name)
+        if recipe.container:
+            self.banner("Declared image:        %s" % recipe.container)
+        self.banner("Benchmark Framework:   %s" % fw.framework_name)
+        if profile:
+            self.banner("Benchmark Profile:     %s" % profile)
+        self.banner("Hosts:                 %s" % ", ".join(host_list))
+        self.banner("Mode:                  %s" % ("solo" if is_solo else "cluster (%d nodes)" % len(host_list)))
+        self.banner("")
+        self.banner("Benchmark args:")
+        for k, bv in bench_args.items():
+            display_val = "***REDACTED***" if "api_key" in k.lower() else bv
+            self.banner("  %-35s %s" % (k + ":", display_val))
+        self.banner("=" * 60)
+        self.banner("")
 
 
 class _NullProgressEmitter(_ProgressEmitter):
@@ -650,19 +679,20 @@ def _execute_benchmark(
             offline=options.offline,
         )
         try:
-            run_plan = api.plan(run_options, sctx=sctx)
+            with emitter.planning(recipe, runtime):
+                run_plan = api.plan(run_options, sctx=sctx)
         except api.SparkrunError as e:
             raise BenchmarkFailed("Error: inference launch failed: %s" % e, exit_code=1) from e
         host_list = list(run_plan.host_list)
         is_solo = run_plan.is_solo
 
-    # Notify the emitter that the recipe is fully resolved so it can render
-    # presentation-only artifacts (e.g. the CLI's VRAM estimate) without
-    # forcing the CLI shell to reload the recipe ahead of orchestration.
-    try:
-        emitter.on_recipe_resolved(recipe, overrides, local_cache_dir=local_cache_dir)
-    except Exception:
-        logger.debug("emitter.on_recipe_resolved failed", exc_info=True)
+        # Only terminal adapters acknowledge rendered hardware. Other callers
+        # still receive the launcher's evidence through their feedback sink.
+        try:
+            if emitter.on_run_planned(run_plan, run_options) is True:
+                run_plan = dataclasses.replace(run_plan, hardware_reported=True)
+        except Exception:
+            logger.debug("emitter.on_run_planned failed", exc_info=True)
 
     if skip_run:
         config_chain = recipe.build_config_chain(overrides)
@@ -700,33 +730,17 @@ def _execute_benchmark(
     # -----------------------------------------------------------------------
     # 5. Display summary
     # -----------------------------------------------------------------------
-    from sparkrun import __version__
-
-    emitter.banner("=" * 60)
-    emitter.banner("sparkrun v%s — benchmark" % __version__)
-    emitter.banner("=" * 60)
-    emitter.banner("Recipe:                %s" % recipe.qualified_name)
-    emitter.banner("Model:                 %s" % recipe.model)
-    # The banner is what a reader checks the target against, and under an alias
-    # the model id is *not* what the requests carry — naming only the id is how
-    # a whole suite of 404s reads as a model-quality result (issue #298).
-    if served_model_name != recipe.model:
-        emitter.banner("Served as:             %s" % served_model_name)
-    emitter.banner("Runtime:               %s" % runtime.runtime_name)
-    if recipe.container:
-        emitter.banner("Declared image:        %s" % recipe.container)
-    emitter.banner("Benchmark Framework:   %s" % fw.framework_name)
-    if profile:
-        emitter.banner("Benchmark Profile:     %s" % profile)
-    emitter.banner("Hosts:                 %s" % ", ".join(host_list))
-    emitter.banner("Mode:                  %s" % ("solo" if is_solo else "cluster (%d nodes)" % len(host_list)))
-    emitter.banner("")
-    emitter.banner("Benchmark args:")
-    for k, bv in bench_args.items():
-        display_val = "***REDACTED***" if "api_key" in k.lower() else bv
-        emitter.banner("  %-35s %s" % (k + ":", display_val))
-    emitter.banner("=" * 60)
-    emitter.banner("")
+    emitter.benchmark_summary(
+        recipe=recipe,
+        runtime=runtime,
+        fw=fw,
+        profile=profile,
+        host_list=host_list,
+        is_solo=is_solo,
+        served_model_name=served_model_name,
+        bench_args=bench_args,
+        skip_run=skip_run,
+    )
 
     # -----------------------------------------------------------------------
     # 6–10: Launch, benchmark, stop
