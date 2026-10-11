@@ -12,6 +12,7 @@ from typing import Any, Iterator, Sequence
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.geometry import Size
 from textual.widgets import Input, Static
 
 from sparkrun.api._errors import SparkrunError
@@ -699,6 +700,514 @@ def test_view_state_transitions():
     assert vs.is_following is True
     assert vs.state == FollowState.FOLLOWING
     assert vs.pending_lines == 0
+
+
+def test_view_state_space_toggle_reliable():
+    """Space toggle reliably switches state regardless of at_bottom parameter."""
+    # 1. In FOLLOWING:
+    # Space always transitions to PAUSED, even if at_bottom is False or None
+    for at_bottom in (True, False, None):
+        vs = ViewState()
+        assert vs.state == FollowState.FOLLOWING
+        jumped = vs.on_space(at_bottom=at_bottom)
+        assert jumped is False
+        assert vs.state == FollowState.PAUSED
+        assert vs.is_paused is True
+
+    # 2. In PAUSED:
+    # Space always transitions to FOLLOWING, even if at_bottom is False or None
+    for at_bottom in (True, False, None):
+        vs = ViewState()
+        vs.state = FollowState.PAUSED
+        vs.pending_lines = 42
+        jumped = vs.on_space(at_bottom=at_bottom)
+        assert jumped is False
+        assert vs.state == FollowState.FOLLOWING
+        assert vs.is_following is True
+        assert vs.pending_lines == 0
+
+    # 3. In SCROLLED:
+    # Space always transitions to FOLLOWING and returns jumped=True
+    for at_bottom in (True, False, None):
+        vs = ViewState()
+        vs.state = FollowState.SCROLLED
+        vs.pending_lines = 15
+        jumped = vs.on_space(at_bottom=at_bottom)
+        assert jumped is True
+        assert vs.state == FollowState.FOLLOWING
+        assert vs.is_following is True
+        assert vs.pending_lines == 0
+
+
+def test_view_state_user_scroll_up_and_resilient_bottom():
+    """User scroll up explicitly decouples following; bottom resume only works from scrolled."""
+    vs = ViewState()
+    # From FOLLOWING -> on_user_scroll_up transitions to SCROLLED
+    assert vs.state == FollowState.FOLLOWING
+    vs.on_user_scroll_up()
+    assert vs.state == FollowState.SCROLLED
+
+    # Subsequent user scrolls stay SCROLLED
+    vs.on_user_scroll_up()
+    assert vs.state == FollowState.SCROLLED
+
+    # When reaching bottom, SCROLLED transitions back to FOLLOWING
+    vs.pending_lines = 5
+    vs.on_scroll(at_bottom=True)
+    assert vs.state == FollowState.FOLLOWING
+    assert vs.pending_lines == 0
+
+    # In PAUSED, on_user_scroll_up does NOT leave PAUSED
+    vs.state = FollowState.PAUSED
+    vs.on_user_scroll_up()
+    assert vs.state == FollowState.PAUSED
+
+    # In PAUSED, on_scroll(True) does NOT resume following (pause stays paused)
+    vs.on_scroll(at_bottom=True)
+    assert vs.state == FollowState.PAUSED
+
+    # In PAUSED, on_scroll(False) stays PAUSED
+    vs.on_scroll(at_bottom=False)
+    assert vs.state == FollowState.PAUSED
+
+
+def test_log_view_scroll_up_decouples_synchronously():
+    """LogView scroll actions immediately decouple ViewState without waiting for messages."""
+    import asyncio
+
+    buf = LogBuffer()
+    for i in range(100):
+        buf.append(LogLine(host="h1", container="c1", role="head", rank=0, text=f"line {i}"))
+
+    vs = ViewState()
+    view = LogView(buf, view_state=vs)
+
+    class ViewApp(App):
+        def compose(self) -> ComposeResult:
+            yield view
+
+    async def _run():
+        app = ViewApp()
+        async with app.run_test(size=(80, 20)) as pilot:
+            view.scroll_to_end()
+            await pilot.pause(0.05)
+            assert vs.state == FollowState.FOLLOWING
+
+            # action_scroll_up synchronously sets state to SCROLLED
+            view.action_scroll_up()
+            assert vs.state == FollowState.SCROLLED
+
+            # Resume following
+            vs.state = FollowState.FOLLOWING
+            # action_page_up synchronously sets state to SCROLLED
+            view.action_page_up()
+            assert vs.state == FollowState.SCROLLED
+
+            # Resume following
+            vs.state = FollowState.FOLLOWING
+            # action_scroll_home synchronously sets state to SCROLLED
+            view.action_scroll_home()
+            assert vs.state == FollowState.SCROLLED
+
+    asyncio.run(_run())
+
+
+def test_log_pane_key_scroll_and_pause_decoupling(monkeypatch):
+    """Up arrow immediately decouples from follow stream; space reliably pauses and resumes."""
+    import asyncio
+    import time
+
+    lines = [LogLine(host="h1", container="c1", text=f"stream line {i}") for i in range(50)]
+
+    class StreamingTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            yield from super().follow(tail=tail, cancel=cancel)
+            while cancel and not cancel.is_set():
+                time.sleep(0.01)
+
+    target = StreamingTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Press 'up' arrow -> immediately decouples to SCROLLED
+            await pilot.press("up")
+            assert pane.view_state.state == FollowState.SCROLLED
+            scrolled_y = pane.log_view.scroll_y
+
+            # Deliver a new live line while scrolled
+            pane._on_line(LogLine(host="h1", container="c1", text="incoming live line"), gen=pane._generation)
+            # View must NOT have snapped back to bottom
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane.log_view.scroll_y == scrolled_y
+            assert pane.view_state.pending_lines == 1
+
+            # Press 'space' -> jumps to end and resumes following
+            await pilot.press("space")
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.view_state.pending_lines == 0
+
+            # Press 'space' while following -> unconditionally pauses
+            await pilot.press("space")
+            assert pane.view_state.state == FollowState.PAUSED
+
+            # Deliver another line while paused
+            pane._on_line(LogLine(host="h1", container="c1", text="line while paused"), gen=pane._generation)
+            assert pane.view_state.state == FollowState.PAUSED
+            assert pane.view_state.pending_lines == 1
+
+            # Press 'space' while paused -> resumes following
+            await pilot.press("space")
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.view_state.pending_lines == 0
+
+    asyncio.run(_run())
+
+
+def test_log_pane_burst_lines_then_synchronous_up_race(monkeypatch):
+    """Lines delivered followed immediately by synchronous scroll_up must not be snapped back."""
+    import asyncio
+    import time
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i}") for i in range(50)]
+
+    class StreamingTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            yield from super().follow(tail=tail, cancel=cancel)
+            while cancel and not cancel.is_set():
+                time.sleep(0.01)
+
+    target = StreamingTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Deliver burst of 5 lines
+            for i in range(5):
+                pane._on_line(LogLine(host="h1", container="c1", text=f"burst {i}"), gen=pane._generation)
+
+            # Immediately trigger upward scroll action without awaiting idle/refresh
+            pane.log_view.action_scroll_up()
+            assert pane.view_state.state == FollowState.SCROLLED
+            target_y = pane.log_view.scroll_target_y
+
+            # After refresh/pause, scroll position and SCROLLED state must be preserved
+            await pilot.pause(0.2)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane.log_view.scroll_y == target_y
+            assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+            assert not pane.log_view.is_at_bottom
+
+            # Incoming line while scrolled must not snap to bottom
+            pane._on_line(LogLine(host="h1", container="c1", text="live after scroll"), gen=pane._generation)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane.log_view.scroll_y == target_y
+            assert pane.view_state.pending_lines == 1
+
+    asyncio.run(_run())
+
+
+def test_log_pane_mouse_wheel_and_bottom_resume(monkeypatch):
+    """Mouse wheel up decouples follow; wheel down to bottom resumes; paused stays paused."""
+    import asyncio
+    from textual import events
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i}") for i in range(100)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Wheel up decouples to SCROLLED
+            event_up = events.MouseScrollUp(pane.log_view, 10, 10, 0, 0, 0, False, False, False, screen_x=10, screen_y=10)
+            pane.log_view.post_message(event_up)
+            await pilot.pause(0.05)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert not pane.log_view.is_at_bottom
+
+            # Wheel down to bottom resumes FOLLOWING
+            for _ in range(50):
+                event_down = events.MouseScrollDown(pane.log_view, 10, 10, 0, 0, 0, False, False, False, screen_x=10, screen_y=10)
+                pane.log_view.post_message(event_down)
+            await pilot.pause(0.05)
+            assert pane.log_view.is_at_bottom is True
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Pause with space
+            await pilot.press("space")
+            assert pane.view_state.state == FollowState.PAUSED
+
+            # Wheel up while paused stays PAUSED
+            pane.log_view.post_message(event_up)
+            await pilot.pause(0.05)
+            assert pane.view_state.state == FollowState.PAUSED
+
+            # Wheel down to bottom while paused stays PAUSED
+            for _ in range(50):
+                event_down = events.MouseScrollDown(pane.log_view, 10, 10, 0, 0, 0, False, False, False, screen_x=10, screen_y=10)
+                pane.log_view.post_message(event_down)
+            await pilot.pause(0.05)
+            assert pane.log_view.is_at_bottom is True
+            assert pane.view_state.state == FollowState.PAUSED
+
+    asyncio.run(_run())
+
+
+def test_log_view_no_op_up_when_no_scrollable_space(monkeypatch):
+    """When content fits on screen, scroll up actions do not transition to SCROLLED."""
+    import asyncio
+    from textual import events
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i}") for i in range(2)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.log_view.max_scroll_y <= 0
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Action scroll up does not decouple
+            pane.log_view.action_scroll_up()
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Action page up does not decouple
+            pane.log_view.action_page_up()
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Action scroll home does not decouple
+            pane.log_view.action_scroll_home()
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Mouse wheel up does not decouple
+            event_up = events.MouseScrollUp(pane.log_view, 10, 10, 0, 0, 0, False, False, False, screen_x=10, screen_y=10)
+            pane.log_view.post_message(event_up)
+            await pilot.pause(0.05)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+    asyncio.run(_run())
+
+
+def test_log_pane_end_key_jumps_bottom_and_resumes_following(monkeypatch):
+    """End key jumps to bottom: resumes FOLLOWING from SCROLLED, preserves PAUSED."""
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i}") for i in range(100)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Scroll up into history
+            await pilot.press("pageup")
+            await pilot.pause(0.05)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+
+            # Press 'end': reaches bottom and resumes FOLLOWING
+            await pilot.press("end")
+            await pilot.pause(0.1)
+            assert pane.log_view.is_at_bottom is True
+            assert pane.log_view.scroll_y == pane.log_view.max_scroll_y
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Pause with space
+            await pilot.press("space")
+            assert pane.view_state.state == FollowState.PAUSED
+
+            # Scroll up while paused
+            await pilot.press("pageup")
+            await pilot.pause(0.05)
+            assert pane.view_state.state == FollowState.PAUSED
+            assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+
+            # Press 'end' while paused: reaches bottom but PAUSED remains PAUSED
+            await pilot.press("end")
+            await pilot.pause(0.1)
+            assert pane.log_view.is_at_bottom is True
+            assert pane.log_view.scroll_y == pane.log_view.max_scroll_y
+            assert pane.view_state.state == FollowState.PAUSED
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("rate", [50, 200, 600])
+def test_log_pane_live_stream_end_key_resumes_following_under_load(monkeypatch, rate):
+    """Under sustained live streaming (50-600/s), pageup decouples and End reliably resumes FOLLOWING at bottom.
+
+    While paused, End jumps to bottom but strictly preserves PAUSED without following new lines.
+    """
+    import asyncio
+    import time
+
+    class StreamingTarget(FakeLogTarget):
+        def __init__(self, stream_rate: int):
+            lines = [LogLine(host="h1", container="c1", text=f"initial {i}") for i in range(200)]
+            super().__init__(lines=lines, windowing_supported=False)
+            self.stream_rate = stream_rate
+
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            yield from super().follow(tail=tail, cancel=cancel)
+            delay = 1.0 / self.stream_rate
+            i = 0
+            while cancel and not cancel.is_set():
+                i += 1
+                yield LogLine(host="h1", container="c1", text=f"live {i}")
+                time.sleep(delay)
+
+    target = StreamingTarget(stream_rate=rate)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # 1. User scrolls up away from live tail
+            app.simulate_key("pageup")
+            await asyncio.sleep(0.1)
+            assert pane.view_state.state == FollowState.SCROLLED
+            scrolled_y = pane.log_view.scroll_y
+            assert scrolled_y < pane.log_view.max_scroll_y
+
+            # 2. Press End while scrolled: must immediately transition to FOLLOWING and jump to bottom
+            app.simulate_key("end")
+            await asyncio.sleep(0.15)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.scroll_y == pane.log_view.max_scroll_y
+            assert pane.view_state.pending_lines == 0
+
+            # 3. Subsequent live lines must keep view anchored at the live bottom
+            await asyncio.sleep(0.15)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.scroll_y == pane.log_view.max_scroll_y
+
+            # 4. Pause streaming with space
+            app.simulate_key("space")
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.PAUSED
+
+            # 5. Scroll up into history while paused
+            app.simulate_key("pageup")
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.PAUSED
+            scrolled_paused_y = pane.log_view.scroll_y
+            assert scrolled_paused_y < pane.log_view.max_scroll_y
+
+            # 6. Press End while paused: jumps to bottom but remains PAUSED
+            app.simulate_key("end")
+            for _ in range(50):
+                if pane.log_view.scroll_y > scrolled_paused_y:
+                    break
+                await asyncio.sleep(0.002)
+            assert pane.view_state.state == FollowState.PAUSED
+            paused_landed_y = pane.log_view.scroll_y
+            assert paused_landed_y > scrolled_paused_y
+
+            # 7. As new lines arrive while paused, view stays at paused position (no auto-follow)
+            await asyncio.sleep(0.15)
+            assert pane.view_state.state == FollowState.PAUSED
+            assert pane.log_view.scroll_y == paused_landed_y
+            assert pane.view_state.pending_lines > 0
+
+    asyncio.run(_run())
+
+
+def test_log_pane_home_pageup_stay_scrolled_after_animation(monkeypatch):
+    """home/pageup from the bottom stay SCROLLED after animation; incoming lines do not snap."""
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i}") for i in range(200)]
+
+    class StreamingTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            yield from super().follow(tail=tail, cancel=cancel)
+            while cancel and not cancel.is_set():
+                time.sleep(0.01)
+
+    target = StreamingTarget(lines=lines, windowing_supported=False)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _assert_holds_scroll(pane: LogPane) -> None:
+        assert pane.view_state.state == FollowState.SCROLLED
+        scrolled_y = pane.log_view.scroll_y
+        assert scrolled_y < pane.log_view.max_scroll_y
+        pane._on_line(LogLine(host="h1", container="c1", text="live after upward scroll"), gen=pane._generation)
+        assert pane.view_state.state == FollowState.SCROLLED
+        assert pane.log_view.scroll_y == scrolled_y
+        assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.is_at_bottom is True
+
+            # home from the bottom: animation must not flip back to FOLLOWING
+            await pilot.press("home")
+            await pilot.pause(0.6)
+            await _assert_holds_scroll(pane)
+
+            # Resume, then pageup from the bottom
+            await pilot.press("end")
+            await pilot.pause(0.6)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.is_at_bottom is True
+
+            await pilot.press("pageup")
+            await pilot.pause(0.6)
+            await _assert_holds_scroll(pane)
+
+            # pageup immediately after an End-resume must also stay SCROLLED
+            await pilot.press("end")
+            await pilot.pause(0.6)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            await pilot.press("pageup")
+            await pilot.pause(0.6)
+            await _assert_holds_scroll(pane)
+
+            # home while PAUSED stays PAUSED after the animation settles
+            await pilot.press("end")
+            await pilot.pause(0.6)
+            await pilot.press("space")
+            assert pane.view_state.state == FollowState.PAUSED
+            await pilot.press("home")
+            await pilot.pause(0.6)
+            assert pane.view_state.state == FollowState.PAUSED
+            assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+            paused_y = pane.log_view.scroll_y
+            pane._on_line(LogLine(host="h1", container="c1", text="live while paused after home"), gen=pane._generation)
+            assert pane.view_state.state == FollowState.PAUSED
+            assert pane.log_view.scroll_y == paused_y
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -1485,9 +1994,17 @@ def test_log_pane_wrapped_search_navigation_and_input(monkeypatch):
 def test_log_pane_wrap_eviction_no_phantom_rows(monkeypatch):
     """Buffer eviction in wrap mode leaves no phantom rows in _wrap_map."""
     import asyncio
+    import time
 
     lines = [LogLine(host="h1", container="c1", text=f"line {i} " + ("longtext " * 12)) for i in range(30)]
-    target = FakeLogTarget(lines=lines)
+
+    class StreamingTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            yield from super().follow(tail=tail, cancel=cancel)
+            while cancel and not cancel.is_set():
+                time.sleep(0.01)
+
+    target = StreamingTarget(lines=lines)
     monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
 
     async def _run():
@@ -2667,5 +3184,646 @@ def test_dump_modal_blocks_second_submit_and_scope_change_while_dumping(tmp_path
             # Clean up dump
             screen._cancel.set()
             await pilot.pause(0.05)
+
+    asyncio.run(_run())
+
+
+def test_log_pane_space_pauses_during_high_speed_stream(monkeypatch):
+    """Pressing space reliably pauses high-speed streaming on the first press and resumes on second."""
+    import asyncio
+    import time
+
+    class HighSpeedTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            i = 0
+            while cancel and not cancel.is_set() and i < 2000:
+                i += 1
+                yield LogLine(host="h1", container="c1", text=f"stream {i}")
+                time.sleep(0.001)
+
+    target = HighSpeedTarget()
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.FOLLOWING
+
+            # Press space via simulate_key while streaming at 500+/s
+            t0 = time.time()
+            app.simulate_key("space")
+            paused = False
+            for _ in range(100):
+                if pane.view_state.state == FollowState.PAUSED:
+                    paused = True
+                    break
+                await asyncio.sleep(0.002)
+            assert paused, "Space key must immediately pause follow on first press"
+            latency = (time.time() - t0) * 1000
+            assert latency < 300, f"Space pause latency was {latency:.1f}ms, expected < 300ms"
+
+            # Deliver more lines while paused: pending lines must accumulate
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.PAUSED
+            assert pane.view_state.pending_lines > 0
+
+            # Press space again: resumes following, resets pending count, scrolls to end
+            app.simulate_key("space")
+            resumed = False
+            for _ in range(50):
+                if pane.view_state.state == FollowState.FOLLOWING:
+                    resumed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert resumed, "Second space key must resume follow"
+            assert pane.view_state.pending_lines == 0
+
+    asyncio.run(_run())
+
+
+def test_log_pane_scroll_up_decouples_from_live_stream(monkeypatch):
+    """Pressing Up arrow immediately decouples from follow and incoming lines don't snap back."""
+    import asyncio
+    import time
+
+    class HighSpeedTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            i = 0
+            while cancel and not cancel.is_set() and i < 2000:
+                i += 1
+                yield LogLine(host="h1", container="c1", text=f"stream {i}")
+                time.sleep(0.001)
+
+    target = HighSpeedTarget()
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            # Wait until buffer has several pages (> 60 lines) so up doesn't start near the top
+            for _ in range(100):
+                if len(pane.buffer) >= 60 and pane.log_view.max_scroll_y > 30:
+                    break
+                await asyncio.sleep(0.005)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.max_scroll_y > 30
+
+            # Send 'up' key press
+            app.simulate_key("up")
+            scrolled = False
+            for _ in range(50):
+                if pane.view_state.state == FollowState.SCROLLED:
+                    scrolled = True
+                    break
+                await asyncio.sleep(0.002)
+            assert scrolled, "Up key must immediately decouple to SCROLLED state"
+            saved_scroll_y = pane.log_view.scroll_y
+
+            # Allow more lines to stream in
+            await asyncio.sleep(0.05)
+
+            # View stays scrolled, position didn't snap to bottom
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane.log_view.scroll_y <= saved_scroll_y + 1
+            assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+
+            # Pressing space returns to FOLLOWING and jumps to bottom
+            app.simulate_key("space")
+            resumed = False
+            for _ in range(50):
+                if pane.view_state.state == FollowState.FOLLOWING:
+                    resumed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert resumed
+            assert pane.view_state.pending_lines == 0
+            assert pane.log_view.is_at_bottom
+
+    asyncio.run(_run())
+
+
+def test_log_pane_hotkeys_responsive_during_streaming(monkeypatch):
+    """Hotkeys (c, 1, escape) respond immediately during live log streaming."""
+    import asyncio
+    import time
+
+    class StreamingTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            i = 0
+            while cancel and not cancel.is_set() and i < 2000:
+                i += 1
+                yield LogLine(host="h1", container="c1", text=f"stream {i}")
+                time.sleep(0.001)
+
+    target = StreamingTarget()
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+
+            # 1. Hotkey 'c' (toggle color)
+            init_color = pane.log_view.color
+            app.simulate_key("c")
+            color_toggled = False
+            for _ in range(50):
+                if pane.log_view.color != init_color:
+                    color_toggled = True
+                    break
+                await asyncio.sleep(0.002)
+            assert color_toggled, "Hotkey 'c' must immediately toggle color"
+
+            # 2. Hotkey '1' (switch scope to CONTAINER)
+            pane.scope = LogScope.CLUSTER
+            app.simulate_key("1")
+            scope_switched = False
+            for _ in range(50):
+                if pane.scope == LogScope.CONTAINER:
+                    scope_switched = True
+                    break
+                await asyncio.sleep(0.002)
+            assert scope_switched, "Hotkey '1' must switch scope to CONTAINER"
+
+            # 3. Hotkey 'slash' then 'escape' (open and cancel search)
+            search_input = pane.query_one("#log-search", Input)
+            assert not search_input.display
+            app.simulate_key("slash")
+            search_opened = False
+            for _ in range(50):
+                if search_input.display and search_input.has_focus:
+                    search_opened = True
+                    break
+                await asyncio.sleep(0.002)
+            assert search_opened, "Hotkey '/' must open and focus search input"
+
+            # Press escape while search is open -> closes search, returns focus to log_view
+            app.simulate_key("escape")
+            search_closed = False
+            for _ in range(50):
+                if not search_input.display and pane.log_view.has_focus:
+                    search_closed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert search_closed, "Hotkey 'escape' while search is open must close search input"
+
+            # Press escape while search is closed -> closes pane
+            assert not app.closed
+            app.simulate_key("escape")
+            pane_closed = False
+            for _ in range(50):
+                if app.closed:
+                    pane_closed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert pane_closed, "Hotkey 'escape' while search is closed must close pane"
+
+    asyncio.run(_run())
+
+
+def test_log_pane_unthrottled_stream_bounded_deque_and_latency(monkeypatch):
+    """Under unthrottled streaming, incoming queue remains bounded and key presses register."""
+    import asyncio
+    import time
+
+    class UnthrottledTarget(FakeLogTarget):
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            i = 0
+            while cancel and not cancel.is_set() and i < 15000:
+                i += 1
+                yield LogLine(host="h1", container="c1", text=f"unthrottled line {i}")
+
+    target = UnthrottledTarget()
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.03)
+
+            # Ingress queue must be strictly bounded <= MAX_INCOMING_LINES
+            with pane._incoming_lock:
+                assert len(pane._incoming_lines) <= pane.MAX_INCOMING_LINES
+
+            # Press space to pause under extreme load
+            t0 = time.time()
+            app.simulate_key("space")
+            paused = False
+            for _ in range(100):
+                if pane.view_state.state == FollowState.PAUSED:
+                    paused = True
+                    break
+                await asyncio.sleep(0.002)
+            assert paused, "Space press must register even during unthrottled burst"
+            latency = (time.time() - t0) * 1000
+            assert latency < 300, f"Pause latency was {latency:.1f}ms, expected < 300ms"
+
+            # Press space to resume
+            app.simulate_key("space")
+            resumed = False
+            for _ in range(100):
+                if pane.view_state.state == FollowState.FOLLOWING:
+                    resumed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert resumed
+
+            # Press up during unthrottled burst
+            app.simulate_key("up")
+            scrolled = False
+            for _ in range(100):
+                if pane.view_state.state == FollowState.SCROLLED:
+                    scrolled = True
+                    break
+                await asyncio.sleep(0.002)
+            assert scrolled, "Up press must immediately decouple to SCROLLED during unthrottled stream"
+
+            # Press escape while search is closed to close pane
+            app.simulate_key("escape")
+            closed = False
+            for _ in range(100):
+                if app.closed:
+                    closed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert closed, "Escape press must close pane during unthrottled burst"
+
+            # Queue remains bounded
+            with pane._incoming_lock:
+                assert len(pane._incoming_lines) <= pane.MAX_INCOMING_LINES
+
+    asyncio.run(_run())
+
+
+def test_log_pane_on_lines_batch_eviction_wrap_correctness(monkeypatch):
+    """Batch eviction with bottom eviction > batch size clamps slices and preserves wrap rows."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            pane.buffer._entries.clear()
+            pane.CAP = 30
+            pane.log_view.wrap = True
+
+            # Pre-fill buffer with 30 lines
+            for i in range(30):
+                pane.buffer.append(LogLine(host="h1", container="c1", text=f"existing line {i}"))
+            pane.log_view.refresh_buffer()
+            assert len(pane.buffer) == 30
+            assert pane.log_view._wrap_row_count() == 30
+
+            # Simulate LOADING_MARKER prepended during older page fetch
+            pane.buffer.prepend_page([LOADING_MARKER])
+            pane.log_view.refresh_buffer()
+            assert len(pane.buffer) == 31
+
+            # User scrolled near top (viewport near 0 forces bottom eviction)
+            pane.view_state.state = FollowState.SCROLLED
+            pane.log_view.scroll_to(y=0, animate=False)
+
+            # Deliver a batch of 3 lines: len=34, cap=30 -> 4 lines evicted from bottom
+            batch = [LogLine(host="h1", container="c1", text=f"batch line {j}") for j in range(3)]
+            pane._on_lines(batch, gen=pane._generation, from_follow=True)
+
+            # Buffer strictly clamped to CAP (30)
+            assert len(pane.buffer) == 30
+            # Wrap rows must match buffer length without duplicate phantom rows
+            assert pane.log_view._wrap_row_count() == 30
+            assert pane.view_state.pending_lines == 3
+
+    asyncio.run(_run())
+
+
+def test_log_pane_stream_ended_and_error_drain_leftover_queue(monkeypatch):
+    """Stream end and error drain any remaining queued lines before appending their markers."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            pane.buffer._entries.clear()
+            gen = pane._generation
+
+            # Enqueue 3 lines in _incoming_lines
+            lines = [LogLine(host="h1", container="c1", text=f"queued {i}") for i in range(3)]
+            with pane._incoming_lock:
+                for line in lines:
+                    pane._incoming_lines.append((line, gen))
+
+            pane._on_stream_ended(gen)
+
+            # Remaining lines must have been delivered to buffer before STREAM_ENDED_MARKER
+            assert len(pane.buffer) == 4
+            assert [e.text for e in list(pane.buffer._entries)[:3]] == ["queued 0", "queued 1", "queued 2"]
+            assert pane.buffer._entries[3] == STREAM_ENDED_MARKER
+
+            # Test for _on_error
+            pane.buffer._entries.clear()
+            gen2 = pane._generation
+            with pane._incoming_lock:
+                pane._incoming_lines.append((LogLine(host="h1", container="c1", text="err queue line"), gen2))
+
+            pane._on_error("Connection failure", gen2)
+            assert len(pane.buffer) == 2
+            assert pane.buffer._entries[0].text == "err queue line"
+            assert "Connection failure" in pane.buffer._entries[1].text
+
+    asyncio.run(_run())
+
+
+def test_log_pane_stale_generation_flush_is_noop(monkeypatch):
+    """A flush event from an old generation does not clear or drop lines from the new generation."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test():
+            await asyncio.sleep(0.05)
+            pane.buffer._entries.clear()
+            old_gen = pane._generation
+            new_gen = old_gen + 1
+            pane._generation = new_gen
+
+            # Enqueue lines for the new generation
+            with pane._incoming_lock:
+                pane._incoming_lines.append((LogLine(host="h1", container="c1", text="new gen line 1"), new_gen))
+                pane._incoming_lines.append((LogLine(host="h1", container="c1", text="new gen line 2"), new_gen))
+                pane._flush_scheduled = True
+
+            # Stale flush for old_gen arriving
+            await pane._flush_incoming(old_gen)
+
+            # Lines for new_gen must NOT have been cleared
+            with pane._incoming_lock:
+                assert len(pane._incoming_lines) == 2
+                assert pane._flush_scheduled is True
+
+            # Flushing with new_gen delivers the lines
+            await pane._flush_incoming(new_gen)
+            with pane._incoming_lock:
+                assert len(pane._incoming_lines) == 0
+
+            assert len(pane.buffer) == 2
+            assert pane.buffer._entries[0].text == "new gen line 1"
+            assert pane.buffer._entries[1].text == "new gen line 2"
+
+    asyncio.run(_run())
+
+
+def test_log_pane_short_log_windowing_up_and_home_stay_scrolled(monkeypatch):
+    """When windowing is supported, up/home on short logs (< 2 pages) and 300-line logs decouple and stay scrolled."""
+    import asyncio
+
+    async def _check(line_count: int, key: str):
+        target = FakeLogTarget(
+            lines=[LogLine(host="h1", container="c1", stream="stdout", timestamp=None, text=f"line {i}") for i in range(line_count)],
+            windowing_supported=True,
+        )
+        monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            await pilot.press(key)
+            await asyncio.sleep(0.3)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
+
+    async def _run():
+        await _check(30, "up")
+        await _check(30, "home")
+        await _check(300, "home")
+
+    asyncio.run(_run())
+
+
+def test_log_pane_windowing_page_success_and_failure_stay_scrolled(monkeypatch):
+    """Page fetch success and failure with windowing_supported=True stay SCROLLED and keep anchor."""
+    import asyncio
+
+    class PagingTarget(FakeLogTarget):
+        def __init__(self, fail: bool = False, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.fail = fail
+
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            if self.fail:
+                raise RuntimeError("simulated page failure")
+            return [LogLine(host="h1", container="c1", text=f"older line {i}") for i in range(10)]
+
+    async def _test_success():
+        target = PagingTarget(
+            fail=False,
+            lines=[LogLine(host="h1", container="c1", text=f"line {i}") for i in range(30)],
+            windowing_supported=True,
+        )
+        monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await asyncio.sleep(0.05)
+            await pilot.press("home")
+            await asyncio.sleep(0.3)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert not pane._loading_page
+            assert any("older line" in e.text for e in pane.buffer._entries if isinstance(e, LogLine))
+            assert pane.view_state.state == FollowState.SCROLLED
+
+    async def _test_failure():
+        target = PagingTarget(
+            fail=True,
+            lines=[LogLine(host="h1", container="c1", text=f"line {i}") for i in range(30)],
+            windowing_supported=True,
+        )
+        monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await asyncio.sleep(0.05)
+            await pilot.press("home")
+            await asyncio.sleep(0.3)
+            assert pane.view_state.state == FollowState.SCROLLED
+            assert pane._page_failed
+            assert any("Page fetch failed" in e.text for e in pane.buffer._entries if isinstance(e, Marker))
+            assert pane.view_state.state == FollowState.SCROLLED
+
+    async def _run():
+        await _test_success()
+        await _test_failure()
+
+    asyncio.run(_run())
+
+
+def test_log_pane_reload_tail_keeps_every_queued_line_including_duplicates(monkeypatch):
+    """Reload tail never inspects line text: every queued live line is kept, duplicates beat drops."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            pane.buffer._entries.clear()
+            gen = pane._generation
+
+            # Real targets stamp follow lines at receipt and repeated lines are common:
+            # identical text / no timestamp must not be mistaken for snapshot overlap.
+            tail_lines = [LogLine(host="h1", container="c1", text="repeat", timestamp=None) for _ in range(3)]
+            queued = [LogLine(host="h1", container="c1", text="repeat", timestamp=None) for _ in range(2)]
+            queued.append(LogLine(host="h1", container="c1", text="newer", timestamp=None))
+            with pane._incoming_lock:
+                pane._flush_scheduled = False
+                for line in queued:
+                    pane._incoming_lines.append((line, gen))
+
+            pane._on_reload_tail_success(tail_lines, gen)
+            # exactly one flush is requested, and the flag reflects it
+            assert pane._flush_scheduled is True
+
+            for _ in range(100):
+                if len(pane.buffer) == 6:
+                    break
+                await asyncio.sleep(0.005)
+
+            texts = [e.text for e in pane.buffer._entries if isinstance(e, LogLine)]
+            assert texts == ["repeat"] * 5 + ["newer"]
+            assert pane._flush_scheduled is False
+
+    asyncio.run(_run())
+
+
+def test_log_pane_reload_tail_does_not_reschedule_when_flush_in_flight(monkeypatch):
+    """A flush already in flight (flag set) is reused; reload does not post a redundant one."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            gen = pane._generation
+            posted: list[int] = []
+            monkeypatch.setattr(pane, "_schedule_flush", lambda g: posted.append(g))
+            with pane._incoming_lock:
+                pane._flush_scheduled = True
+                pane._incoming_lines.append((LogLine(host="h1", container="c1", text="q"), gen))
+            pane._on_reload_tail_success([LogLine(host="h1", container="c1", text="t")], gen)
+            assert posted == []
+            assert pane._flush_scheduled is True
+
+    asyncio.run(_run())
+
+
+def test_log_view_layout_clamp_does_not_trigger_page_fetch(monkeypatch):
+    """Only user-initiated upward scrolls fetch older pages; layout/programmatic clamps near the top do not."""
+    import asyncio
+
+    target = FakeLogTarget(
+        lines=[LogLine(host="h1", container="c1", stream="stdout", timestamp=None, text=f"line {i}") for i in range(30)],
+        windowing_supported=True,
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await asyncio.sleep(0.2)
+            fetches: list[int] = []
+            orig = pane._trigger_page_fetch
+            monkeypatch.setattr(pane, "_trigger_page_fetch", lambda: (fetches.append(1), orig())[1])
+            lv = pane.log_view
+            assert lv.max_scroll_y > 3
+
+            # Programmatic scroll near the top (what a layout clamp looks like to the watcher)
+            lv.scroll_to(y=3, animate=False, immediate=True)
+            await pilot.pause()
+            lv.scroll_to(y=1, animate=False, immediate=True)
+            await pilot.pause()
+            # Shrinking the virtual height clamps scroll_y down without any user action
+            lv.virtual_size = Size(lv.virtual_size.width, lv.scrollable_content_region.height + 1)
+            await pilot.pause()
+            await asyncio.sleep(0.1)
+            assert fetches == []
+            assert not any(e == START_OF_LOG_MARKER or e == LOADING_MARKER for e in pane.buffer._entries)
+
+            # A genuine user scroll up near the top does fetch
+            lv.virtual_size = Size(lv.virtual_size.width, 40)
+            lv.scroll_to(y=2, animate=False, immediate=True)
+            app.simulate_key("up")
+            await asyncio.sleep(0.2)
+            assert fetches
+
+    asyncio.run(_run())
+
+
+def test_log_view_compensation_after_immediate_user_scroll_keeps_target(monkeypatch):
+    """A user scroll issued right before a prepend compensation is shifted, not cancelled or replayed from stale coordinates."""
+    import asyncio
+
+    target = FakeLogTarget(
+        lines=[LogLine(host="h1", container="c1", stream="stdout", timestamp=None, text=f"line {i}") for i in range(120)],
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await asyncio.sleep(0.2)
+            lv = pane.log_view
+            pane.view_state.state = FollowState.SCROLLED
+            lv.scroll_to(y=50, animate=False, immediate=True)
+            await pilot.pause()
+
+            # up (-1 row, animating) immediately followed by 4 prepended rows
+            lv.action_scroll_up()
+            assert lv.scroll_target_y == 49
+            lv.compensate_scroll(4)
+            await asyncio.sleep(0.5)
+            assert lv.scroll_y == 53
+            assert pane.view_state.state == FollowState.SCROLLED
+
+            # page up then 3 evicted rows
+            lv.action_page_up()
+            expected = 53 - lv.scrollable_content_region.height - 3
+            lv.compensate_scroll(-3)
+            await asyncio.sleep(1.5)
+            assert lv.scroll_y == expected
+            assert pane.view_state.state == FollowState.SCROLLED
+
+            # home keeps targeting the very top after a compensating prepend
+            lv.action_scroll_home()
+            lv.compensate_scroll(5)
+            await asyncio.sleep(1.5)
+            assert lv.scroll_y == 0
+            assert pane.view_state.state == FollowState.SCROLLED
 
     asyncio.run(_run())

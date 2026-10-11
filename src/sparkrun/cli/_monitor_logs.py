@@ -10,10 +10,12 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, IntEnum
+import asyncio
 import logging
 import os
 import re
 import threading
+import time
 from typing import Any, Iterator, Sequence
 import bisect
 
@@ -22,9 +24,11 @@ from rich.text import Text
 from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.actions import SkipAction
 from textual.containers import Vertical
 from textual.geometry import Size
 from textual.screen import ModalScreen
+from textual.scrollbar import ScrollTo, ScrollUp
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widgets import Input, OptionList, Static
@@ -407,6 +411,14 @@ class LogBuffer:
                 self._search_matches.append(abs_idx)
         return True
 
+    def append_batch(self, entries: Sequence[LogLine | Marker]) -> list[LogLine | Marker]:
+        """Append multiple entries, returning the entries that were successfully appended."""
+        appended: list[LogLine | Marker] = []
+        for entry in entries:
+            if self.append(entry):
+                appended.append(entry)
+        return appended
+
     def prepend_page(
         self,
         source_or_lines: Any,
@@ -590,6 +602,11 @@ class ViewState:
         if self.state in (FollowState.PAUSED, FollowState.SCROLLED):
             self.pending_lines += count
 
+    def on_user_scroll_up(self) -> None:
+        """User explicitly initiated upward scroll."""
+        if self.state == FollowState.FOLLOWING:
+            self.state = FollowState.SCROLLED
+
     def on_scroll(self, at_bottom: bool) -> None:
         if at_bottom:
             if self.state == FollowState.SCROLLED:
@@ -599,12 +616,12 @@ class ViewState:
             if self.state == FollowState.FOLLOWING:
                 self.state = FollowState.SCROLLED
 
-    def on_space(self, at_bottom: bool = True) -> bool:
+    def on_space(self, at_bottom: bool | None = None) -> bool:
         """Process space bar press.
 
         Returns True if action jumps to end, False otherwise.
         """
-        if self.state == FollowState.SCROLLED or not at_bottom:
+        if self.state == FollowState.SCROLLED:
             self.state = FollowState.FOLLOWING
             self.pending_lines = 0
             return True
@@ -770,17 +787,11 @@ class LogView(ScrollView):
     class NearTop(events.Message):
         """Posted when scroll position comes within one page of top of loaded buffer."""
 
-    class ScrollPositionChanged(events.Message):
-        """Posted when vertical scroll changes."""
-
-        def __init__(self, at_bottom: bool) -> None:
-            super().__init__()
-            self.at_bottom = at_bottom
-
     def __init__(
         self,
         buffer: LogBuffer,
         *,
+        view_state: ViewState | None = None,
         color: bool = True,
         highlight: bool = True,
         wrap: bool = False,
@@ -792,9 +803,12 @@ class LogView(ScrollView):
         super().__init__(**kwargs)
         self.can_focus = True
         self.buffer = buffer
+        self.view_state: ViewState | None = view_state
+        self._programmatic_scroll: bool = False
+        self._user_scroll_until: float = 0.0
         self.color: bool = color
         self.highlight: bool = highlight
-        self.wrap: bool = wrap
+        self._wrap: bool = wrap
         self.search_pattern: re.Pattern | str | None = search_pattern
         self.multi_host: bool = multi_host
         self.multi_source: bool = multi_source
@@ -803,7 +817,19 @@ class LogView(ScrollView):
         self._wrap_map: list[tuple[int, int]] = []
         self._wrap_base: int = 0
         self._wrap_origin: int = 0
-        self._max_width: int = 80
+        self._max_width: int = 0
+        if wrap:
+            self.refresh_buffer()
+
+    @property
+    def wrap(self) -> bool:
+        return self._wrap
+
+    @wrap.setter
+    def wrap(self, val: bool) -> None:
+        if self._wrap != val:
+            self._wrap = val
+            self.refresh_buffer()
 
     @property
     def is_at_bottom(self) -> bool:
@@ -859,12 +885,64 @@ class LogView(ScrollView):
             return self._wrap_map[-1][0] - self._wrap_base
         return self._wrap_map[self._wrap_origin + virtual_row][0] - self._wrap_base
 
-    def scroll_to_end(self, animate: bool = False) -> None:
-        self.scroll_end(animate=animate, x_axis=False)
+    def scroll_to_end(self, animate: bool = False, immediate: bool = True) -> None:
+        if self.view_state is not None and not self.view_state.is_following:
+            return
+        self._programmatic_scroll = True
+        try:
+            self.scroll_end(animate=animate, x_axis=False, immediate=immediate)
+        finally:
+            self._programmatic_scroll = False
 
     def scroll_to_line(self, line_idx: int, animate: bool = False) -> None:
         vy = self.entry_to_virtual_row(line_idx)
         self.scroll_to(y=vy, animate=animate)
+
+    @property
+    def _scroll_animating(self) -> bool:
+        return self.is_mounted and self.app.animator.is_being_animated(self, "scroll_y")
+
+    def _effective_target_y(self) -> float:
+        """Where the vertical scroll is heading.
+
+        ``scroll_target_y`` goes stale when layout clamps ``scroll_y`` (it is only
+        validated on assignment), so it is honoured only while an animation runs.
+        """
+        if self._scroll_animating:
+            return min(self.scroll_target_y, self.max_scroll_y)
+        return self.scroll_y
+
+    def compensate_scroll(self, delta_vrows: int) -> None:
+        """Keep the viewport anchored when rows are prepended to (or evicted from) the top.
+
+        Uses only public scroll APIs and runs immediately. A user scroll that is
+        still animating is restarted from the shifted position toward the shifted
+        target, so a key press is neither cancelled nor snapped to stale coordinates.
+        """
+        if delta_vrows == 0:
+            return
+        cur = self.scroll_y
+        in_flight = self._scroll_animating
+        target = self._effective_target_y()
+        new_y = max(0.0, cur + delta_vrows)
+        self._programmatic_scroll = True
+        try:
+            self.scroll_to(y=new_y, animate=False, immediate=True)
+        finally:
+            self._programmatic_scroll = False
+        if not in_flight:
+            return
+        # An upward gesture toward the very top (``home``) keeps targeting the top.
+        new_target = 0.0 if target <= 0 else max(0.0, target + delta_vrows)
+        new_target = min(new_target, self.max_scroll_y)
+        if new_target != new_y:
+            distance = abs(new_target - new_y)
+            self.scroll_to(
+                y=new_target,
+                animate=True,
+                duration=max(0.1, min(1.0, distance / 50.0)),
+                immediate=True,
+            )
 
     def on_entries_evicted(self, top_evicted: int = 0, bot_evicted: int = 0) -> None:
         content_width = self.scrollable_content_region.width or 80
@@ -876,7 +954,7 @@ class LogView(ScrollView):
                 self._wrap_origin = idx
                 self._wrap_base += top_evicted
                 self._compact_wrap_map()
-                self.scroll_to(y=max(0.0, self.scroll_y - evicted_vrows), animate=False)
+                self.compensate_scroll(-evicted_vrows)
             if bot_evicted > 0:
                 limit = len(self.buffer) + self._wrap_base
                 while self._wrap_map and self._wrap_map[-1][0] >= limit:
@@ -884,40 +962,50 @@ class LogView(ScrollView):
             self.virtual_size = Size(content_width, self._wrap_row_count())
         else:
             if top_evicted > 0:
-                self.scroll_to(y=max(0.0, self.scroll_y - top_evicted), animate=False)
+                self.compensate_scroll(-top_evicted)
             self.virtual_size = Size(max(content_width, self._max_width), len(self.buffer))
         self.refresh()
 
     def on_entry_appended(self, entry: LogLine | Marker) -> None:
-        idx = len(self.buffer) - 1
+        self.on_entries_appended([entry])
+
+    def on_entries_appended(self, entries: Sequence[LogLine | Marker]) -> None:
+        if not entries:
+            return
+        total_len = len(self.buffer)
+        start_idx = total_len - len(entries)
         content_width = self.scrollable_content_region.width or 80
-        full_plain = self._rendered_plain_line(entry)
         if self.wrap:
-            stored = idx + self._wrap_base
-            if len(full_plain) <= content_width or not self.is_mounted:
-                self._wrap_map.append((stored, 0))
-            else:
-                console = self.app.console
-                opts = console.options.update_width(content_width)
-                text = render_text(
-                    entry,
-                    color=self.color,
-                    pattern=(self.search_pattern if self.highlight else None),
-                    multi_host=self.multi_host,
-                    multi_source=self.multi_source,
-                )
-                segs = list(console.render(text, opts))
-                split = list(Segment.split_lines(segs))
-                count = max(1, len(split))
-                for sub in range(count):
-                    self._wrap_map.append((stored, sub))
+            console = self.app.console if self.is_mounted else None
+            opts = console.options.update_width(content_width) if console else None
+            pattern = self.search_pattern if self.highlight else None
+            for i, entry in enumerate(entries):
+                idx = start_idx + i
+                stored = idx + self._wrap_base
+                full_plain = self._rendered_plain_line(entry)
+                if len(full_plain) <= content_width or not console:
+                    self._wrap_map.append((stored, 0))
+                else:
+                    text = render_text(
+                        entry,
+                        color=self.color,
+                        pattern=pattern,
+                        multi_host=self.multi_host,
+                        multi_source=self.multi_source,
+                    )
+                    segs = list(console.render(text, opts))
+                    split = list(Segment.split_lines(segs))
+                    count = max(1, len(split))
+                    for sub in range(count):
+                        self._wrap_map.append((stored, sub))
             self.virtual_size = Size(content_width, self._wrap_row_count())
         else:
-            plain_len = len(full_plain)
-            if plain_len > self._max_width:
-                self._max_width = plain_len
+            for entry in entries:
+                plain_len = len(self._rendered_plain_line(entry))
+                if plain_len > self._max_width:
+                    self._max_width = plain_len
             w = max(content_width, self._max_width)
-            self.virtual_size = Size(w, len(self.buffer))
+            self.virtual_size = Size(w, total_len)
         self.refresh()
 
     def refresh_buffer(self) -> None:
@@ -949,13 +1037,14 @@ class LogView(ScrollView):
             self._wrap_origin = 0
             self.virtual_size = Size(content_width, len(wrap_map))
         else:
-            max_w = content_width
+            max_w = 0
             for entry in self.buffer._entries:
                 plain_len = len(self._rendered_plain_line(entry))
                 if plain_len > max_w:
                     max_w = plain_len
             self._max_width = max_w
-            self.virtual_size = Size(max_w, len(self.buffer))
+            w = max(content_width, max_w)
+            self.virtual_size = Size(w, len(self.buffer))
         self.refresh()
 
     def on_resize(self, event: events.Resize) -> None:
@@ -965,28 +1054,108 @@ class LogView(ScrollView):
     def on_mount(self) -> None:
         self.refresh_buffer()
 
+    USER_SCROLL_WINDOW_S = 2.0
+
+    def _notify_user_scroll_up(self) -> None:
+        if self.max_scroll_y <= 0:
+            return
+        self._user_scroll_until = time.monotonic() + self.USER_SCROLL_WINDOW_S
+        if self.view_state is not None:
+            self.view_state.on_user_scroll_up()
+        parent = self.parent
+        if parent is not None and hasattr(parent, "_update_status"):
+            parent._update_status()
+
+    @property
+    def _user_scrolling(self) -> bool:
+        """True while a user-initiated (key / wheel / scrollbar) upward scroll is in progress."""
+        return self.is_vertical_scrollbar_grabbed or time.monotonic() < self._user_scroll_until
+
+    def _should_resume_follow_from_scroll(self, old_val: float, new_val: float) -> bool:
+        """True only for user-initiated downward movement that lands at the bottom.
+
+        Animated home/pageup leave the bottom in tiny steps that still satisfy
+        ``is_at_bottom`` (0.5-row tolerance). Those frames must not resume follow.
+        """
+        if self._programmatic_scroll or new_val <= old_val or not self.is_at_bottom:
+            return False
+        # Upward animations set a target away from the bottom immediately.
+        return self.scroll_target_y >= self.max_scroll_y - 0.5
+
     def watch_scroll_y(self, old_val: float, new_val: float) -> None:
         super().watch_scroll_y(old_val, new_val)
         page_threshold = max(1, self.scrollable_content_region.height)
-        if new_val < old_val and new_val <= page_threshold:
+        # NearTop is only for user-initiated upward movement. Layout clamps (resize,
+        # scrollbar toggles, search bar) also lower scroll_y but must not fetch pages.
+        if not self._programmatic_scroll and new_val < old_val and new_val <= page_threshold and self._user_scrolling:
             self.post_message(self.NearTop())
-        self.post_message(self.ScrollPositionChanged(self.is_at_bottom))
+        if new_val == self.scroll_target_y:
+            self._user_scroll_until = 0.0
+        if self.is_vertical_scrollbar_grabbed and new_val < old_val and not self.is_at_bottom:
+            self._notify_user_scroll_up()
+        if self._should_resume_follow_from_scroll(old_val, new_val):
+            if self.view_state is not None and self.view_state.state == FollowState.SCROLLED:
+                self.view_state.on_scroll(True)
+                parent = self.parent
+                if parent is not None and hasattr(parent, "_update_status"):
+                    parent._update_status()
 
     def action_scroll_up(self) -> None:
+        if not self.allow_vertical_scroll:
+            raise SkipAction()
+        self._notify_user_scroll_up()
         page_threshold = max(1, self.scrollable_content_region.height)
         if self.scroll_y <= page_threshold:
             self.post_message(self.NearTop())
-        super().action_scroll_up()
+        # immediate: a deferred scroll would be computed from pre-compensation
+        # coordinates and could run after a page prepend shifted the content.
+        self.scroll_to(y=self._effective_target_y() - 1, immediate=True)
 
     def action_page_up(self) -> None:
+        if not self.allow_vertical_scroll:
+            raise SkipAction()
+        self._notify_user_scroll_up()
         page_threshold = max(1, self.scrollable_content_region.height)
         if self.scroll_y <= page_threshold:
             self.post_message(self.NearTop())
-        super().action_page_up()
+        self.scroll_to(y=self._effective_target_y() - self.scrollable_content_region.height, immediate=True)
 
     def action_scroll_home(self) -> None:
+        if not (self.allow_vertical_scroll or self.allow_horizontal_scroll):
+            raise SkipAction()
+        self._notify_user_scroll_up()
         self.post_message(self.NearTop())
-        super().action_scroll_home()
+        self.scroll_home(x_axis=self.scroll_y == 0, immediate=True)
+
+    def action_scroll_end(self) -> None:
+        if not (self.allow_vertical_scroll or self.allow_horizontal_scroll):
+            raise SkipAction()
+        self._user_scroll_until = 0.0
+        x_axis = not self.allow_vertical_scroll or self.is_vertical_scroll_end or self.scroll_y >= self.max_scroll_y
+        if self.view_state is not None and self.view_state.state == FollowState.SCROLLED:
+            self.view_state.on_scroll(True)
+            parent = self.parent
+            if parent is not None and hasattr(parent, "_update_status"):
+                parent._update_status()
+        self._programmatic_scroll = True
+        try:
+            self.scroll_end(animate=False, x_axis=x_axis, immediate=True)
+        finally:
+            self._programmatic_scroll = False
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if self.allow_vertical_scroll and not (event.ctrl or event.shift):
+            self._notify_user_scroll_up()
+        super()._on_mouse_scroll_up(event)
+
+    def _on_scroll_up(self, event: ScrollUp) -> None:
+        self._notify_user_scroll_up()
+        super()._on_scroll_up(event)
+
+    def _on_scroll_to(self, message: ScrollTo) -> None:
+        if message.y is not None and message.y < self.scroll_y:
+            self._notify_user_scroll_up()
+        super()._on_scroll_to(message)
 
     def render_line(self, y: int) -> Strip:
         scroll_x, scroll_y = self.scroll_offset
@@ -1119,6 +1288,13 @@ class LogPane(Vertical):
             self.container = container
             self.scope = scope
 
+    class _FlushIncoming(events.Message, bubble=False):
+        """Internal message to drain incoming lines batch on the main thread."""
+
+        def __init__(self, gen: int) -> None:
+            super().__init__()
+            self.gen = gen
+
     BINDINGS = [
         Binding("space", "toggle_pause_or_end", "Pause/Follow", priority=True),
         Binding("1", "scope_container", "Container", priority=True),
@@ -1172,8 +1348,13 @@ class LogPane(Vertical):
         self._current_match_abs: int | None = None
         self._delivered_lock: threading.Lock = threading.Lock()
         self._delivered_counts: dict[tuple[str, str], int] = {}
+        self.MAX_INCOMING_LINES: int = 500
+        self._incoming_lock: threading.Lock = threading.Lock()
+        self._incoming_cv: threading.Condition = threading.Condition(self._incoming_lock)
+        self._incoming_lines: deque[tuple[LogLine, int]] = deque()
+        self._flush_scheduled: bool = False
 
-        self.log_view: LogView = LogView(self.buffer)
+        self.log_view: LogView = LogView(self.buffer, view_state=self.view_state)
 
     def _source_key(self, source: LogSource | LogLine | tuple[str, str]) -> tuple[str, str]:
         if isinstance(source, tuple):
@@ -1286,7 +1467,11 @@ class LogPane(Vertical):
 
     def _start_follow_worker(self, target_scope: LogScope) -> None:
         self._cancel = threading.Event()
-        self._generation += 1
+        with self._incoming_lock:
+            self._generation += 1
+            self._incoming_lines.clear()
+            self._flush_scheduled = False
+            self._incoming_cv.notify_all()
         with self._delivered_lock:
             self._delivered_counts.clear()
         self._follow_worker(target_scope, self._cancel, self._generation)
@@ -1309,18 +1494,75 @@ class LogPane(Vertical):
             for line in target.follow(tail=200, cancel=cancel):
                 if cancel.is_set() or gen != self._generation:
                     break
-                self._inc_delivered_count(line)
-                self.app.call_from_thread(self._on_line, line, gen, True)
+                need_schedule = False
+                with self._incoming_lock:
+                    while len(self._incoming_lines) >= self.MAX_INCOMING_LINES:
+                        if cancel.is_set() or gen != self._generation:
+                            break
+                        self._incoming_cv.wait(timeout=0.02)
+                    if cancel.is_set() or gen != self._generation:
+                        break
+                    self._incoming_lines.append((line, gen))
+                    if not self._flush_scheduled:
+                        self._flush_scheduled = True
+                        need_schedule = True
 
-            if not cancel.is_set():
+                if need_schedule:
+                    self._schedule_flush(gen)
+
+            if not cancel.is_set() and gen == self._generation:
                 self.app.call_from_thread(self._on_stream_ended, gen)
         except SparkrunError as e:
-            if not cancel.is_set():
+            if not cancel.is_set() and gen == self._generation:
                 self.app.call_from_thread(self._on_error, str(e), gen)
         except Exception as e:
-            if not cancel.is_set():
+            if not cancel.is_set() and gen == self._generation:
                 logger.exception("Unexpected error in follow worker")
                 self.app.call_from_thread(self._on_error, str(e), gen)
+
+    def _schedule_flush(self, gen: int) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        self.post_message(self._FlushIncoming(gen))
+
+    async def on_log_pane__flush_incoming(self, event: _FlushIncoming) -> None:
+        await self._flush_incoming(event.gen)
+
+    async def _flush_incoming(self, gen: int) -> None:
+        if not self.is_mounted or self._cancel.is_set() or gen != self._generation:
+            return
+
+        batch_count = 0
+        start_time = time.monotonic()
+        while self.is_mounted and not self._cancel.is_set() and gen == self._generation:
+            with self._incoming_lock:
+                batch: list[LogLine] = []
+                while self._incoming_lines and len(batch) < 50:
+                    item_line, item_gen = self._incoming_lines.popleft()
+                    if item_gen == gen:
+                        batch.append(item_line)
+                has_more = bool(self._incoming_lines)
+                if not has_more:
+                    self._flush_scheduled = False
+                self._incoming_cv.notify_all()
+
+            if batch:
+                self._on_lines(batch, gen, from_follow=True)
+
+            if not has_more:
+                break
+
+            batch_count += 1
+            if batch_count >= 10 or (time.monotonic() - start_time) >= 0.016:
+                with self._incoming_lock:
+                    if self._incoming_lines:
+                        self._flush_scheduled = True
+                        self.post_message(self._FlushIncoming(gen))
+                    else:
+                        self._flush_scheduled = False
+                break
+
+            await asyncio.sleep(0)
 
     def _on_target_ready(self, target: LogTarget, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():
@@ -1332,19 +1574,23 @@ class LogPane(Vertical):
         self.log_view.multi_source = multi_source
 
     def _on_line(self, line: LogLine, gen: int, from_follow: bool = False) -> None:
-        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+        self._on_lines([line], gen, from_follow=from_follow)
+
+    def _on_lines(self, lines: Sequence[LogLine], gen: int, from_follow: bool = False) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set() or not lines:
             return
-        if not from_follow:
+        for line in lines:
             self._inc_delivered_count(line)
         top_entry = self.log_view.virtual_row_to_entry(int(self.log_view.scroll_offset[1]))
         bottom_entry = self.log_view.virtual_row_to_entry(
             int(self.log_view.scroll_offset[1]) + self.log_view.scrollable_content_region.height
         )
+        n_before = len(self.buffer)
         hist_before = self.buffer.evicted_history
         live_before = self.buffer.evicted_live
-        appended = self.buffer.append(line)
-        if not appended:
-            self.view_state.on_new_line()
+        appended_entries = self.buffer.append_batch(lines)
+        if not appended_entries:
+            self.view_state.on_new_line(len(lines))
             self._update_status()
             return
 
@@ -1359,9 +1605,13 @@ class LogPane(Vertical):
             self.log_view.on_entries_evicted(top_evicted=top_evicted, bot_evicted=bot_evicted)
             self._rederive_match_cursor()
 
-        self.view_state.on_new_line()
-        if bot_evicted == 0:
-            self.log_view.on_entry_appended(line)
+        self.view_state.on_new_line(len(lines))
+        new_top_evicted = max(0, top_evicted - n_before)
+        start = min(len(appended_entries), new_top_evicted)
+        end = max(start, len(appended_entries) - bot_evicted)
+        surviving = appended_entries[start:end]
+        if surviving:
+            self.log_view.on_entries_appended(surviving)
         if self.view_state.is_following:
             self.log_view.scroll_to_end()
         self._update_status()
@@ -1369,6 +1619,16 @@ class LogPane(Vertical):
     def _on_stream_ended(self, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():
             return
+        with self._incoming_lock:
+            remaining: list[LogLine] = []
+            while self._incoming_lines:
+                item_line, item_gen = self._incoming_lines.popleft()
+                if item_gen == gen:
+                    remaining.append(item_line)
+            self._flush_scheduled = False
+            self._incoming_cv.notify_all()
+        if remaining:
+            self._on_lines(remaining, gen, from_follow=True)
         if not self.buffer.stream_ended:
             self.buffer.append(STREAM_ENDED_MARKER)
             self.log_view.on_entry_appended(STREAM_ENDED_MARKER)
@@ -1379,6 +1639,16 @@ class LogPane(Vertical):
     def _on_error(self, err_msg: str, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():
             return
+        with self._incoming_lock:
+            remaining: list[LogLine] = []
+            while self._incoming_lines:
+                item_line, item_gen = self._incoming_lines.popleft()
+                if item_gen == gen:
+                    remaining.append(item_line)
+            self._flush_scheduled = False
+            self._incoming_cv.notify_all()
+        if remaining:
+            self._on_lines(remaining, gen, from_follow=True)
         err_marker = Marker(f"[red]{err_msg}[/red]")
         self.buffer.append(err_marker)
         self.log_view.on_entry_appended(err_marker)
@@ -1389,10 +1659,6 @@ class LogPane(Vertical):
     def on_log_view_near_top(self, event: LogView.NearTop) -> None:
         self._trigger_page_fetch()
 
-    def on_log_view_scroll_position_changed(self, event: LogView.ScrollPositionChanged) -> None:
-        self.view_state.on_scroll(event.at_bottom)
-        self._update_status()
-
     def _trigger_page_fetch(self) -> None:
         if self._loading_page or self.target is None:
             return
@@ -1401,6 +1667,8 @@ class LogPane(Vertical):
                 self.buffer.prepend_page([OLDER_UNAVAILABLE_MARKER])
                 self.log_view.refresh_buffer()
                 self._rederive_match_cursor()
+                marker_rows = self.log_view.entry_to_virtual_row(1)
+                self.log_view.compensate_scroll(marker_rows)
             return
 
         sorted_sources = sorted(
@@ -1418,16 +1686,17 @@ class LogPane(Vertical):
                 self.buffer.prepend_page([START_OF_LOG_MARKER])
                 self.log_view.refresh_buffer()
                 self._rederive_match_cursor()
+                marker_rows = self.log_view.entry_to_virtual_row(1)
+                self.log_view.compensate_scroll(marker_rows)
             return
 
         self._loading_page = True
         self._page_failed = False
-        old_scroll_y = self.log_view.scroll_y
         self.buffer.prepend_page([LOADING_MARKER])
         self.log_view.refresh_buffer()
         self._rederive_match_cursor()
         marker_rows = self.log_view.entry_to_virtual_row(1)
-        self.log_view.scroll_to(y=old_scroll_y + marker_rows, animate=False)
+        self.log_view.compensate_scroll(marker_rows)
 
         gen = self._generation
         self._page_worker(self.target, source_skips, self._cancel, gen)
@@ -1480,7 +1749,6 @@ class LogPane(Vertical):
             self.buffer._base_offset += 1
             removed_loading = True
 
-        curr_scroll_y = max(0.0, self.log_view.scroll_y - (marker_rows if removed_loading else 0))
         old_entries_count = len(self.buffer._entries)
 
         multi_source = len(target.sources) > 1
@@ -1509,9 +1777,9 @@ class LogPane(Vertical):
         self.buffer.evict(cap=self.CAP, drop_from="bottom")
 
         self.log_view.refresh_buffer()
-        delta_vrows = self.log_view.entry_to_virtual_row(prepended_entries)
-        anchored_y = max(0.0, curr_scroll_y + delta_vrows)
-        self.log_view.scroll_to(y=anchored_y, animate=False)
+        prepended_vrows = self.log_view.entry_to_virtual_row(prepended_entries)
+        net_delta = prepended_vrows - (marker_rows if removed_loading else 0)
+        self.log_view.compensate_scroll(net_delta)
 
         self._rederive_match_cursor()
 
@@ -1521,17 +1789,23 @@ class LogPane(Vertical):
     def _on_page_failure(self, err_msg: str, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():
             return
+        removed_loading = False
+        marker_rows = 0
         if self.buffer._entries and self.buffer._entries[0] == LOADING_MARKER:
             marker_rows = self.log_view.entry_to_virtual_row(1)
             self.buffer._entries.popleft()
             self.buffer._base_offset += 1
-            self.log_view.scroll_to(y=max(0.0, self.log_view.scroll_y - marker_rows), animate=False)
+            removed_loading = True
 
-        self._loading_page = False
-        self._page_failed = True
         err_marker = Marker(f"[red]Page fetch failed: {err_msg}[/red]")
         self.buffer.prepend_page([err_marker])
         self.log_view.refresh_buffer()
+        err_vrows = self.log_view.entry_to_virtual_row(1)
+        net_delta = err_vrows - (marker_rows if removed_loading else 0)
+        self.log_view.compensate_scroll(net_delta)
+
+        self._loading_page = False
+        self._page_failed = True
         self._rederive_match_cursor()
         self._update_status()
 
@@ -1561,6 +1835,17 @@ class LogPane(Vertical):
             for line in lines:
                 key = (line.host, line.container)
                 self._delivered_counts[key] = self._delivered_counts.get(key, 0) + 1
+        # Queued live lines are kept as-is. Line text is never inspected here:
+        # a line may appear twice (once in the tail snapshot, once queued), but
+        # duplicates beat dropped lines. A flush already in flight (flag set)
+        # will pick them up; otherwise schedule exactly one.
+        with self._incoming_lock:
+            need_schedule = bool(self._incoming_lines) and not self._flush_scheduled
+            if need_schedule:
+                self._flush_scheduled = True
+            self._incoming_cv.notify_all()
+        if need_schedule:
+            self._schedule_flush(gen)
         self.view_state.state = FollowState.FOLLOWING
         self.view_state.pending_lines = 0
         self._set_current_match(None)
@@ -1609,7 +1894,11 @@ class LogPane(Vertical):
 
         self.scope = new_scope
         self._cancel.set()
-        self._generation += 1
+        with self._incoming_lock:
+            self._generation += 1
+            self._incoming_lines.clear()
+            self._flush_scheduled = False
+            self._incoming_cv.notify_all()
         with self._delivered_lock:
             self._delivered_counts.clear()
         self.workers.cancel_group(self, "page")
@@ -1632,6 +1921,7 @@ class LogPane(Vertical):
             self.log_view.search_pattern = None
 
         self.view_state = ViewState()
+        self.log_view.view_state = self.view_state
         self.log_view.buffer = self.buffer
         self.log_view.refresh_buffer()
         self._update_status()
@@ -1759,15 +2049,16 @@ class LogPane(Vertical):
 
     def close(self) -> None:
         self._cancel.set()
-        self._generation += 1
+        with self._incoming_lock:
+            self._generation += 1
+            self._incoming_lines.clear()
+            self._flush_scheduled = False
+            self._incoming_cv.notify_all()
         self.workers.cancel_group(self, "page")
         self.workers.cancel_group(self, "follow")
 
     def on_unmount(self) -> None:
-        self._cancel.set()
-        self._generation += 1
-        self.workers.cancel_group(self, "page")
-        self.workers.cancel_group(self, "follow")
+        self.close()
 
 
 def format_scope_option(scope: LogScope | int, host: str, container: str, summary: ScopeSummary) -> str:
