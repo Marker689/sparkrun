@@ -9,10 +9,10 @@ import click
 
 from sparkrun.api import model_cache as api
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest, ModelArtifactRequest
-from ._common import _get_context
+from ._common import HIDE_ADVANCED_OPTIONS, _get_context
 
 
-@click.group("model-cache")
+@click.group("model-cache", hidden=HIDE_ADVANCED_OPTIONS)
 def model_cache():
     """Inspect, import and repair manifest-based model caches."""
 
