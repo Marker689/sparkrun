@@ -65,7 +65,26 @@ def verify_elf(path: Path, arch: str) -> None:
         raise BinaryInvalid(f"{path} is not a Linux {arch} executable")
 
 
-def acquire(arch: str, settings: dict, *, offline: bool) -> tuple[Path, str]:
+def verify_executable(path: Path, arch: str, os_name: str) -> None:
+    if os_name == "linux":
+        return verify_elf(path, arch)
+    if os_name != "windows" or arch not in {"amd64", "arm64"}:
+        raise BinaryInvalid("unsupported relay executable platform")
+    with path.open("rb") as stream:
+        dos = stream.read(64)
+        if len(dos) != 64 or dos[:2] != b"MZ":
+            raise BinaryInvalid("release is not a Windows PE executable")
+        offset = int.from_bytes(dos[60:64], "little")
+        if not 64 <= offset <= (1 << 20):
+            raise BinaryInvalid("invalid Windows PE header offset")
+        stream.seek(offset)
+        pe = stream.read(26)
+    machine = {"amd64": 0x8664, "arm64": 0xaa64}[arch]
+    if len(pe) != 26 or pe[:4] != b"PE\0\0" or int.from_bytes(pe[4:6], "little") != machine or pe[24:26] != b"\x0b\x02":
+        raise BinaryInvalid(f"release is not a Windows {arch} PE32+ executable")
+
+
+def acquire(arch: str, settings: dict, *, offline: bool, os_name: str = "linux") -> tuple[Path, str]:
     version = settings.get("version", __version__)
     if version != __version__:
         raise BinaryInvalid(f"adapter {__version__} requires the matching engine release")
@@ -73,37 +92,39 @@ def acquire(arch: str, settings: dict, *, offline: bool) -> tuple[Path, str]:
     hashes = settings.get("binary_sha256", {})
     if not isinstance(paths, dict) or not isinstance(hashes, dict):
         raise BinaryInvalid("binary_paths and binary_sha256 must map architecture to values")
-    if arch in paths:
-        path = Path(paths[arch]).expanduser()
-        expected = hashes.get(arch)
+    key = f"{os_name}/{arch}" if f"{os_name}/{arch}" in paths else arch if os_name == "linux" else f"{os_name}/{arch}"
+    if key in paths:
+        path = Path(paths[key]).expanduser()
+        expected = hashes.get(key)
         if not isinstance(expected, str) or len(expected) != 64:
             raise BinaryInvalid(f"a trusted binary_sha256.{arch} is required for an explicit binary")
         if not path.is_file() or file_digest(path) != expected:
             raise BinaryInvalid(f"binary checksum mismatch for {arch}")
-        verify_elf(path, arch)
+        verify_executable(path, arch, os_name)
         return path, expected
     development = settings.get("development_binary")
     if development:
         path = Path(development).expanduser()
         if not path.is_file():
             raise BinaryInvalid(f"development binary does not exist: {path}")
-        verify_elf(path, arch)
+        verify_executable(path, arch, os_name)
         logger.warning("OCI Relay uses explicitly configured development binary %s", path)
         return path, file_digest(path)
 
     releases = json.loads(Path(__file__).with_name("releases.json").read_text())
-    pinned = releases.get(version, {}).get(f"linux/{arch}")
+    pinned = releases.get(version, {}).get(f"{os_name}/{arch}")
     if not isinstance(pinned, dict) or len(str(pinned.get("sha256", ""))) != 64:
         raise BinaryUnavailable(
-            f"no trusted release checksum is pinned for OCI Relay {version} linux/{arch}; "
+            f"no trusted release checksum is pinned for OCI Relay {version} {os_name}/{arch}; "
             "configure binary_paths and binary_sha256, or an explicit development_binary"
         )
     url = pinned["url"]
     if not isinstance(url, str) or not url.startswith("https://"):
         raise BinaryInvalid("release URL must use HTTPS")
-    cache = Path(settings.get("cache_dir", "~/.cache/oci-relay")).expanduser() / version / f"linux-{arch}"
+    cache = Path(settings.get("cache_dir", "~/.cache/oci-relay")).expanduser() / version / f"{os_name}-{arch}"
     archive = cache / "release.tar.gz"
-    binary = cache / "oci-relay"
+    binary_name = "oci-relay.exe" if os_name == "windows" else "oci-relay"
+    binary = cache / binary_name
     if archive.is_file() and file_digest(archive) != pinned["sha256"]:
         raise BinaryInvalid("cached release archive checksum mismatch")
     if not archive.is_file():
@@ -128,7 +149,7 @@ def acquire(arch: str, settings: dict, *, offline: bool) -> tuple[Path, str]:
     fd, temporary = tempfile.mkstemp(prefix=".binary-", dir=cache)
     try:
         with os.fdopen(fd, "wb") as output, tarfile.open(archive, "r:gz") as tar:
-            matches = [entry for entry in tar.getmembers() if entry.name in {"oci-relay", "./oci-relay"}]
+            matches = [entry for entry in tar.getmembers() if entry.name in {binary_name, "./" + binary_name}]
             if len(matches) != 1 or not matches[0].isfile() or matches[0].size > MAX_ARCHIVE:
                 raise BinaryInvalid("release must contain one regular oci-relay executable")
             stream = tar.extractfile(matches[0])
@@ -137,8 +158,9 @@ def acquire(arch: str, settings: dict, *, offline: bool) -> tuple[Path, str]:
             with stream:
                 while chunk := stream.read(64 << 10):
                     output.write(chunk)
-        verify_elf(Path(temporary), arch)
-        os.chmod(temporary, 0o555)
+        verify_executable(Path(temporary), arch, os_name)
+        if os.name != "nt":
+            os.chmod(temporary, 0o555)
         os.replace(temporary, binary)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -163,7 +185,7 @@ def acquire_decoder(arch: str, settings: dict, binary: Path) -> tuple[Path, str]
         helper = Path(settings["development_unpigz"]).expanduser()
         verify_elf(helper, arch)
         return helper, file_digest(helper)
-    if arch in settings.get("binary_paths", {}):
+    if any(key in settings.get("binary_paths", {}) for key in (arch, "linux/" + arch)):
         return None
     # Revalidate the archive, not an editable sidecar manifest. Legacy releases
     # have no helper and remain usable through the ordinary compressed import.
@@ -202,7 +224,8 @@ def acquire_decoder(arch: str, settings: dict, binary: Path) -> tuple[Path, str]
         with os.fdopen(fd, "wb") as output:
             output.write(payload)
         verify_elf(Path(temporary), arch)
-        os.chmod(temporary, 0o555)
+        if os.name != "nt":
+            os.chmod(temporary, 0o555)
         os.replace(temporary, helper)
         (binary.parent / "UNPIGZ_LICENSES.txt").write_bytes(licenses)
     finally:

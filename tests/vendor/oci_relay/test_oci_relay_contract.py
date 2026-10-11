@@ -14,7 +14,7 @@ def test_oci_relay_release_pins_and_host_progress_level():
     from sparkrun.core.progress import PROGRESS as HOST_PROGRESS
 
     pins = json.loads(Path(oci_relay.__file__).with_name('releases.json').read_text())[oci_relay.__version__]
-    assert set(pins) == {'linux/amd64', 'linux/arm64', 'darwin/arm64'}
+    assert set(pins) == {'linux/amd64', 'linux/arm64', 'darwin/arm64', 'windows/amd64', 'windows/arm64'}
     for arch, pin in pins.items():
         assert pin['url'] == (f'https://github.com/spark-arena/oci-relay/releases/download/v{oci_relay.__version__}/'
                               f'oci-relay_{oci_relay.__version__}_{arch.replace("/", "_")}.tar.gz')

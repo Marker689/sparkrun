@@ -397,8 +397,8 @@ def _validate_host_contract(manifest: PluginManifest, source: Path) -> None:
         pins = json.loads((source / "releases.json").read_text()).get(manifest.version, {})
     except (OSError, ValueError, SyntaxError) as error:
         raise VendorError("invalid host API or release metadata: %s" % error) from error
-    if set(pins) != {"linux/amd64", "linux/arm64", "darwin/arm64"}:
-        raise VendorError("all three release platforms must have committed checksum pins")
+    if set(pins) != {"linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64", "windows/arm64"}:
+        raise VendorError("all five release platforms must have committed checksum pins")
     for arch, pin in pins.items():
         url = "https://github.com/spark-arena/oci-relay/releases/download/v%s/oci-relay_%s_%s.tar.gz" % (
             manifest.version,

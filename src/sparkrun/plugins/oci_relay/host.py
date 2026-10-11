@@ -8,7 +8,11 @@ from __future__ import annotations
 from collections import deque
 import json
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import os
+import platform
+import shutil
+import tempfile
 import queue
 import re
 import shlex
@@ -17,6 +21,7 @@ import time
 import uuid
 
 from .release import file_digest
+from . import runtime as runtime_connection
 from .source_policy import LOCAL_DOCKER, classic_store_reason, containerd_store_reason, docker_facts, native_mounts
 
 
@@ -39,9 +44,20 @@ class Runner:
         self.processes = []
         self.directories = []
         self.containers = []
+        self.binaries = {}
+        self.attachments = {}
 
     def connection(self, host):
-        return self.local if host is None else self.session
+        return runtime_connection.RuntimeSession(self.local if host is None else self.session, self.settings, host)
+
+    def windows(self, host):
+        return host is None and platform.system() == "Windows"
+
+    def read(self, host, path, maximum=4 << 20):
+        if self.windows(host):
+            with Path(path).open("rb") as stream:
+                return stream.read(maximum + 1)
+        return self.execute(host, ["head", "-c", str(maximum + 1), "--", path])
 
     def execute(self, host, arguments, *, input_data=None, timeout=30):
         result = self.connection(host).execute(
@@ -54,13 +70,18 @@ class Runner:
 
     def start(self, host, arguments):
         procs = self.settings.get("relay_gomaxprocs", 0)
-        if procs and arguments[:len(LOCAL_DOCKER)] != LOCAL_DOCKER:
+        if procs and not self.windows(host) and arguments[:len(LOCAL_DOCKER)] != LOCAL_DOCKER:
             arguments = ["env", f"GOMAXPROCS={procs}", *arguments]
         process = self.connection(host).open_process(host or "localhost", arguments)
         self.processes.append(process)
         return process
 
     def directory(self, host):
+        if self.windows(host):
+            path = tempfile.mkdtemp(prefix="oci-relay.")
+            self.directories.append((host, path))
+            self.execute(host, [self.binaries[host], "private-directory", "--path", path])
+            return path
         path = self.execute(host, ["mktemp", "-d", "/tmp/oci-relay.XXXXXXXXXX"]).decode().strip()
         if not re.fullmatch(r"/tmp/oci-relay\.[A-Za-z0-9]{10}", path):
             raise OperationError("host returned an invalid operation directory")
@@ -68,6 +89,9 @@ class Runner:
         return path
 
     def write(self, host, path, data):
+        if self.windows(host):
+            Path(path).write_bytes(data)
+            return
         # Only caller-generated paths, always shell-quoted; payload stays on stdin.
         self.execute(host, ["sh", "-c", "umask 077; cat > " + shlex.quote(path)], input_data=data)
 
@@ -75,6 +99,11 @@ class Runner:
         self.write(host, path, json.dumps(value, separators=(",", ":")).encode())
 
     def architecture(self, host):
+        if self.windows(host):
+            arch = {"amd64": "amd64", "arm64": "arm64"}.get(platform.machine().lower())
+            if arch is None:
+                raise OperationError("unsupported Windows architecture")
+            return arch
         fields = self.execute(host, ["uname", "-sm"]).decode().split()
         arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(fields[-1] if fields else "")
         if len(fields) != 2 or fields[0] != "Linux" or arch is None:
@@ -82,6 +111,11 @@ class Runner:
         return arch
 
     def cache_directory(self, host):
+        if self.windows(host):
+            base = Path(self.settings.get("remote_cache_dir") or (Path(os.environ.get("LOCALAPPDATA", Path.home())) / "oci-relay"))
+            if not base.is_absolute():
+                raise OperationError("remote_cache_dir must be an absolute path")
+            return str(base)
         base = self.settings.get("remote_cache_dir")
         if not base:
             home = self.execute(host, ["sh", "-c", 'printf "%s" "$HOME"']).decode()
@@ -92,6 +126,22 @@ class Runner:
 
     def stage_binary(self, host, path: Path, digest: str, version: str) -> str:
         base = self.cache_directory(host)
+        if self.windows(host):
+            destination = Path(base) / version / digest / "oci-relay.exe"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not destination.is_file() or file_digest(destination) != digest:
+                temporary = destination.with_suffix(".tmp." + uuid.uuid4().hex)
+                try:
+                    shutil.copyfile(path, temporary)
+                    if file_digest(temporary) != digest:
+                        raise OperationError("staged relay checksum mismatch")
+                    temporary.replace(destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            output = self.execute(host, [str(destination), "version"])
+            self._check_version(host, output, version)
+            self.binaries[host] = str(destination)
+            return str(destination)
         destination = f"{base}/{version}/{digest}/oci-relay"
         # Cache hits need one command after locating the host cache. Execute
         # only after checking the full pinned hash, never just path existence.
@@ -101,7 +151,7 @@ class Runner:
             host or "localhost", ["sh", "-c", check, "relay-cache", destination, digest], timeout=30,
         )
         if result.returncode == 42:
-            self.execute(host, ["mkdir", "-p", str(Path(destination).parent)])
+            self.execute(host, ["mkdir", "-p", str(PurePosixPath(destination).parent)])
             temporary = destination + ".tmp." + uuid.uuid4().hex
             try:
                 self.connection(host).upload(host or "localhost", [str(path)], temporary)
@@ -117,6 +167,13 @@ class Runner:
             raise OperationError(f"{host or 'controller'}: cached relay check failed ({result.returncode})")
         else:
             output = result.stdout
+        self._check_version(host, output, version, digest)
+        if not hasattr(self, "binaries"):
+            self.binaries = {}
+        self.binaries[host] = destination
+        return destination
+
+    def _check_version(self, host, output, version, digest=""):
         observed = json.loads(output)
         if observed.get("version") != version or observed.get("protocol") != 1:
             raise OperationError("staged engine version/protocol does not match plugin")
@@ -127,14 +184,14 @@ class Runner:
                     host or "controller", observed["version"], observed.get("commit", "unknown"), observed["protocol"])
         logger.debug("OCI Relay binary on %s: sha256=%s capabilities=%s",
                      host or "controller", digest, self.binary_capabilities[host])
-        return destination
+
 
     def stage_decoder(self, host, path, digest):
         destination = f"{self.cache_directory(host)}/helpers/{digest}/unpigz"
         result = self.connection(host).execute(host or "localhost", ["sha256sum", destination], timeout=30)
         if result.returncode == 0 and result.stdout.decode().split()[0] == digest:
             return destination
-        self.execute(host, ["mkdir", "-p", str(Path(destination).parent)])
+        self.execute(host, ["mkdir", "-p", str(PurePosixPath(destination).parent)])
         temporary = destination + ".tmp." + uuid.uuid4().hex
         try:
             self.connection(host).upload(host or "localhost", [str(path)], temporary)
@@ -174,6 +231,8 @@ class Runner:
                                    ["run", "--plan", directory + "/plan.json"])
 
     def start_receiver(self, host, binary, directory, arguments, inventory):
+        if runtime_connection.portable(self.settings, host):
+            return self.start(host, arguments)
         if not self.settings.get("allow_native_store", True):
             return self.start(host, arguments)
         info = docker_facts(self, host)
@@ -250,7 +309,10 @@ class Runner:
                     errors.append(str(error))
         for host, path in reversed(self.directories):
             try:
-                self.execute(host, ["rm", "-rf", "--", path], timeout=15)
+                if self.windows(host):
+                    shutil.rmtree(path)
+                else:
+                    self.execute(host, ["rm", "-rf", "--", path], timeout=15)
             except Exception as error:
                 errors.append(str(error))
         self.local.close()

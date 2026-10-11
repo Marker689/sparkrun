@@ -30,6 +30,8 @@ def validate(settings):
     from .registry_ranges import validate as validate_ranges
 
     validate_ranges(settings)
+    from .runtime import validate as validate_runtime
+    validate_runtime(settings)
     discovery = settings.get('cache_discovery_seconds', 10)
     if type(discovery) is not int or not 1 <= discovery <= 300:
         raise ValueError('cache_discovery_seconds must be between 1 and 300')
@@ -71,7 +73,7 @@ def validate(settings):
         raise ValueError('registry_cache_bytes must be between 0 and 1 PiB')
     if 'registry_config' in settings and (not isinstance(settings['registry_config'], str) or not settings['registry_config'].startswith('/') or '\x00' in settings['registry_config']):
         raise ValueError('registry_config must be an absolute path on the fetcher')
-    if mode == 'registry' and (settings.get('manifest') or settings.get('receiver_import', 'pull') != 'pull'):
+    if mode == 'registry' and (settings.get('manifest') or settings.get('receiver_import', 'pull') not in {'pull', 'archive'}):
         raise ValueError('registry resolves its own manifest and requires receiver_import: pull')
     join = settings.get('source_join_milliseconds', 0)
     if type(join) is not int or not 0 <= join <= 2000:
@@ -92,7 +94,7 @@ def validate(settings):
     importer = settings.get('receiver_import', 'pull')
     if decoder == 'unpigz' and importer != 'pull':
         raise ValueError('unpigz receiver decoder requires pull import')
-    if not isinstance(importer, str) or importer not in {'pull', 'load-cached', 'load'}:
+    if not isinstance(importer, str) or importer not in {'pull', 'archive', 'load-cached', 'load'}:
         raise ValueError('receiver_import must be pull, load-cached or load')
     if importer != 'pull':
         cap = settings.get('max_import_bytes', 0)
@@ -134,6 +136,8 @@ def store_version_supported(version):
 
 def classic_store_reason(facts):
     """Return a reason for rejection, or None when the read-only helper qualifies."""
+    if facts.get('native_local') is False:
+        return 'runtime filesystem is not local to the relay'
     if not store_version_supported(facts.get('version')):
         return 'classic-store access requires Docker 29 or newer'
     if facts.get('os') != 'linux' or facts.get('driver') != 'overlay2':
@@ -205,6 +209,10 @@ def select(settings, facts, route):
     requested = settings.get('source_mode', 'auto')
     if requested != 'auto':
         return Selection(requested, 'explicit source_mode override')
+    if facts.get('native_local') is False:
+        if settings.get('manifest') or not settings.get('allow_preparation_read') or 'max_spool_bytes' not in settings:
+            raise SourceUnavailable('VM/remote runtime source requires permitted docker-save preparation and an explicit max_spool_bytes budget')
+        return Selection('docker-save', 'VM/remote runtime uses bounded API archive export')
     if settings.get('manifest'):
         return Selection('docker', 'supplied manifest pins the exact representation')
     native_reason = 'native-store access is not enabled'

@@ -105,7 +105,7 @@ def upstream(tmp_path):
                         "sha256": "a" * 64,
                         "url": f"https://github.com/spark-arena/oci-relay/releases/download/v0.1.0/oci-relay_0.1.0_{platform.replace('/', '_')}.tar.gz",
                     }
-                    for platform in ("linux/amd64", "linux/arm64", "darwin/arm64")
+                    for platform in ("linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64", "windows/arm64")
                 }
             }
         )

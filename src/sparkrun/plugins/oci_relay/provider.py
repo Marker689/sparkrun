@@ -10,7 +10,7 @@ import logging
 import platform
 from collections import Counter
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import socket
 import subprocess
@@ -18,7 +18,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from . import __version__, pins, decoder
+from . import __version__, pins, decoder, runtime as runtime_connection
 from .disk import registry_cache_budget
 from .host import Lines, OperationError, Runner, pump
 from .parallel import parallel
@@ -53,7 +53,7 @@ def _free_port():
 
 
 def _bridge(runner, process, source_host, source_binary, source_dir):
-    attachment = runner.start(source_host, [source_binary, "attach", "--socket", source_dir + "/source.sock"])
+    attachment = runner.start(source_host, [source_binary, "attach", "--socket", getattr(runner, "attachments", {}).get(source_dir, source_dir + "/source.sock")])
     Lines(attachment.stderr)
     threading.Thread(target=pump, args=(process.stdout, attachment.stdin), daemon=True).start()
     threading.Thread(target=pump, args=(attachment.stdout, process.stdin), daemon=True).start()
@@ -374,15 +374,17 @@ class RelayProvider:
             architectures = parallel(execution_hosts, runner.architecture)
             # Acquire/verify each architecture once. Concurrent extraction into
             # the same release cache would needlessly duplicate work.
-            releases = {arch: acquire(arch, settings, offline=request.offline)
-                        for arch in dict.fromkeys(architectures.values())}
+            platforms = {host: ("windows" if host is None and platform.system() == "Windows" else "linux", arch)
+                         for host, arch in architectures.items()}
+            releases = {key: acquire(key[1], settings, offline=request.offline, **({"os_name": key[0]} if key[0] != "linux" else {}))
+                        for key in dict.fromkeys(platforms.values())}
             binaries = parallel(execution_hosts, lambda host: runner.stage_binary(
-                host, *releases[architectures[host]], __version__,
+                host, *releases[platforms[host]], __version__,
             ))
             helpers = {}
             if settings.get("receiver_decoder", "auto") != "none" and settings.get("receiver_import", "pull") == "pull":
-                supported = [host for host in request.targets if "receiver-unpigz-v1" in getattr(runner, "binary_capabilities", {}).get(host, [])]
-                decoders = {arch: acquire_decoder(arch, settings, releases[arch][0])
+                supported = [host for host in request.targets if not runtime_connection.portable(settings, host) and "receiver-unpigz-v1" in getattr(runner, "binary_capabilities", {}).get(host, [])]
+                decoders = {arch: acquire_decoder(arch, settings, releases[("linux", arch)][0])
                             for arch in dict.fromkeys(architectures[host] for host in supported)}
                 host_decoders = {host: artifact for host in supported
                                  if (artifact := decoders[architectures[host]]) is not None}
@@ -445,7 +447,7 @@ class RelayProvider:
                  "--duration", f"{min(86400, timeout + 60)}s"],
             )
             # This is protected management data, never a progress/log payload.
-            session_data = runner.execute(source_host, ["cat", source_dir + "/session.json"])
+            session_data = runner.read(source_host, source_dir + "/session.json")
             if len(session_data) > 4 << 20:
                 raise OperationError("session metadata exceeds limit")
             session = json.loads(session_data)
@@ -471,7 +473,8 @@ class RelayProvider:
             plan = {
                 "version": 1, "source": selection.mode, "image": source_image,
                 "platform": settings.get("platform", ""), "manifest": manifest,
-                "session_dir": source_dir, "socket": source_dir + "/source.sock",
+                "session_dir": source_dir, "socket": "" if source_host is None and platform.system() == "Windows" else source_dir + "/source.sock",
+                **runtime_connection.config(settings, source_host),
                 "listen": settings.get("listen", "0.0.0.0:0" if transport in {"auto", "http2-direct"} else "127.0.0.1:0"),
                 "advertise": advertise, "allow_preparation_read": settings.get("allow_preparation_read") is True,
                 "max_buffer_bytes": source_limits["max_buffer_bytes"], "max_spool_bytes": spool,
@@ -517,6 +520,8 @@ class RelayProvider:
                 # Malformed protocol events are not registry availability failures.
                 raise OperationError("source failed readiness: " + "\n".join(source_errors.tail)[-4000:])
             endpoint = ready["endpoint"]
+            if source_host is None and platform.system() == "Windows":
+                runner.attachments[source_dir] = "tcp://127.0.0.1:" + str(urlsplit(endpoint).port)
             parts = urlsplit(endpoint)
             if parts.scheme != "https" or not parts.port:
                 raise OperationError("invalid source endpoint")
@@ -588,13 +593,16 @@ class RelayProvider:
                 route, peer_endpoint = target_routes[identity]
                 peer_limits = limits(settings, facts[host], route, local_roles=roles[facts[host].get("host_id") or str(host)])
                 logger.info("OCI Relay receiver %s limits: %s; route facts: %s", host, peer_limits, facts[host])
+                portable = runtime_connection.portable(settings, host)
+                importer = "archive" if portable else settings.get("receiver_import", "pull")
                 arguments = [
                     binaries[host], "peer", *(path_arguments(ready_paths[identity], parts.port)
                         if identity in ready_paths else ["--endpoint", peer_endpoint]), "--session", target_files[identity],
                     "--tag", destination, "--replace-tag", "--max-buffer-bytes", str(peer_limits["max_buffer_bytes"]),
                     "--max-source-streams", str(peer_limits["source_streams"]),
-                    "--import", settings.get("receiver_import", "pull"),
-                    "--max-import-bytes", str(settings.get("max_import_bytes", 0)),
+                    "--import", importer,
+                    *runtime_connection.arguments(settings, host),
+                    "--max-import-bytes", str(settings.get("max_import_bytes", 64 << 30 if portable else 0)),
                     "--timeout-seconds", str(max(1, int(deadline - time.monotonic()))),
                 ]
                 if selection.mode == "registry" or pin:
@@ -608,11 +616,11 @@ class RelayProvider:
                 for key in ("stripe_threshold_bytes", "stripe_streams", "stripe_piece_bytes", "http2_stream_window_bytes"):
                     if key in settings:
                         arguments.extend(["--" + key.replace("_", "-"), str(settings[key])])
-                if "receiver-unpigz-v1" in getattr(runner, "binary_capabilities", {}).get(host, []):
+                if not portable and "receiver-unpigz-v1" in getattr(runner, "binary_capabilities", {}).get(host, []):
                     arguments.extend(decoder.arguments(runner, host, helpers.get(host), settings, facts[host], peer_limits))
                 elif settings.get("receiver_decoder") == "unpigz":
                     raise OperationError("receiver binary lacks bundled decoder capability")
-                process = runner.start_receiver(host, binaries[host], str(Path(target_files[identity]).parent), arguments, ready)
+                process = runner.start_receiver(host, binaries[host], str(PurePosixPath(target_files[identity]).parent), arguments, ready)
                 peers[identity] = process
                 peer_diagnostics[identity] = Lines(process.stderr)
                 if route == "ssh-stdio":

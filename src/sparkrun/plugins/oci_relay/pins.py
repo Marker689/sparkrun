@@ -11,6 +11,8 @@ the management user and Docker access; it is not an untrusted manifest cache.
 
 import hashlib
 import json
+import os
+from pathlib import Path
 import re
 import shlex
 import uuid
@@ -62,9 +64,16 @@ def resolve(runner, host, image):
     pin = digest(image)
     if pin is None:
         return None
-    output = runner.connection(host).execute(
-        host or "localhost", ["head", "-c", "16385", "--", _path(runner, host, image)], timeout=15,
-    )
+    if getattr(runner, "windows", lambda _: False)(host):
+        from sparkrun.transports.session import HostCommandResult
+        try:
+            output = HostCommandResult("localhost", 0, runner.read(host, _path(runner, host, image), 16384))
+        except FileNotFoundError:
+            output = HostCommandResult("localhost", 1)
+    else:
+        output = runner.connection(host).execute(
+            host or "localhost", ["head", "-c", "16385", "--", _path(runner, host, image)], timeout=15,
+        )
     if output.returncode == 0 and len(output.stdout) <= 16384:
         try:
             receipt = json.loads(output.stdout)
@@ -88,6 +97,14 @@ def record(runner, host, image, runtime_image, config_digest):
     directory = path.rsplit("/", 1)[0]
     temporary = path + "." + uuid.uuid4().hex
     receipt = dict(version=1, image=image, registry_digest=pin, runtime_image=runtime_image, config_digest=config_digest)
+    if getattr(runner, "windows", lambda _: False)(host):
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        try:
+            Path(temporary).write_text(json.dumps(receipt), encoding="utf-8")
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        return
     # Atomic publication; neither a partial write nor a tag race can rebind a pin.
     script = ("umask 077; mkdir -p -- " + shlex.quote(directory) + " && cat > " + shlex.quote(temporary)
               + " && mv -f -- " + shlex.quote(temporary) + " " + shlex.quote(path))
@@ -98,6 +115,15 @@ def record(runner, host, image, runtime_image, config_digest):
 
 
 def preflight(runner, host, image):
+    if getattr(runner, "windows", lambda _: False)(host):
+        path = Path(_path(runner, host, image))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp." + uuid.uuid4().hex)
+        try:
+            temporary.write_bytes(b"\0" * 4096)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return
     """Check metadata storage before payload work; this does not reserve disk."""
     directory = _path(runner, host, image).rsplit("/", 1)[0]
     temporary = directory + "/.preflight." + uuid.uuid4().hex

@@ -17,14 +17,21 @@ resource limits, and reports progress.
 
 Native access supports qualified rootful Linux Docker 29+ stores. Real-engine
 qualification currently covers Linux arm64. Linux amd64, Linux arm64 and macOS
-arm64 bundles are built and tested on native runners. See [platform support](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/platforms.md), [storage compatibility](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/storage-compatibility.md) and
-[validation](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/validation.md). Published binaries are available from [GitHub releases](https://github.com/spark-arena/oci-relay/releases).
+arm64 bundles are built and tested on native runners. Windows x64/ARM64 bundles
+are experimental, with native CI coverage; Docker Desktop and WSLC runtime
+qualification remains pending. See [platform support](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/platforms.md), [storage compatibility](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/storage-compatibility.md) and
+[validation](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/validation.md). Published binaries are available from [GitHub releases](https://github.com/spark-arena/oci-relay/releases).
 
-## Quick start with Sparkrun
+## Sparkrun integration
 
-Requires Bash, `uv`, Go 1.26.9+, Python 3.12+, a C compiler, make, and a Sparkrun `develop-next` / 0.4.0
-checkout with image-distribution and pre-pull API 1. The default checkout path
-is `../oss-sparkrun`; set `SPARKRUN_CHECKOUT` to use another location.
+Sparkrun 0.4.0+ includes OCI Relay and enables it by default on every channel.
+Run your recipes normally; Sparkrun handles relay binary setup, image distribution,
+and progress reporting. See [plugin configuration](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/sparkrun-plugin.md) for
+optional tuning and opt-out settings.
+
+## Development quick start
+
+For contributors working on the relay or plugin, run from this checkout:
 
 ```bash
 source dev.sh
@@ -32,12 +39,9 @@ sparkrun run YOUR_RECIPE
 deactivate
 ```
 
-The setup builds the relay and native decoder, installs both projects editably, and enables the
-plugin in a private development configuration. It preserves normal user
-configuration and keeps the plugin outside Sparkrun's source tree. Image-transfer
-progress is visible by default. The bundled plugin defaults on for every channel;
-this setup explicitly selects the editable adapter. See [development setup](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/development.md)
-for details or [plugin configuration](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/sparkrun-plugin.md) for manual setup.
+This builds the relay and native decoder and installs OCI Relay and Sparkrun
+editably, selecting the development adapter in a private configuration. See
+[development setup](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/development.md) for prerequisites and checkout paths.
 
 To build the standalone executable:
 
@@ -47,27 +51,28 @@ CGO_ENABLED=0 go build -trimpath -o bin/oci-relay ./cmd/oci-relay
 
 ## Documentation
 
-- [Sparkrun plugin](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/sparkrun-plugin.md): configuration, transports, multiple
+- [Sparkrun plugin](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/sparkrun-plugin.md): configuration, transports, multiple
   links, adaptive limits, progress, and optional tuning.
-- [Source modes and manifests](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/source-modes.md) and
-  [automatic selection](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/source-selection.md).
-- [Registry sources](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/registry-source.md): authentication, caching, and limits.
-- [Bundled receiver decoding](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/bundled-decoder.md): helper installation, disk budgets, and fallback.
-- [Storage compatibility](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/storage-compatibility.md): native access, layer
+- [Source modes and manifests](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/source-modes.md) and
+  [automatic selection](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/source-selection.md).
+- [Registry sources](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/registry-source.md): authentication, caching, and limits.
+- [Bundled receiver decoding](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/bundled-decoder.md): helper installation, disk budgets, and fallback.
+- [Storage compatibility](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/storage-compatibility.md): native access, layer
   discovery, mixed stores, and hash identities.
-- [Standalone commands](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/standalone.md): sessions, events, and transfer-only validation.
-- [Development](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/development.md): tests, CI, versions, and vendoring;
-  [release procedure](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/releasing.md).
-- [Validation and limitations](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/docs/validation.md).
+- [Windows and runtime connections](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/platforms.md): experimental support, Desktop/WSLC paths, and qualification limits.
+- [Standalone commands](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/standalone.md): sessions, events, and transfer-only validation.
+- [Development](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/development.md): tests, CI, versions, and vendoring;
+  [release procedure](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/releasing.md).
+- [Validation and limitations](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/docs/validation.md).
 
 ## License and contributions
 
 Copyright 2026 Spark Arena. OCI Relay and its Sparkrun plugin are licensed
-under [Apache-2.0](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/LICENSE).
+under [Apache-2.0](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/LICENSE).
 
-See [third-party notices](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/THIRD_PARTY_NOTICES.md) and
-[dependency licenses](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/THIRD_PARTY_LICENSES.txt). See
-[CONTRIBUTING.md](https://github.com/spark-arena/oci-relay/blob/3d5b1bc866b6009acff9bab19736cd1fabba68bc/CONTRIBUTING.md) for contribution guidelines.
+See [third-party notices](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/THIRD_PARTY_NOTICES.md) and
+[dependency licenses](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/THIRD_PARTY_LICENSES.txt). See
+[CONTRIBUTING.md](https://github.com/spark-arena/oci-relay/blob/9e48c338eb3b822921861d2f1450c5a9b69e2727/CONTRIBUTING.md) for contribution guidelines.
 
 ## Sparkrun feedback
 

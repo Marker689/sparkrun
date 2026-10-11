@@ -3,7 +3,7 @@
 
 """Sparkrun image-copy provider. Registration has no deployment side effects."""
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 SPARKRUN_PLUGIN_API_VERSION = 1
 
 
