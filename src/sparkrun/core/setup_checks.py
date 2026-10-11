@@ -232,6 +232,48 @@ def _check_sudoers(state: HostState, ctx: CheckContext) -> CheckItem:
     )
 
 
+def _check_ssh_identity(state: HostState, ctx: CheckContext) -> CheckItem:
+    """Read-only cross-host findings; mesh repair cannot fix cloned identities."""
+    from sparkrun.utils.shell import quote
+
+    report = ctx.ssh_identity_report
+    label = "SSH host keys and machine IDs"
+    if report is None:
+        return CheckItem("ssh_identity", label, WARN, "identity audit unavailable", "Re-run sparkrun setup check%s" % ctx.cluster_flag)
+    duplicates = [d for d in report.duplicates if state.host in d.hosts]
+    incomplete = [
+        identity
+        for identity in report.identities
+        if identity.errors or not (identity.public_keys and identity.machine_id_hash and identity.boot_id_hash)
+    ]
+    details = []
+    for duplicate in duplicates:
+        fingerprint = " (%s)" % duplicate.fingerprint if duplicate.kind == "SSH host key" else ""
+        details.append("duplicate %s%s on: %s" % (duplicate.kind, fingerprint, ", ".join(duplicate.hosts)))
+    for identity in incomplete:
+        details.append("identity check incomplete on %s: %s" % (identity.host, "; ".join(identity.errors) or "missing identity data"))
+    if not any(identity.host == state.host for identity in report.identities):
+        details.append("identity probe result missing for %s" % state.host)
+    if not details:
+        return CheckItem("ssh_identity", label, OK, "no duplicates for this host among the checked machines")
+    if duplicates:
+        selector = (
+            "--cluster %s" % quote(ctx.cluster_name)
+            if ctx.cluster_name
+            else "--hosts %s" % quote(",".join(i.host for i in report.identities))
+        )
+        if ctx.ssh_user:
+            selector += " --user %s" % quote(ctx.ssh_user)
+        if any(d.kind == "machine-id" for d in report.duplicates):
+            selector += " --machine-id"
+        guidance = "Regenerate duplicated identities: sparkrun setup ssh-rotate-keys %s" % selector
+    else:
+        guidance = (
+            "Check SSH access and readable host public keys, machine-id and boot-id, then re-run sparkrun setup check%s" % ctx.cluster_flag
+        )
+    return CheckItem("ssh_identity", label, WARN, "; ".join(details), guidance)
+
+
 def _check_ssh_mesh(state: HostState, ctx: CheckContext) -> CheckItem | None:
     """Every mesh leg from this host: peers' management names, the control
     machine when it joins the mesh, and peers' CX7 addresses on shared subnets.

@@ -31,7 +31,7 @@ from ._phases import (
     _build_earlyoom_regex,
     _earlyoom_summary,
 )
-from ._ssh import _run_ssh_mesh
+from ._ssh import _run_ssh_mesh, _check_ssh_host_identities
 from ._sudo import _record_setup_phase, host_password_prompt, interactive_sudo_passwords, run_sudo_action, save_sudoers_entry
 from sparkrun.orchestration.job_metadata import PRUNE_KEEP_PER_INTENT, PRUNE_MAX_AGE_DAYS
 
@@ -1148,6 +1148,15 @@ def setup_ssh(ctx, hosts, hosts_file, cluster_name, extra_hosts, include_self, u
         dry_run=dry_run,
         control_is_member=_resolved_loopback or (self_host is not None and self_host in set(cluster_hosts)),
     )
+    if ok:
+        from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+        _check_ssh_host_identities(
+            cluster_hosts,
+            {**build_ssh_kwargs(config), "ssh_user": user},
+            cluster_name=cluster_name,
+            dry_run=dry_run,
+        )
     if ok and not dry_run:
         _record_setup_phase(cluster_name, user, host_list, "ssh_mesh", mesh_hosts=list(host_list))
     sys.exit(0 if ok else 1)

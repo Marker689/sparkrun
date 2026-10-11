@@ -3068,7 +3068,12 @@ class TestSetupSshCommand:
 
         monkeypatch.setattr(sparkrun.core.config, "DEFAULT_CONFIG_DIR", config_root)
 
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run:
+        from sparkrun.api.setup import SshIdentityReport
+
+        with (
+            mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as mock_run,
+            mock.patch("sparkrun.api.setup.check_ssh_host_identities", return_value=SshIdentityReport()) as audit,
+        ):
             result = runner.invoke(
                 main,
                 [
@@ -3084,6 +3089,9 @@ class TestSetupSshCommand:
             )
 
             assert result.exit_code == 0
+            audit.assert_called_once()
+            assert audit.call_args.args[0] == ["10.0.0.1", "10.0.0.2"]
+            assert audit.call_args.kwargs["ssh_kwargs"]["ssh_user"] == "testuser"
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
             assert cmd[0] == "bash"

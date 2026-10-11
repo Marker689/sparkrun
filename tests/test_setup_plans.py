@@ -210,7 +210,7 @@ def test_probes_discover_before_selection_and_keep_mixed_hosts_separate(owned_pl
     monkeypatch.setattr("sparkrun.api.setup._rdma._run_probe", rdma)
     states, context = probe_setup_hosts(list(calls), ssh_kwargs={}, config=state_context()[1].config)
     assert all(state.reachable for state in states.values())
-    assert [len(scripts) for scripts in calls.values()] == [2, 2, 1]
+    assert [len(scripts) for scripts in calls.values()] == [2, 3, 1]  # Spark also runs the selected identity audit.
     cx7.assert_called_once_with(["spark"], ssh_kwargs={})
     rdma.assert_called_once_with(["spark"], {}, dry_run=False)
     assert "SETUP_STEPS='docker docker_group service'" in calls["owned"][1]

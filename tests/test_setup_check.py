@@ -383,12 +383,18 @@ def test_check_unreachable_host_exits_one(runner, v, patched_cluster_mgr):
 
 
 def test_check_multi_host_uses_cx7_detection(runner, v, patched_cluster_mgr):
+    from sparkrun.api.setup import SshHostIdentity, SshIdentityReport
+
+    identities = SshIdentityReport(
+        tuple(SshHostIdentity(h, {"key": "measured"}, str(i) * 64, str(i) * 64) for i, h in enumerate(["10.0.0.1", "10.0.0.2"]))
+    )
     patched_cluster_mgr.create("mylab", ["10.0.0.1", "10.0.0.2"])
 
     facts = dict(_FACTS_ALL_GOOD, CHECK_MESH_TOTAL="1", CHECK_MESH_OK="1")
     good_cx7 = _cx7_detection(states=["up", "up"], ips=["192.168.10.1", "192.168.11.1"], netplan=True)
 
     with (
+        mock.patch("sparkrun.api.setup.check_ssh_host_identities", return_value=identities),
         mock.patch("sparkrun.orchestration.ssh.run_remote_script") as mock_run,
         mock.patch("sparkrun.orchestration.networking.detect_cx7_for_hosts") as mock_cx7,
     ):

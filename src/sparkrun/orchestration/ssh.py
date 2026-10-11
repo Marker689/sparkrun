@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from sparkrun.utils.shell import quote, quote_list, args_list_to_shell_str, stdin_bytes
+from sparkrun.utils.shell import quote, args_list_to_shell_str, stdin_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +547,9 @@ def run_remote_script(
     logger.debug("SSH command: %s", " ".join(cmd))
     logger.debug("Script: %d lines, %d bytes", script_lines, len(script))
 
-    result = _run_subprocess(quote_list(cmd), host, "SSH script", timeout=timeout, input_data=script, quiet=quiet)
+    # subprocess receives argv directly (shell=False). Shell quoting here
+    # becomes literal characters in SSH options and identity-file paths.
+    result = _run_subprocess(cmd, host, "SSH script", timeout=timeout, input_data=script, quiet=quiet)
     if result.success:
         if result.stdout.strip():
             logger.debug("Remote script stdout on %s:\n%s", host, result.stdout.strip())
@@ -1048,6 +1050,7 @@ def run_remote_sudo_script(
     ssh_options: list[str] | None = None,
     timeout: int = 60,
     dry_run: bool = False,
+    quiet: bool = False,
 ) -> RemoteResult:
     """Execute a script on a remote host as root via SSH.
 
@@ -1071,6 +1074,7 @@ def run_remote_sudo_script(
         ssh_options: Additional SSH options.
         timeout: Overall execution timeout in seconds.
         dry_run: If True, log the script but don't execute.
+        quiet: If True, log expected failures and success at DEBUG level.
 
     Returns:
         RemoteResult with returncode, stdout, stderr.
@@ -1091,9 +1095,9 @@ def run_remote_sudo_script(
 
     logger.debug("  SSH sudo script -> %s (%d bytes)", host, len(script))
 
-    result = _run_subprocess(cmd, host, "SSH sudo script", timeout=timeout, input_data=full_input)
-    # Upgrade success log to INFO for sudo operations
-    if result.success:
+    result = _run_subprocess(cmd, host, "SSH sudo script", timeout=timeout, input_data=full_input, quiet=quiet)
+    # Upgrade success log to INFO unless the caller handles progress.
+    if result.success and not quiet:
         logger.info("  SSH sudo script <- %s OK", host)
     return result
 

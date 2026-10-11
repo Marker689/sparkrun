@@ -411,6 +411,7 @@ for _setup_step, _setup_description in {
     "host_ipc": "Check host IPC lifetime",
     "earlyoom": "Configure earlyoom OOM protection",
     "sudoers": "Configure scoped sudoers rules",
+    "ssh_identity": "Check for duplicate SSH host keys and machine IDs",
     "ssh_mesh": "Configure peer SSH access",
     "cx7": "Configure Spark CX7 networking",
     "rdma": "Check RDMA fabric readiness",

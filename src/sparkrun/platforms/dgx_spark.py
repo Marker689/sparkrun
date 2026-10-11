@@ -110,9 +110,21 @@ class DgxSparkPlatform(HardwarePlatformPlugin):
     setup_plans = (
         SetupPlan(
             "docker",
-            ("docker", "docker_group", "nvidia_container", "nvidia_cdi", "host_ipc", "earlyoom", "sudoers", "ssh_mesh", "cx7", "rdma"),
+            (
+                "docker",
+                "docker_group",
+                "nvidia_container",
+                "nvidia_cdi",
+                "host_ipc",
+                "earlyoom",
+                "sudoers",
+                "ssh_identity",
+                "ssh_mesh",
+                "cx7",
+                "rdma",
+            ),
         ),
-        SetupPlan("local", ("host_ipc", "earlyoom", "sudoers", "ssh_mesh", "cx7", "rdma")),
+        SetupPlan("local", ("host_ipc", "earlyoom", "sudoers", "ssh_identity", "ssh_mesh", "cx7", "rdma")),
     )
 
     def matches(self, host_hardware: HostHardware) -> bool:

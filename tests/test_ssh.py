@@ -1,6 +1,8 @@
 """Unit tests for sparkrun.orchestration.ssh module."""
 
 import subprocess
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from sparkrun.orchestration.ssh import (
@@ -619,3 +621,34 @@ def test_run_remote_script_pipes_bytes_without_cr():
     # Captured output is still surfaced as text to callers.
     assert result.stdout == "hi\n"
     assert result.success
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+def test_script_transport_preserves_raw_ssh_arguments(sudo, tmp_path):
+    """Local argv needs no shell quoting; ssh_config values keep their own quotes."""
+    key = str(tmp_path / "user's keys" / "id_ed25519")
+    options = ["-o", 'UserKnownHostsFile="/home/user/known hosts"', "-o", "ProxyCommand=proxy --host %h"]
+    with patch("sparkrun.orchestration.ssh.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
+        if sudo:
+            result = run_remote_sudo_script("spark", "true", None, ssh_key=key, ssh_options=options)
+        else:
+            result = run_remote_script("spark", "true", ssh_key=key, ssh_options=options)
+    assert result.success
+    argv = run.call_args.args[0]
+    assert argv[argv.index("-i") + 1] == key
+    assert argv[argv.index("-i") + 2 : argv.index("spark")] == options
+    assert run.call_args.kwargs["shell"] is False
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_sudo_probe_quiet_logging_preserves_failure_result(quiet, caplog):
+    import logging
+
+    with patch("sparkrun.orchestration.ssh.subprocess.run") as run, caplog.at_level(logging.DEBUG, logger="sparkrun.orchestration.ssh"):
+        run.return_value = MagicMock(returncode=1, stdout=b"", stderr=b"sudo: a password is required")
+        result = run_remote_sudo_script("spark", "true", None, quiet=quiet)
+    assert not result.success and result.stderr == "sudo: a password is required"
+    records = [record for record in caplog.records if "SSH sudo script <- spark FAILED" in record.message]
+    assert len(records) == 1
+    assert records[0].levelno == (logging.DEBUG if quiet else logging.WARNING)

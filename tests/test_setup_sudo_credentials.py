@@ -732,3 +732,43 @@ def test_a_host_that_times_out_does_not_decide_for_the_others():
     ):
         assert ensure_sudo_password(HOSTS, "dgxuser", {"ssh_user": "dgxuser"}, allow_indirect=True, default_user="admin") == ("right", None)
     assert set(verified) == {"10.0.0.1"}
+
+
+@pytest.mark.parametrize(
+    "result", [_ok("h"), RemoteResult("h", 1, "", "script failed"), RemoteResult("h", 255, "", "host key verification failed")]
+)
+def test_noninteractive_first_never_retries_without_an_auth_failure(result):
+    shared, per_host = mock.Mock(), mock.Mock()
+    passwords = SudoPasswords(prompt_shared=shared, prompt_host=per_host)
+    attempt = mock.Mock(return_value=result)
+    assert passwords.run("h", attempt, try_nopasswd=True) is result
+    attempt.assert_called_once_with(None)
+    shared.assert_not_called()
+    per_host.assert_not_called()
+
+
+def test_noninteractive_first_reuses_credentials_but_rechecks_cached_auth():
+    shared = mock.Mock(return_value="shared-pw")
+    per_host = mock.Mock(return_value="host-pw")
+    passwords = SudoPasswords(prompt_shared=shared, prompt_host=per_host, nopasswd={"h"})
+    attempt = mock.Mock(side_effect=lambda pw: _ok("h") if pw == "host-pw" else _rejected("h"))
+    assert passwords.run("h", attempt, try_nopasswd=True).success
+    assert "h" not in passwords.nopasswd  # current evidence supersedes old probes
+    assert [call.args[0] for call in attempt.call_args_list] == [None, "shared-pw", "host-pw"]
+    shared.assert_called_once()
+    per_host.assert_called_once_with("h")
+    attempt.reset_mock()
+    assert passwords.run("h", attempt, try_nopasswd=True).success
+    assert [call.args[0] for call in attempt.call_args_list] == [None, "host-pw"]
+    attempt.reset_mock()
+    attempt.side_effect = lambda pw: _ok("h")
+    assert passwords.run("h", attempt, try_nopasswd=True).success
+    attempt.assert_called_once_with(None)
+    assert shared.call_count == per_host.call_count == 1
+
+
+def test_noninteractive_first_headless_auth_failure_is_not_repeated():
+    attempt = mock.Mock(return_value=_rejected("h"))
+    result = SudoPasswords().run("h", attempt, try_nopasswd=True)
+    assert is_sudo_auth_failure(result)
+    attempt.assert_called_once_with(None)

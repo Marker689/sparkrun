@@ -42,7 +42,7 @@ def register(setup_group) -> None:
 
         Probes each host for the things ``{app_command} setup wizard`` configures
         (Docker access, NVIDIA CDI, host IPC reaping, earlyoom, sudoers, SSH
-        mesh, CX7) and reports gaps with the command that fixes each. Uses the default
+        host identities, mesh, CX7) and reports gaps with the command that fixes each. Uses the default
         cluster unless ``--cluster``/``--hosts`` is given. Read-only.
 
         Examples:

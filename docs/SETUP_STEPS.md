@@ -513,3 +513,90 @@ counts, followed by “Use --full to test all candidate link paths.” JSON expo
 complete candidate counts in `coverage`.
 With `--suite all`, only perftest is sampled by default; NCCL always runs across
 all selected hosts, including with the NCCL-only suite.
+
+## SSH host identity audit and rotation
+
+The read-only `ssh_identity` setup step checks SSH server public keys and
+`/etc/machine-id` across cluster hosts. Both `setup check` (including `--json`)
+and the wizard use `probe_setup_hosts` and the same step evaluation. The DGX
+Spark and generic NVIDIA plans include it for Docker and local executors on
+multi-host clusters. It is independent of mesh readiness, so an already working
+SSH mesh does not hide duplicate identities. The `setup.steps.ssh_identity`
+feature flag and per-host setup constraints control its probes and findings.
+`setup ssh` also checks its cluster targets after successful mesh setup.
+Duplicates produce warnings identifying the affected hosts and a suggested
+rotation command. Unreachable hosts or missing identity data make the audit
+incomplete; they are never reported as verified unique. Findings are advisories
+and never trigger rotation automatically. For a complete audit with duplicates,
+the wizard offers the same confirmed rotation and mesh refresh as
+`ssh-rotate-keys`, then reprobes readiness. Machine-ID duplication adds
+machine-ID regeneration to that offer, with a reboot reminder. Declining leaves
+the warnings visible. The wizard's `--yes` accepts the safe default (no rotation)
+and prints remediation without prompting; deliberate unattended rotation uses
+`setup ssh-rotate-keys --yes`. `setup check` always remains read-only.
+
+The comparison covers only the selected, reachable machines. Addresses sharing one Linux boot ID
+are treated as aliases of the same running machine.
+
+```sh
+sparkrun setup ssh-rotate-keys --cluster mylab --dry-run
+sparkrun setup ssh-rotate-keys --cluster mylab
+sparkrun setup ssh-rotate-keys --cluster mylab --machine-id
+```
+
+Rotation prompts for confirmation; `--yes` supplies explicit noninteractive
+confirmation. Sudo may still require a password. `--hosts`, `--hosts-file`, and
+`--user` use the usual setup target selection. The control machine is a rotation
+target only when selected as one of the hosts. The command rotates the standard
+RSA, ECDSA, and Ed25519 **server host keys**. It preserves SSH login private keys
+and refreshes the same passwordless mesh used by `setup ssh` for the selected
+hosts, using their configured SSH user, key, and options.
+
+`--machine-id` also generates a fresh machine ID and updates a regular D-Bus
+machine-ID copy. A D-Bus symlink to `/etc/machine-id` follows that change. Plan a
+reboot afterward: services retain their existing OS identity until restarted,
+and machine-ID-derived network identifiers may change. Sparkrun does not reboot
+hosts. Key rotation alone reloads SSH; it does not require a reboot.
+
+Targets must be Linux machines with Python 3, OpenSSH, sudo, and an active,
+reloadable systemd SSH service. Existing host trust must verify before any keys
+change. Custom SSH server key paths, host certificates, HostKeyAgent, and
+matching wildcard/negated `known_hosts` entries require administrator-managed
+rotation. The controller needs OpenSSH, but no local bash or sudo.
+
+The console-free API exposes `check_ssh_host_identities(...)` and
+`rotate_ssh_host_keys(...)` in `sparkrun.api.setup`. It returns structured
+identity/duplicate reports and per-host rotation outcomes. The frontend obtains
+confirmation and supplies optional `SudoPasswords` callbacks. The audit sends
+public keys and hashes of machine/boot IDs; it does not export private keys or
+raw machine IDs.
+
+### Trust handoff and interrupted rotation
+
+New keys are generated in a root-only staging directory before activation. Their
+public halves are received through the existing authenticated connection and
+saved under `<cache_dir>/ssh-rotations/<operation>/recovery.json`. The command
+validates SSH configuration, reloads the service, and verifies a fresh connection
+pinned to the staged keys. It then updates the controller's effective
+`UserKnownHostsFile` files and the selected peers' `~/.ssh/known_hosts`, including
+per-host loopback entries and unique discovered network addresses. Other clients
+must update their own trust records. This handoff does not use `ssh-keyscan` or
+disable host-key verification.
+
+Failures exit nonzero and identify each affected host. A failed activation or
+verification attempts to restore that host's original identities. Successfully
+rotated hosts remain rotated. Old private keys are deleted after verification and
+controller trust update; a failed rollback or interruption retains them under
+`/etc/ssh/.sparkrun-key-rotation`. A subsequent rotation refuses to overwrite
+that recovery directory.
+
+Use the printed recovery record to inspect the operation token, target names,
+old/new public keys, and completion states. For an interrupted activation, its
+`*-recovery.known_hosts` file contains only the authenticated old and staged
+keys; `*-new.known_hosts` contains only the staged keys. These can be supplied as
+OpenSSH's `UserKnownHostsFile` with `StrictHostKeyChecking=yes` and
+`ControlPath=none` to establish a recovery connection. Verify the machine's
+current identity before updating trust or removing recovery files. The remote
+`state.json` maps original files to the root-only `old/` backups; keep those
+backups until the outcome is resolved. Do not bypass a host-key mismatch with
+`StrictHostKeyChecking=no`.

@@ -235,3 +235,49 @@ def test_wizard_uses_corrected_user_for_the_created_cluster(runner, v, patched_c
     assert result.exit_code == 0, result.output
     assert seen_users == ["notme", "spark"]
     assert patched_cluster_mgr.get("fixeduser").user == "spark"
+
+
+def test_wizard_audits_identities_after_access_even_when_mesh_is_declined(runner, v, patched_cluster_mgr):
+    from sparkrun.api.setup import DuplicateHostIdentity, SshHostIdentity, SshIdentityReport
+    from test_setup_check import _facts_kv, _FACTS_ALL_GOOD
+    from sparkrun.orchestration.ssh import RemoteResult
+
+    hosts = ["10.0.0.1", "10.0.0.2"]
+    report = SshIdentityReport(
+        identities=tuple(SshHostIdentity(h) for h in hosts),
+        duplicates=(DuplicateHostIdentity("machine-id", "a" * 64, tuple(hosts)),),
+    )
+    order = []
+
+    def access(hosts, user, **kw):
+        order.append("access")
+        return [SshProbe(host=h, ok=True) for h in hosts]
+
+    def audit(hosts, **kw):
+        order.append("identity")
+        assert kw["ssh_kwargs"]["ssh_user"] == "ubuntu"
+        return report
+
+    with (
+        mock.patch(
+            "sparkrun.orchestration.ssh.run_remote_script",
+            side_effect=lambda h, *a, **kw: RemoteResult(h, 0, _facts_kv(_FACTS_ALL_GOOD), ""),
+        ),
+        mock.patch("sparkrun.api.setup._rdma._run_probe", return_value={}),
+        mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="CX7_DETECTED=0\n", stderr="")),
+        mock.patch("sparkrun.api.setup.probe_ssh_access", side_effect=access),
+        mock.patch("sparkrun.api.setup.check_ssh_host_identities", side_effect=audit) as check,
+        mock.patch("sparkrun.orchestration.networking.detect_cx7_for_hosts", return_value={}),
+        mock.patch("sparkrun.models.distribute.detect_shared_cache", return_value=False),
+        mock.patch("sparkrun.cli._setup._ssh._run_ssh_mesh", return_value=True),
+    ):
+        result = runner.invoke(
+            main,
+            ["setup", "wizard", "--hosts", ",".join(hosts), "--cluster", "identity-test"],
+            input="ubuntu\nn\nn\nn\nn\nn\nn\nn\n",
+        )
+    assert result.exit_code == 0, result.output
+    assert order[:2] == ["access", "identity"]
+    check.assert_called_once()
+    assert "duplicate machine-id" in result.output
+    assert "ssh-rotate-keys" in result.output and "--machine-id" in result.output

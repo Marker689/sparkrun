@@ -86,9 +86,28 @@ class SudoPasswords:
             self.shared = self.prompt_shared()
         return self.shared
 
-    def run(self, host: str, attempt: Callable[[str | None], RemoteResult], default: str | None = None) -> RemoteResult:
-        """Run ``attempt(password)``, re-asking for *host*'s own password if sudo rejects it."""
-        result = attempt(self.password_for(host, default))
+    def run(
+        self, host: str, attempt: Callable[[str | None], RemoteResult], default: str | None = None, *, try_nopasswd: bool = False
+    ) -> RemoteResult:
+        """Run ``attempt(password)``, re-asking for *host*'s password if rejected.
+
+        ``try_nopasswd`` first attempts the action with ``None`` (sudo -n).
+        Only an authentication failure permits a password retry; a script or
+        SSH failure must not rerun a possibly completed action. Recheck each
+        time because cached sudo credentials may make a formerly required
+        password unnecessary, leaving it for the script to consume on stdin.
+        The caller chooses the transport and expected-failure logging.
+        """
+        result = None
+        if try_nopasswd:
+            result = attempt(None)
+            if not is_sudo_auth_failure(result):
+                return result
+            # A fresh rejection overrides a stale passwordless-sudo probe.
+            self.nopasswd.discard(host)
+        password = self.password_for(host, default)
+        if result is None or password is not None:
+            result = attempt(password)
         if self.prompt_host is None or not is_sudo_auth_failure(result):
             return result
         password = self.prompt_host(host)

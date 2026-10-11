@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from sparkrun.api.setup._ssh_identity import SshIdentityReport
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.core.hardware import HostHardware
     from sparkrun.orchestration.networking import CX7HostDetection
@@ -63,6 +64,11 @@ class CheckContext:
     Probed as peers alongside the targets, so ``ssh_mesh`` reports the mesh a
     frontend actually builds rather than only its host-to-host part.
     """
+
+    ssh_identity_report: SshIdentityReport | None = None
+    """Cross-host identity audit for the selected SSH identity step."""
+    ssh_user: str | None = None
+    """Resolved SSH user, retained for scoped remediation commands."""
 
     @property
     def cluster_flag(self) -> str:

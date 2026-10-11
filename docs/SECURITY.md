@@ -287,3 +287,17 @@ When adding a third-party registry:
    shows the planned operation; it does not authorize untrusted hooks.
 4. Use `--trust` only when you've reviewed the recipe and intend to run its
    privileged content.
+
+## Cloned SSH server keys and machine IDs
+
+`sparkrun setup check` and the setup wizard warn when selected machines share
+SSH server public keys or `/etc/machine-id`. This addresses the class of factory-image cloning issue
+described in [NVIDIA's May 2026 DGX Spark bulletin (CVE-2026-24218)](https://nvidia.custhelp.com/app/answers/detail/a_id/5835).
+Keep DGX OS current as recommended by NVIDIA; comparison with other selected
+hosts cannot establish that a key is unique across every shipped machine.
+
+Use `sparkrun setup ssh-rotate-keys --cluster NAME` to rotate server keys, or add
+`--machine-id` to regenerate OS identity as well. Rotation requires confirmation,
+uses authenticated staged public keys to refresh trust, and retains recovery
+material on uncertain failures. See [SSH identity setup and recovery](SETUP_STEPS.md#ssh-host-identity-audit-and-rotation)
+for target requirements, machine-ID reboot implications, and recovery details.

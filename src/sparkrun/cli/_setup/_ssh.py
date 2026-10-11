@@ -329,7 +329,7 @@ def _detect_and_update_mgmt_ips(host_list, cluster_name, cluster_mgr, ssh_kwargs
     return host_list
 
 
-def _run_ssh_mesh_native(mesh_hosts, user, ssh_key=None, dry_run=False):
+def _run_ssh_mesh_native(mesh_hosts, user, ssh_key=None, dry_run=False, ssh_options=None):
     """Mesh SSH keys without a local POSIX shell (Windows control machines).
 
     Thin console wrapper over :func:`sparkrun.api.setup.mesh_ssh_keys_native`.
@@ -342,8 +342,8 @@ def _run_ssh_mesh_native(mesh_hosts, user, ssh_key=None, dry_run=False):
     """
     from sparkrun.api.setup import mesh_ssh_keys_native
 
-    click.echo("Meshing SSH keys (no local shell; using remote execution)...")
-    result = mesh_ssh_keys_native(list(mesh_hosts), user, key=ssh_key, dry_run=dry_run)
+    click.echo("Meshing SSH login keys across selected hosts...")
+    result = mesh_ssh_keys_native(list(mesh_hosts), user, key=ssh_key, options=ssh_options, dry_run=dry_run)
 
     if dry_run:
         click.echo("[dry-run] Would mesh SSH keys across %d host(s)." % len(mesh_hosts))
@@ -354,8 +354,8 @@ def _run_ssh_mesh_native(mesh_hosts, user, ssh_key=None, dry_run=False):
     for host, err in sorted(result.install_failures.items()):
         click.echo("  Could not authorize keys on %s: %s" % (host, err.splitlines()[0] if err else "unknown"), err=True)
 
-    if result.public_keys:
-        click.echo("  Meshed %d host key(s) across %d host(s)." % (len(result.public_keys), len(mesh_hosts)))
+    if result.ok and result.public_keys:
+        click.echo("  SSH login keys distributed across %d host(s)." % len(mesh_hosts))
     if not result.ok:
         click.echo(render_identity_text("  Mesh incomplete. Run '{app_command} setup ssh --diagnose' for details."), err=True)
     return result.ok
@@ -571,3 +571,35 @@ def _report_host_key_distribution(dist, ip_count: int) -> None:
         "  Host keys for %d IP(s) distributed to %d/%d host(s)%s."
         % (ip_count, ks_ok, len(dist.hosts), " + this machine" if local_ok else "")
     )
+
+
+def _check_ssh_host_identities(hosts, ssh_kwargs, *, cluster_name=None, dry_run=False):
+    """Warn about cloned server keys/OS identities without changing a host."""
+    from sparkrun.api.setup import check_ssh_host_identities
+    from sparkrun.utils.shell import quote
+
+    if dry_run:
+        click.echo("[dry-run] Would check for duplicate SSH host keys and machine IDs.")
+        return None
+    if not hosts:
+        return None
+    click.echo("Checking SSH host keys and machine IDs for %d host(s)..." % len(hosts))
+    report = check_ssh_host_identities(list(hosts), ssh_kwargs=ssh_kwargs)
+    for duplicate in report.duplicates:
+        detail = " (%s)" % duplicate.fingerprint if duplicate.kind == "SSH host key" else ""
+        click.echo("Warning: duplicate %s%s on: %s" % (duplicate.kind, detail, ", ".join(duplicate.hosts)), err=True)
+    for identity in report.identities:
+        if identity.errors:
+            click.echo("Warning: identity check incomplete on %s: %s" % (identity.host, "; ".join(identity.errors)), err=True)
+    if report.duplicates:
+        selector = "--cluster %s" % quote(cluster_name) if cluster_name else "--hosts %s" % quote(",".join(hosts))
+        user = ssh_kwargs.get("ssh_user")
+        if user:
+            selector += " --user %s" % quote(user)
+        if any(d.kind == "machine-id" for d in report.duplicates):
+            selector += " --machine-id"
+        click.echo("Regenerate the duplicated identities; shared host keys allow server impersonation.", err=True)
+        click.echo(render_identity_text("  {app_command} setup ssh-rotate-keys %s" % selector), err=True)
+    elif report.complete:
+        click.echo("  No duplicate SSH host keys or machine IDs among the checked machines.")
+    return report

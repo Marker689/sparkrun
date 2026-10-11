@@ -68,7 +68,20 @@ _CONSTRAINTS: dict[str, Callable[[str, HostState, CheckContext], str]] = {}
 
 enlist_registry_state(globals(), "_CONSTRAINTS")
 _BUILTIN_KEYS = frozenset(
-    {"hardware", "docker", "docker_group", "nvidia_container", "nvidia_cdi", "host_ipc", "earlyoom", "sudoers", "ssh_mesh", "cx7", "rdma"}
+    {
+        "hardware",
+        "docker",
+        "docker_group",
+        "nvidia_container",
+        "nvidia_cdi",
+        "host_ipc",
+        "earlyoom",
+        "sudoers",
+        "ssh_identity",
+        "ssh_mesh",
+        "cx7",
+        "rdma",
+    }
 )
 
 
@@ -224,6 +237,7 @@ def builtin_steps() -> tuple[SetupStep, ...]:
         SetupStep("host_ipc", "Host IPC", (c._check_host_ipc,), _host_executor, order=50),
         SetupStep("earlyoom", "earlyoom OOM protection", (c._check_earlyoom,), _earlyoom, a.earlyoom, order=60),
         SetupStep("sudoers", "Scoped sudoers rules", (c._check_sudoers,), _host_executor, a.sudoers, order=70),
+        SetupStep("ssh_identity", "SSH host identities", (c._check_ssh_identity,), _mesh, order=75, requires_sudo=False),
         SetupStep("ssh_mesh", "SSH mesh", (c._check_ssh_mesh,), _mesh, order=80),
         SetupStep("cx7", "CX7 networking", (c._check_cx7,), _mesh, order=90),
         SetupStep("rdma", "RDMA fabric", (c._check_rdma,), _mesh, order=95),

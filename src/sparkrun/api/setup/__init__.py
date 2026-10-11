@@ -59,7 +59,16 @@ from ._ssh_access import (
     probe_ssh_access,
 )
 
+from ._ssh_identity import SshHostIdentity, DuplicateHostIdentity, SshIdentityReport, check_ssh_host_identities
+from ._ssh_rotation import SshRotationResult, rotate_ssh_host_keys
+
 __all__ = [
+    "SshHostIdentity",
+    "DuplicateHostIdentity",
+    "SshIdentityReport",
+    "check_ssh_host_identities",
+    "SshRotationResult",
+    "rotate_ssh_host_keys",
     "SetupActionContext",
     "SudoPasswords",
     "SetupActionResult",

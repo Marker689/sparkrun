@@ -538,6 +538,19 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
         states = {}
         setup_context = None
         _refresh_plan()
+        from ._ssh_rotate import _offer_ssh_identity_rotation
+
+        _offer_ssh_identity_rotation(
+            states,
+            setup_context,
+            user,
+            ssh_kwargs,
+            config,
+            yes=yes,
+            dry_run=dry_run,
+            manifest_mgr=manifest_mgr,
+            refresh_plan=_refresh_plan,
+        )
 
         def _confirm_off_plan(plan, count):
             """CX7 works per host but not as planned: show why, then ask."""

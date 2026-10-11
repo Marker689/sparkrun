@@ -35,6 +35,7 @@ from . import _fe_update as _fe_update  # noqa: E402, F401  — registers @setup
 from . import _gpu_clock as _gpu_clock  # noqa: E402, F401  — registers @setup.command("throttle-gpu-clock")
 from . import _plugins as _plugins  # noqa: E402, F401  — registers @setup.group("plugins")
 from . import _rdma as _rdma  # noqa: E402, F401  — registers @setup.command("rdma-test")
+from . import _ssh_rotate as _ssh_rotate  # noqa: E402, F401
 from . import _tailscale as _tailscale  # noqa: E402, F401  — registers @setup.group("tailscale")
 from ._wizard import setup_wizard  # noqa: E402
 from ._uninstall import setup_uninstall  # noqa: E402

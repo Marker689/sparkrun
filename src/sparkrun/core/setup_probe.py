@@ -124,6 +124,7 @@ def probe_setup_hosts(
     with ThreadPoolExecutor(max_workers=min(len(hosts), 16)) as pool:
         states = dict(zip(hosts, pool.map(discover, hosts), strict=True))
         context = resolve_setup_context(states, config=config, cluster=cluster, cluster_name=cluster_name)
+        context.ssh_user = ssh_kwargs.get("ssh_user")
         context.extra_mesh_peers = tuple(dict.fromkeys(p for p in extra_mesh_peers if p not in hosts))
         if discovery_only:
             return states, context
@@ -158,6 +159,21 @@ def probe_setup_hosts(
 
     def candidates(key):
         return [h for h, state in states.items() if state.reachable and key in selected[h]]
+
+    if targets := candidates("ssh_identity"):
+        from sparkrun.api.setup import SshHostIdentity, SshIdentityReport, check_ssh_host_identities
+
+        try:
+            report = check_ssh_host_identities(targets, ssh_kwargs=ssh_kwargs)
+        except Exception as exc:
+            logger.debug("Setup SSH identity probe failed", exc_info=True)
+            report = SshIdentityReport(tuple(SshHostIdentity(h, errors=("identity probe failed: %s" % exc,)) for h in targets))
+        # Discovery/readiness failures remain visible to the cross-host check:
+        # a subset's uniqueness cannot establish uniqueness across the cluster.
+        unavailable = tuple(
+            SshHostIdentity(h, errors=(state.error or "host is unreachable",)) for h, state in states.items() if not state.reachable
+        )
+        context.ssh_identity_report = SshIdentityReport((*report.identities, *unavailable), report.duplicates)
 
     if targets := candidates("cx7"):
         from sparkrun.orchestration.networking import detect_cx7_for_hosts
