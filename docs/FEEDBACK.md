@@ -37,8 +37,10 @@ foreign span IDs; scope those IDs to the reporter's activity to avoid collisions
 `warning()` and `error()` use the corresponding severity. `report(level="info",
 ...)` emits details that clients can filter separately from normal progress.
 
-Every report emits an event independently of Python logging verbosity and renders
-one Python log record. Supply `logger=` to `get_feedback()` to retain a plugin's
+Every report emits an event independently of Python logging verbosity and, by
+default, renders one Python log record. `report()` returns the normalized envelope.
+A frontend that renders it directly can use `report(..., log_message=False)` to
+suppress duplicate text logging; subscriber delivery still occurs. Supply `logger=` to `get_feedback()` to retain a plugin's
 existing logger. CLI output follows its normal verbosity/quiet settings. Without
 an operation/subscriber, the reporter still logs. Plugins supporting older hosts
 can feature-detect `get_feedback` and keep their existing logging fallback.
@@ -109,3 +111,11 @@ OCI Relay publishes receiver phases, upper-bound byte counters, extraction/cache
 metrics, heartbeats, and verification outcomes. ColdSnap publishes preparation
 stages and controller span hierarchies, including host/unit identity and duration,
 with controller outcomes checked against the execution result and receipt.
+
+Scheduled benchmarks share this interface. All frameworks, including llama-benchy,
+report task start/finish with source `benchmark.<framework_name>`. Tool-eval-bench
+also reports live scenario counts and outcomes. A new activity ID identifies each
+attempt, and benchmark/task IDs are scalar metrics. Direct benchmark callbacks
+receive the same envelope as `task_progress`; daemon delivery retains one copy.
+See [benchmark progress](BENCHMARK_API.md#scenario-progress) for counter semantics
+and the optional framework parser interface.

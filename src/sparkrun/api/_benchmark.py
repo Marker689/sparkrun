@@ -158,6 +158,9 @@ class _EventScheduleProgress:
 
         self.emit("results_update", results=deepcopy(consolidated))
 
+    def observe_task(self, idx: int, feedback: dict[str, Any]) -> None:
+        self.emit("task_progress", index=idx, feedback=feedback)
+
     def log(self, message: str) -> None:
         self.emit("schedule_log", message=message)
 
@@ -862,7 +865,7 @@ def _execute_benchmark(
                     % benchmark_id
                 )
                 try:
-                    return _complete_saved_benchmark(existing_state, integrations, cache_dir)
+                    return _complete_saved_benchmark(existing_state, integrations, cache_dir, emitter=emitter, fw=fw)
                 finally:
                     lock_stack.close()
         else:
@@ -1725,7 +1728,7 @@ def _saved_execution(state, cache_dir):
     )
 
 
-def _complete_saved_benchmark(state, integrations, cache_dir):
+def _complete_saved_benchmark(state, integrations, cache_dir, *, emitter, fw=None):
     """Load validated measurements and retry publication without execution."""
     import yaml
     from sparkrun.core.benchmark_integrations import STATE_KEY
@@ -1737,6 +1740,23 @@ def _complete_saved_benchmark(state, integrations, cache_dir):
         raise BenchmarkFailed("Completed tasks have no validated benchmark results; rerun with --fresh.", exit_code=1)
     result.results = _framework_results(yaml.safe_load(result_path.read_text()), state.framework)
     result.success = True
+    # Presentation is optional: an unavailable framework must not prevent
+    # retrieval/publication of already committed measurements.
+    if not isinstance(emitter, _NullProgressEmitter):
+        try:
+            if fw is None:
+                from sparkrun.core.bootstrap import get_benchmarking_framework
+
+                fw = get_benchmarking_framework(state.framework)
+            with emitter.schedule_progress(
+                total_tasks=len(state.schedule),
+                benchmark_id=state.benchmark_id,
+                fw=fw,
+                title=_benchmark_title(state.recipe_qualified_name, state.profile),
+            ) as progress:
+                progress.update_results_table(result.results.get("json", result.results))
+        except Exception:
+            logger.debug("Saved benchmark presentation failed", exc_info=True)
     if not integrations.contexts and not saved_names:
         result.already_complete = True
         return result
@@ -1786,7 +1806,7 @@ def _resume_locked(
     options = _validated_benchmark_options(options)
     integrations = BenchmarkIntegrationSession(options, sctx=sctx, emitter=emitter)
     if state.is_complete(len(state.schedule)) and state.extras.get("measurement_complete"):
-        return _complete_saved_benchmark(state, integrations, cache_dir)
+        return _complete_saved_benchmark(state, integrations, cache_dir, emitter=emitter)
     result = _saved_execution(state, cache_dir)
 
     # Snapshot before ``run_schedule`` starts saving: this is when the tasks

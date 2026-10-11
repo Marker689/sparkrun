@@ -730,7 +730,7 @@ has been removed. Commands return raw argv and write a JSON object to the suppli
 `result_file`; do not shell-quote individual arguments. See the framework example
 in [PLUGINS.md](PLUGINS.md) and [benchmark API details](BENCHMARK_API.md).
 
-`tool-eval-bench` defaults to v2.6.0 and uses its native JSON-file command. Its
+`tool-eval-bench` defaults to v2.8.0 and uses its native JSON-file command. Its
 removed `experimental_async`, `llm_judge`, `perf_legacy`, and `perf_legacy_only`
 options have no translation aliases. Backend detection and the 120-second request
 timeout now follow upstream; explicit supported arguments still take precedence.

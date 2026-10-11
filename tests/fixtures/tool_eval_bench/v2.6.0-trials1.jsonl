@@ -1,0 +1,5 @@
+{"event": "scenario_start", "scenario_id": "TC-01", "title": "Direct Specialist Match", "category": "A", "index": 0, "total": 2}
+{"event": "scenario_start", "scenario_id": "TC-44", "title": "tool_choice=none Compliance", "category": "H", "index": 1, "total": 2}
+{"event": "scenario_result", "scenario_id": "TC-44", "status": "pass", "points": 2, "index": 0, "total": 2, "duration_seconds": 0.0}
+{"event": "scenario_result", "scenario_id": "TC-01", "status": "pass", "points": 2, "index": 1, "total": 2, "duration_seconds": 0.05}
+{"event": "benchmark_complete", "json_file": "suite.json", "final_score": 100}

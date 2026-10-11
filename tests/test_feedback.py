@@ -168,3 +168,17 @@ def test_log_bridge_preserves_filter_replacement_and_rejection(allow):
     with operation_scope(state=OperationState(events=seen.append)):
         assert handler.handle(record) is (replacement if allow else False)
     assert [event["message"] for event in seen] == (["safe detail"] if allow else [])
+
+
+def test_rendered_feedback_returns_detached_payload_without_duplicate_log(caplog):
+    caplog.set_level(25)
+    seen = []
+
+    def mutate(event):
+        seen.append(event)
+        event["metrics"]["count"] = 99
+
+    with operation_scope(state=OperationState(events=mutate)):
+        payload = get_feedback("benchmark.example").report("One done", log_message=False, metrics={"count": 1})
+    assert len(seen) == 1 and seen[0]["metrics"]["count"] == 99
+    assert payload["metrics"]["count"] == 1 and "One done" not in caplog.text

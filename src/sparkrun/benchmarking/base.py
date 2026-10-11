@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from sparkrun.core.recipe import Recipe
     from sparkrun.core.launcher import LaunchResult, ServeReadiness
     from sparkrun.benchmarking.scheduler import BenchTask
+    from sparkrun.benchmarking.progress import BenchmarkProgressParser
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,10 @@ class ProgressTableSpec:
     rows_from_consolidated: Callable[[dict[str, Any]], list[tuple[Any, ...]]]
     row_key: Callable[[tuple[Any, ...]], Any] = _identity_row_key
     format_cell: Callable[[Any, ProgressColumn], str] | None = None
+    # Optional per-task observations drive a live table; final rows still come
+    # exclusively from the accepted consolidated result.
+    row_from_feedback: Callable[[dict[str, Any]], tuple[Any, ...] | None] | None = None
+    summary_from_consolidated: Callable[[dict[str, Any]], str] | None = None
 
 
 _DEFAULT_PROGRESS_TABLE_SPEC = ProgressTableSpec(
@@ -303,6 +308,10 @@ class BenchmarkingPlugin(Plugin, ABC):
         measurements in addition to successful task execution. An empty set means
         no measurements are covered, whereas ``None`` adds no semantic check.
         """
+        return None
+
+    def progress_parser(self, args: dict[str, Any]) -> BenchmarkProgressParser | None:
+        """Create a fresh stderr observation parser for one subprocess attempt."""
         return None
 
     def progress_table_spec(self) -> ProgressTableSpec:

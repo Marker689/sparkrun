@@ -7,6 +7,7 @@ are advisory: they never replace the operation's result or determine success.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
 from contextlib import contextmanager
 import threading
 import logging
@@ -120,7 +121,12 @@ class FeedbackReporter:
             _logger=logger or self._logger,
         )
 
-    def report(self, message: str, *, level: FeedbackLevel = "progress", **fields) -> None:
+    def report(self, message: str, *, level: FeedbackLevel = "progress", log_message: bool = True, **fields) -> dict:
+        """Publish feedback and return its normalized payload.
+
+        Frontends that render this payload themselves can suppress its ordinary
+        log message to avoid printing the same update twice.
+        """
         event = FeedbackEvent(
             source=self.source,
             message=message,
@@ -132,8 +138,10 @@ class FeedbackReporter:
         )
         payload = event.to_dict()
         if self._state is not None:
-            self._state.feedback(payload)
-        (self._logger or logging.getLogger(self.source)).log(_LEVELS[level], "%s", message, extra=LOG_EXTRA)
+            self._state.feedback(deepcopy(payload))
+        if log_message:
+            (self._logger or logging.getLogger(self.source)).log(_LEVELS[level], "%s", message, extra=LOG_EXTRA)
+        return payload
 
     @contextmanager
     def heartbeat(self, label, *, interval: float = 30):

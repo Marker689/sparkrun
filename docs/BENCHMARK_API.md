@@ -60,13 +60,16 @@ a detached result tree, so retaining or modifying it cannot change execution.
 Once schedule entry succeeds, `schedule_finished` signals exit, including failure.
 It is not a success notification; `run_complete` is emitted only on successful
 API return. A completed-result reuse can emit `run_complete` without task events.
-Callback failures propagate after owned cleanup, and cancellation remains an
-interrupt rather than becoming a successful result.
+During execution, legacy callback failures propagate after owned cleanup.
+The additive `task_progress` observations are advisory: their subscriber or
+renderer failures do not abort measurement. Cancellation remains an interrupt
+rather than becoming a successful result.
 
 | Event | Payload |
 | --- | --- |
 | `schedule_started` | `benchmark_id`, `total_tasks`, `title` |
 | `task_start` | `benchmark_id`, `total_tasks`, zero-based `index`, `label` |
+| `task_progress` | `benchmark_id`, `total_tasks`, `index`, normalized `feedback` envelope (see [FEEDBACK.md](FEEDBACK.md)) |
 | `task_end` | `benchmark_id`, `total_tasks`, `index`, `success`, `duration_s` |
 | `results_update` | `benchmark_id`, `total_tasks`, detached consolidated `results` |
 | `schedule_log` | `benchmark_id`, `total_tasks`, `message` |
@@ -440,9 +443,9 @@ omits the image. Fresh launches with a private handle record its actual serving
 recipe and overrides as the baseline. Pending-task recovery still requires matching
 job provenance; completed-artifact processing and publication-only retries do not.
 
-## tool-eval-bench 2.6.0
+## tool-eval-bench 2.8.0
 
-The built-in `tool-eval-bench` framework defaults to upstream **v2.6.0**, using
+The built-in `tool-eval-bench` framework defaults to upstream **v2.8.0**, using
 `tool-eval-bench run --json-file` inside its isolated `uvx` environment. The
 requested ref is part of saved benchmark arguments, so a changed default does
 not silently reuse measurements from another version. `-b ref=...` can select a
@@ -454,7 +457,7 @@ that suite. Failed tasks retry the suite, while completed tasks and publication
 retries reuse their artifacts. Framework authors can provide multiple tasks when
 their tool has a meaningful task/result consolidation contract.
 
-The default request timeout follows v2.6.0 at 120 seconds. Sparkrun's whole-task
+The default request timeout is 120 seconds. Sparkrun's whole-task
 timeout includes process execution and output draining: `BenchmarkOptions.timeout`
 uses the benchmark-spec timeout when `None`, then falls back to 14,400 seconds.
 For example, `BenchmarkOptions(recipe="my-recipe", framework="tool-eval-bench",
@@ -465,8 +468,8 @@ request handling and rate-limit retries apply without another Sparkrun adapter.
 
 Examples of upstream options passed through `-b`:
 
-- `hardmode=true`: 88 public scenarios; `hardmode_only=true`: 19 hard scenarios.
-  The normal suite remains 69; `short=true` selects 15, or 34 with hard mode.
+- `hardmode=true`: 97 public scenarios; `hardmode_only=true`: 28 hard scenarios.
+  The normal suite remains 69; `short=true` selects 15, or 43 with hard mode.
 - `label="baseline, tuned"`: preserve one annotation, including commas/spaces.
 - `scenario_pack=/path/one,/path/two` and `pack_only=true`: repeat upstream's
   scenario-pack option for each directory. Packs/custom categories have no fixed
@@ -491,7 +494,8 @@ completion is accepted when at least one scenario was graded; the native JSON
 retains `completion_rate` and `excluded_scenarios` so consumers can assess coverage.
 
 Standalone upstream modes (`perf_only`, `gsm8k_only`, `mmlu_only`, `ifeval_only`,
-`skip_tool_eval`, speculative benchmarks, pressure sweeps, and inspection commands)
+`needle_only`, `decision_bench_only`, `decision_live`, `skip_tool_eval`,
+speculative benchmarks, pressure sweeps, and inspection commands)
 do not provide the scheduled tool-suite JSON artifact and are rejected before
 launch. Use the `llama-benchy` framework for performance measurements or invoke
 those upstream modes directly. Combined upstream options such as `perf=true`
@@ -502,9 +506,74 @@ Text arguments stay text: labels `true`, `false`, `0012`, commas, spaces, and qu
 characters retain their values. Only declared boolean options become flags;
 numeric and sequence options use their upstream argument shapes.
 
-Alignment was checked against upstream tag v2.6.0, commit
-[`992a6978ecbee2d72fa2ead9ccc509436769d088`](https://github.com/SeraphimSerapis/tool-eval-bench/tree/992a6978ecbee2d72fa2ead9ccc509436769d088),
-including its actual parser and JSON-file output against a local HTTP fixture.
+Alignment was checked against upstream v2.8.0, commit
+[`0a1ba68c7709f429298bc92417a9e003f61de4e3`](https://github.com/SeraphimSerapis/tool-eval-bench/tree/0a1ba68c7709f429298bc92417a9e003f61de4e3),
+and v2.6.0 with their actual CLIs against a local HTTP fixture. To repeat this
+opt-in contract test, run `SPARKRUN_TEST_TOOL_EVAL_CLI=1 uv run pytest -q
+tests/test_tool_eval_cli_integration.py`. It requires `uvx` and access to the
+pinned packages (or their cached environments); it does not contact a real model.
+
+### Scenario progress
+
+The CLI reads upstream's existing stderr JSONL while keeping the complete,
+redacted stdout/stderr task log. It starts with indeterminate preparation, then
+shows distinct completed scenarios over the observed total and an active count.
+The suite remains one scheduler task, one resumable artifact, and one retry unit.
+Neither the upstream index nor Sparkrun's pre-run count estimate drives progress.
+
+The live table shows scenario ID, verdict, points, duration, and failure kind.
+The last field is populated from the final artifact because upstream does not
+include it in live events. Interactive terminals show recent rows and one final
+complete table; redirected output prints completion rows and a concise summary
+without terminal control sequences or repeating the table. Completed-result
+reuse can render the same saved rows without invoking the evaluator.
+
+`trials > 1` has no trial boundaries in the upstream stream. Progress therefore
+counts received result events with an unknown total, without a percentage or
+invented trial number. The final table is the last trial; `trial_statistics` in
+the saved JSON contains the aggregates. Unknown refs, filtered suites, and packs
+use observed counts, never a hardcoded suite size. Missing events reconcile
+against the accepted artifact. Malformed, oversized, and unknown events remain
+in the task log and do not determine success. Even `benchmark_complete` is only
+advisory: an ensuing nonzero exit (including a safety gate) still fails the task.
+
+Operation subscribers receive `type="feedback"`, with source
+`benchmark.tool-eval-bench`. Each attempt has a new `activity_id`; stages are
+`preparation`, `scenarios`, and `finalization`. Counters use `unit="scenarios"`
+(or `"scenario results"` for multiple trials), with `total_kind="exact"` or
+`"unknown"`. Metrics include `benchmark_id`, `task_index`, `attempt_id`, `active`,
+and configured `trials`. Scenario observations also include `event` and
+`scenario_id`; result events add `verdict`, `points`, and `duration_seconds`.
+`BenchmarkOptions.progress_callback` receives the same normalized envelope in
+`task_progress.data["feedback"]`. Daemon workers persist it once as structured
+feedback and suppress the duplicate callback bridge. `results_update` continues
+to contain only consolidated artifacts, never provisional scenario rows.
+
+Saved refs, including v2.6.0, continue to run unchanged. New default-version runs
+have a separate measurement identity. Scores from different upstream versions
+are not automatically comparable: v2.8.0 includes evaluator and grading changes.
+
+### Framework progress hooks
+
+`BenchmarkingPlugin.progress_parser(args)` optionally creates one
+`BenchmarkProgressParser` per subprocess attempt. Its `start()`, `feed(line)`,
+and `finish(result, success=...)` methods return keyword fields for
+`FeedbackReporter.report()` (`None` from `feed` means ignore the line). Parsers
+receive decoded, redacted stderr lines; partial UTF-8 and CRLF framing are handled
+by the process runner. They must not read paths supplied by child events, modify
+scheduler state, or publish result artifacts. Keep producer observations bounded.
+
+`ProgressTableSpec.row_from_feedback` can turn normalized feedback into a live
+row, while `rows_from_consolidated` continues to supply authoritative final rows.
+`summary_from_consolidated` optionally provides a final text summary. Sinks may
+implement `observe_task(index, feedback)`; older sinks remain supported.
+
+Frameworks without a parser, including llama-benchy, automatically emit structured
+feedback at task start/finish through the shared scheduler. Their source is
+`benchmark.<framework_name>`, stage `execution`, unit `tasks`, with a per-attempt
+counter of 0/1 then 1/1 on success. Existing task callbacks, terminal displays,
+and result tables remain supported. This does not claim finer-grained progress
+inside llama-benchy's subprocess.
 
 
 ## Native workloads and image provenance

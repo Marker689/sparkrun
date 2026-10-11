@@ -340,7 +340,8 @@ def test_completed_resume_without_available_integrations_returns_saved_result(sc
     assert isinstance(result, BenchmarkResult) and result.success and result.already_complete and result.resumed
     assert result.results == initial.results and result.run_result is None
     assert state_path.read_bytes() == before
-    assert [event.kind for event in events] == ["run_complete"]
+    assert [event.kind for event in events] == ["schedule_started", "results_update", "schedule_finished", "run_complete"]
+    assert events[1].data["results"] == initial.results
     env.run.assert_called_once()
     env.fw.parse_results.assert_called_once()
     export.assert_not_called()

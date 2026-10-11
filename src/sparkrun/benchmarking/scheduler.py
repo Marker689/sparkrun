@@ -14,6 +14,9 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from copy import deepcopy
+
+from sparkrun.feedback import get_feedback
 from sparkrun.benchmarking._credentials import BenchmarkCredentials
 from sparkrun.benchmarking._process import run_benchmark_process
 from dataclasses import dataclass, field
@@ -91,6 +94,72 @@ def _collect_completed_results(fw, tasks, state, cache_dir) -> dict[str, Any]:
         else:
             paths.append(path)
     return consolidate_results(paths, fw)
+
+
+class _AttemptProgress:
+    """Isolate advisory parsers/renderers from required process and file work."""
+
+    def __init__(self, fw, run_args, sink, benchmark_id, index, label="benchmark task"):
+        self.parser = None
+        self.sink, self.index, self.benchmark_id = sink, index, benchmark_id
+        self.label = label
+        self.reporter = get_feedback("benchmark." + fw.framework_name)
+        try:
+            self.parser = fw.progress_parser(run_args)
+        except Exception:
+            logger.debug("Benchmark progress parser initialization failed", exc_info=True)
+        try:
+            if self.parser is not None:
+                self.reporter = get_feedback(self.parser.source)
+                self._publish(self.parser.start())
+            else:
+                self._publish(self._task_observation())
+        except Exception:
+            self.parser = None
+            logger.debug("Benchmark progress initialization failed", exc_info=True)
+
+    def _task_observation(self, success=None):
+        status = "running" if success is None else ("succeeded" if success else "failed")
+        return dict(
+            message=f"{self.label}: {status}",
+            stage="execution",
+            status=status,
+            current=1 if success else 0,
+            total=1,
+            total_kind="exact",
+            unit="tasks",
+        )
+
+    def _publish(self, fields):
+        if fields is None:
+            return
+        fields = dict(fields)
+        fields["metrics"] = {
+            **fields.get("metrics", {}),
+            "benchmark_id": self.benchmark_id,
+            "task_index": self.index,
+            "attempt_id": self.reporter.activity_id,
+        }
+        payload = self.reporter.report(**fields, log_message=False)
+        observe = getattr(self.sink, "observe_task", None)
+        if observe is not None:
+            try:
+                observe(self.index, deepcopy(payload))
+            except Exception:
+                logger.debug("Benchmark progress subscriber failed", exc_info=True)
+
+    def feed(self, line):
+        if self.parser is not None:
+            try:
+                self._publish(self.parser.feed(line))
+            except Exception:
+                logger.debug("Benchmark progress observation failed", exc_info=True)
+
+    def finish(self, result=None, *, success=False):
+        try:
+            self._publish(self.parser.finish(result, success=success) if self.parser is not None else self._task_observation(success))
+        except Exception:
+            logger.debug("Benchmark progress finalization failed", exc_info=True)
 
 
 def run_schedule(
@@ -176,6 +245,7 @@ def run_schedule(
             result_file.unlink(missing_ok=True)
             cmd = fw.build_benchmark_command(target_url, model, credentials.arguments(run_args), result_file=str(result_file))
 
+            observation = _AttemptProgress(fw, run_args, task_events, state.benchmark_id, idx, task.label)
             t_start = time.monotonic()
             try:
                 log_fh = open(log_file, "w")
@@ -185,8 +255,14 @@ def run_schedule(
                         sink.write(line)
                         sink.flush()
 
-                    rc = run_benchmark_process(cmd, timeout=timeout, credentials=credentials, stdout=output)
+                    def stderr(line, write=output, progress=observation):
+                        write(line)  # Required log failures still fail the task.
+                        progress.feed(line)
+
+                    streams = {"stderr": stderr} if observation.parser is not None else {}
+                    rc = run_benchmark_process(cmd, timeout=timeout, credentials=credentials, stdout=output, **streams)
                 except subprocess.TimeoutExpired:
+                    observation.finish()
                     logger.warning("Task %d (%s) timed out after %s seconds", idx, task.label, timeout)
                     duration_s = time.monotonic() - t_start
                     failed_this_run.add(idx)
@@ -202,7 +278,9 @@ def run_schedule(
                     log_fh.close()
 
                 duration_s = time.monotonic() - t_start
-                if rc == 0 and read_task_result(result_file) is not None:
+                artifact = read_task_result(result_file) if rc == 0 else None
+                observation.finish(artifact, success=artifact is not None)
+                if rc == 0 and artifact is not None:
                     state.mark_completed(idx)
                     state.save(cache_dir)
                     task_events.end_task(idx, success=True, duration_s=duration_s)
@@ -220,7 +298,11 @@ def run_schedule(
                         return True, False
 
             except KeyboardInterrupt:
+                observation.finish()
                 return False, True  # signal KeyboardInterrupt to caller
+            except Exception:
+                observation.finish()
+                raise
 
         return False, False
 

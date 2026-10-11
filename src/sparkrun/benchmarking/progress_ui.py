@@ -4,7 +4,7 @@ Provides :class:`BenchmarkProgressUI`, a context manager that wraps either a
 rich-based live layout (progress bar + results table) or a plain-stdout fallback
 when ``rich`` is not importable.
 
-Auto-selection happens at module import time via :data:`_HAS_RICH`.
+Rich is used only for interactive stdout; redirected output uses plain text.
 
 The displayed table is fully framework-driven via the plugin's
 :class:`~sparkrun.benchmarking.base.ProgressTableSpec` — column definitions
@@ -15,6 +15,7 @@ framework-specific schema knowledge.
 from __future__ import annotations
 
 import time
+import sys
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -27,7 +28,9 @@ if TYPE_CHECKING:
 try:
     from rich.console import Console
     from rich.live import Live
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TimeElapsedColumn, TextColumn, TimeRemainingColumn
+    from rich.progress import BarColumn, Progress, ProgressColumn, SpinnerColumn, TimeElapsedColumn, TextColumn, TimeRemainingColumn
+    from rich.text import Text
+    from rich.markup import escape
     from rich.table import Table
 
     _HAS_RICH = True
@@ -38,6 +41,15 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+if _HAS_RICH:
+
+    class _CountColumn(ProgressColumn):
+        def render(self, task):
+            if task.total is None:
+                return Text(f"{task.completed:g} completed" if task.completed else "")
+            return Text(f"{task.completed:g}/{task.total:g} {task.percentage:5.1f}%")
 
 
 def _format_row(spec: "ProgressTableSpec", row: tuple[Any, ...]) -> list[str]:
@@ -78,6 +90,7 @@ class _RichUI:
         self._fw = fw
         self._spec = fw.progress_table_spec()
         self._seen_rows: dict[Any, tuple[Any, ...]] = {}
+        self._observed = False
 
         self._console = Console(stderr=False)
 
@@ -85,16 +98,15 @@ class _RichUI:
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
             BarColumn(bar_width=None),
-            MofNCompleteColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>5.1f}%"),
+            _CountColumn(),
             TimeRemainingColumn(),
             TimeElapsedColumn(),
             console=self._console,
             transient=False,
         )
         self._task_id = self._progress.add_task(
-            description=f"Benchmark {self._title}",
-            total=total_tasks,
+            description=escape(f"Benchmark {self._title}"),
+            total=None if self._spec.row_from_feedback else total_tasks,
         )
 
         self._last_consolidated: dict[str, Any] = {}
@@ -103,6 +115,7 @@ class _RichUI:
             self._render_group(),
             console=self._console,
             refresh_per_second=4,
+            transient=True,
         )
 
     # ------------------------------------------------------------------
@@ -122,7 +135,8 @@ class _RichUI:
         """Return a single renderable that stacks progress + table."""
         outer = Table.grid(padding=0)
         outer.add_row(self._progress)
-        outer.add_row(self._table)
+        if self._table.row_count:
+            outer.add_row(self._table)
         return outer
 
     def _refresh(self) -> None:
@@ -148,25 +162,30 @@ class _RichUI:
         except Exception:  # pragma: no cover — defensive: don't break exit on plugin bug
             full_table = None
         self._live.__exit__(*exc)
-        if full_table is not None:
+        if full_table is not None and full_table.row_count:
             self._console.print(full_table)
+        if self._spec.summary_from_consolidated:
+            summary = self._spec.summary_from_consolidated(self._last_consolidated)
+            if summary:
+                self._console.print(Text(summary))
 
     def start_task(self, idx: int, label: str) -> None:
-        self._progress.update(self._task_id, description=f"[{idx + 1}/{self._total}] {label}")
+        self._progress.update(self._task_id, description=escape(f"[{idx + 1}/{self._total}] {label}"))
         self._refresh()
 
     def end_task(self, idx: int, success: bool, duration_s: float | None = None) -> None:
         dur_str = f" ({duration_s:.1f}s)" if duration_s is not None else ""
         status = "[green]done[/green]" if success else "[red]failed[/red]"
         self._console.log(f"Task {idx + 1}/{self._total} {status}{dur_str}")
-        self._progress.advance(self._task_id)
+        if not self._observed:
+            self._progress.advance(self._task_id)
         self._refresh()
 
     def _build_table_from_rows(self, rows: list[tuple[Any, ...]]) -> "Table":
         """Build a Rich Table that contains every row (no windowing)."""
         t = self._make_empty_table()
         for row in rows:
-            t.add_row(*_format_row(self._spec, row))
+            t.add_row(*(Text(cell) for cell in _format_row(self._spec, row)))
         return t
 
     def update_results_table(self, consolidated: dict[str, Any]) -> None:
@@ -186,9 +205,10 @@ class _RichUI:
             if self._seen_rows.get(key) != row:
                 self._seen_rows[key] = row
                 changed_rows.append(row)
-        for row in changed_rows:
-            cells = _format_row(self._spec, row)
-            self._console.print("  ".join(cells))
+        if self._spec.row_from_feedback is None:
+            for row in changed_rows:
+                cells = _format_row(self._spec, row)
+                self._console.print(Text("  ".join(cells)))
 
         # Render the live table with a window cap so the live region does not
         # exceed terminal height and start clipping silently.
@@ -200,12 +220,43 @@ class _RichUI:
 
         new_table = self._make_empty_table()
         for row in display_rows:
-            new_table.add_row(*_format_row(self._spec, row))
+            new_table.add_row(*(Text(cell) for cell in _format_row(self._spec, row)))
         self._table = new_table
         self._refresh()
 
+    def observe_task(self, idx: int, feedback: dict[str, Any]) -> None:
+        if self._spec.row_from_feedback is None:
+            return  # Task-boundary feedback already has the existing task UI.
+        self._observed = True
+        if feedback.get("stage") == "preparation":
+            self._seen_rows.clear()
+            self._table = self._make_empty_table()
+            self._last_consolidated = {}
+            self._progress.reset(self._task_id, total=None)
+        total = feedback.get("total")
+        if total is None and self._progress.tasks[self._task_id].total is not None:
+            self._progress.reset(self._task_id, total=None)
+        metrics = feedback.get("metrics", {})
+        suffix = f" — {metrics.get('active', 0)} active; suite {idx + 1}/{self._total}"
+        if metrics.get("trials", 1) > 1:
+            suffix += f"; {metrics['trials']} trials configured"
+        self._progress.update(
+            self._task_id,
+            total=total,
+            completed=feedback.get("current", 0),
+            description=escape(feedback["message"] + suffix),
+        )
+        if self._spec.row_from_feedback:
+            row = self._spec.row_from_feedback(feedback)
+            if row is not None:
+                key = self._spec.row_key(row)
+                self._seen_rows.pop(key, None)
+                self._seen_rows[key] = row
+                self._table = self._build_table_from_rows(list(self._seen_rows.values())[-self._window_cap() :])
+        self._refresh()
+
     def log(self, message: str) -> None:
-        self._console.log(message)
+        self._console.log(Text(message))
 
 
 # ---------------------------------------------------------------------------
@@ -231,16 +282,10 @@ class _PlainUI:
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        # Final full snapshot so scrollback contains everything.
-        try:
-            rows = self._spec.rows_from_consolidated(self._last_consolidated)
-        except Exception:  # pragma: no cover — defensive
-            rows = []
-        if rows:
-            print("---")
-            self._print_header()
-            for row in rows:
-                self._print_row(row)
+        if self._spec.summary_from_consolidated:
+            summary = self._spec.summary_from_consolidated(self._last_consolidated)
+            if summary:
+                print(summary)
         print("=== Benchmark schedule finished ===")
 
     def start_task(self, idx: int, label: str) -> None:
@@ -280,6 +325,23 @@ class _PlainUI:
         for row in changed_rows:
             self._print_row(row)
 
+    def observe_task(self, idx: int, feedback: dict[str, Any]) -> None:
+        if feedback.get("stage") == "preparation":
+            self._seen_rows.clear()
+            self._last_consolidated = {}
+            self._header_emitted = False
+            print(feedback["message"])
+        if self._spec.row_from_feedback:
+            row = self._spec.row_from_feedback(feedback)
+            if row is not None:
+                key = self._spec.row_key(row)
+                if self._seen_rows.get(key) != row or feedback.get("metrics", {}).get("trials", 1) > 1:
+                    self._seen_rows[key] = row
+                    if not self._header_emitted:
+                        self._print_header()
+                        self._header_emitted = True
+                    self._print_row(row)
+
     def log(self, message: str) -> None:
         print(message)
 
@@ -292,8 +354,8 @@ class _PlainUI:
 class BenchmarkProgressUI:
     """Context-manager facade that delegates to the appropriate backend.
 
-    Selects :class:`_RichUI` when ``rich`` is available; falls back to
-    :class:`_PlainUI` otherwise.
+    Selects :class:`_RichUI` for interactive stdout when ``rich`` is available;
+    falls back to :class:`_PlainUI` otherwise.
 
     Args:
         total_tasks: Total number of benchmark tasks in the schedule.
@@ -306,7 +368,7 @@ class BenchmarkProgressUI:
 
     def __init__(self, *, total_tasks: int, benchmark_id: str, fw: "BenchmarkingPlugin", title: str = "") -> None:
         self._backend: _RichUI | _PlainUI
-        if _HAS_RICH:
+        if _HAS_RICH and sys.stdout.isatty():
             self._backend = _RichUI(total_tasks=total_tasks, benchmark_id=benchmark_id, fw=fw, title=title)
         else:
             self._backend = _PlainUI(total_tasks=total_tasks, benchmark_id=benchmark_id, fw=fw, title=title)
@@ -341,6 +403,9 @@ class BenchmarkProgressUI:
         rendered table while previously-seen rows accumulate in scrollback.
         """
         self._backend.update_results_table(consolidated)
+
+    def observe_task(self, idx: int, feedback: dict[str, Any]) -> None:
+        self._backend.observe_task(idx, feedback)
 
     def log(self, message: str) -> None:
         """Emit *message* above the live area (or to stdout on the plain backend)."""

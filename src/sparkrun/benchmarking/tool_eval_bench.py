@@ -2,7 +2,7 @@
 
 Runs `SeraphimSerapis/tool-eval-bench`_ against an OpenAI-compatible
 endpoint to measure tool-call correctness across a deterministic suite of
-scenarios (69 by default, plus 19 optional Hard Mode scenarios).
+scenarios (69 by default, plus 28 optional Hard Mode scenarios).
 
 .. _SeraphimSerapis/tool-eval-bench: https://github.com/SeraphimSerapis/tool-eval-bench
 """
@@ -30,18 +30,24 @@ logger = logging.getLogger(__name__)
 # Pinned upstream ref. Bump as needed; users can override per-call with
 # ``-b ref=<tag-or-branch>`` (the value is consumed by the plugin and not
 # forwarded to the subprocess).
-_DEFAULT_REF = "v2.6.0"
+_DEFAULT_REF = "v2.8.0"
 _GIT_URL = "https://github.com/SeraphimSerapis/tool-eval-bench"
 
-# CLI value shapes in v2.6.0. All other values are scalar; commas in labels,
+# CLI value shapes in v2.8.0. All other values are scalar; commas in labels,
 # JSON and paths must not become additional command arguments.
 _LIST_ARGS = {"scenarios", "categories"}
 _CSV_ARGS = {"depth", "concurrency", "spec_prompts", "mmlu_subjects"}
-_REPEAT_ARGS = {"scenario_pack"}
+_REPEAT_ARGS = {"scenario_pack", "header"}
 _HIDDEN_ARGS = {"ref", "framework_pinned_version"}
 _REMOVED_ARGS = {"experimental_async", "llm_judge", "perf_legacy", "perf_legacy_only"}
 _PERF_TRIGGER_ARGS = {"perf"}
 _BOOL_ARGS = {
+    "include_held_out",
+    "needle",
+    "needle_only",
+    "decision_bench",
+    "decision_bench_only",
+    "decision_live",
     "dry_run",
     "fail_on_safety",
     "gsm8k",
@@ -74,6 +80,10 @@ _BOOL_ARGS = {
     "weight_by_difficulty",
 }
 _INT_ARGS = {
+    "variant_seed",
+    "spec_runs",
+    "needle_depths",
+    "needle_lengths",
     "benchy_runs",
     "context_size",
     "gsm8k_limit",
@@ -91,6 +101,7 @@ _INT_ARGS = {
     "trials",
 }
 _FLOAT_ARGS = {
+    "decision_live_interval",
     "alpha",
     "baseline_tgs",
     "context_pressure",
@@ -105,6 +116,12 @@ _FLOAT_ARGS = {
 # Upstream's standalone modes exit before writing --json-file. Do not start
 # inference for work that cannot satisfy the scheduler's artifact contract.
 _NO_ARTIFACT_MODES = {
+    "needle_only",
+    "decision_bench_only",
+    "decision_live",
+    "version",
+    "compare",
+    "export",
     "perf_only",
     "gsm8k_only",
     "mmlu_only",
@@ -128,7 +145,7 @@ def _validate_run_args(args: dict[str, Any]) -> None:
     unsupported = sorted(key for key in _NO_ARTIFACT_MODES if args.get(key) is not None and args.get(key) is not False)
     if unsupported:
         raise ValueError(
-            "tool-eval-bench v2.6 modes do not provide scheduled JSON artifacts: %s. "
+            "tool-eval-bench modes do not provide scheduled JSON artifacts: %s. "
             "Use the llama-benchy framework for performance-only work or invoke the standalone tool directly." % ", ".join(unsupported)
         )
 
@@ -302,6 +319,9 @@ class ToolEvalBenchFramework(BenchmarkingPlugin):
     def interpret_arg(self, key: str, value: str) -> Any:
         from sparkrun.utils import coerce_value
 
+        if key == "header":
+            # Header values may contain commas; repeat via a YAML/API list.
+            return value
         if key in _LIST_ARGS | _CSV_ARGS | _REPEAT_ARGS:
             return [item.strip() for item in value.split(",")]
         if key in _BOOL_ARGS:
@@ -321,19 +341,48 @@ class ToolEvalBenchFramework(BenchmarkingPlugin):
     def measured_nothing(self, parsed: dict[str, Any]) -> bool:
         return not _has_measurements(parsed.get("json", {}))
 
+    def progress_parser(self, args):
+        from sparkrun.benchmarking.tool_eval_progress import ToolEvalProgressParser
+
+        return ToolEvalProgressParser(args)
+
+    def progress_table_spec(self):
+        from sparkrun.benchmarking.base import ProgressColumn, ProgressTableSpec
+        from sparkrun.benchmarking.tool_eval_progress import scenario_rows, row_from_feedback, format_cell, result_summary
+
+        return ProgressTableSpec(
+            columns=[
+                ProgressColumn("Scenario", "left"),
+                ProgressColumn("Verdict", "left"),
+                ProgressColumn("Points"),
+                ProgressColumn("Duration"),
+                ProgressColumn("Failure kind", "left"),
+            ],
+            rows_from_consolidated=scenario_rows,
+            row_key=lambda row: row[0],
+            format_cell=format_cell,
+            row_from_feedback=row_from_feedback,
+            summary_from_consolidated=result_summary,
+        )
+
     def estimate_test_count(self, args: dict[str, Any]) -> int | None:
-        scenarios = args.get("scenarios")
-        if isinstance(scenarios, list) and scenarios:
-            return len(scenarios)
+        # Informational only: progress totals always come from observed events.
         if args.get("scenario_pack") or args.get("categories"):
             return None
-        if args.get("hardmode_only"):
-            return 19
-        if args.get("short"):
-            return 34 if args.get("hardmode") else 15
-        if args.get("hardmode"):
-            return 88
-        return 69
+        scenarios = args.get("scenarios")
+        if isinstance(scenarios, list) and scenarios:
+            count = len(set(scenarios))
+        else:
+            ref = args.get("framework_pinned_version") or args.get("ref") or _DEFAULT_REF
+            if ref not in {"v2.6.0", "v2.8.0"}:
+                return None
+            hardmode = 28 if ref == "v2.8.0" else 19
+            if args.get("hardmode_only"):
+                count = hardmode
+            else:
+                count = (15 if args.get("short") else 69) + (hardmode if args.get("hardmode") else 0)
+        trials = args.get("trials", 1)
+        return count * trials if type(trials) is int and trials > 0 else None
 
     def parse_results(
         self,

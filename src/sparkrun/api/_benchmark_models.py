@@ -66,6 +66,7 @@ ProgressEventKind = Literal[
     "schedule_started",
     "task_start",
     "task_end",
+    "task_progress",
     "results_update",
     "schedule_log",
     "schedule_finished",
@@ -91,6 +92,7 @@ class ProgressEventData(TypedDict, total=False):
     index: int
     success: bool
     duration_s: float | None
+    feedback: dict[str, Any]
     results: dict[str, Any]
     message: str
     resumed: bool
@@ -102,7 +104,7 @@ class ProgressEvent:
 
     Carries a stable ``kind`` discriminator and a free-form ``data``
     payload. Scheduled runs and resumes emit ``schedule_started``, ``task_start``,
-    ``task_end``, ``results_update``, ``schedule_log`` and ``schedule_finished``.
+    ``task_end``, ``task_progress``, ``results_update``, ``schedule_log`` and ``schedule_finished``.
     Successful API calls also emit ``run_complete``. Text notifications use
     ``banner``, ``info``, ``warning``, ``error`` and ``progress_step``.
     """

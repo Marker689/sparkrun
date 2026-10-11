@@ -12,6 +12,13 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Upgrade tool-eval-bench's default to v2.8.0 and display live scenario progress
+  and verdict tables from its JSONL stream. Preserve saved refs and suite-level
+  resume, reconcile final artifacts, and keep multi-trial totals indeterminate.
+  Share normalized progress through the public feedback API, benchmark callbacks,
+  and daemon events without duplicate messages. Other scheduled frameworks,
+  including llama-benchy, now emit structured task start/finish feedback.
+
 - Restore plugin versions in `setup version` without loading plugin code, including
   disabled plugins. Fix daemon runtime leases under macOS temporary-directory
   aliases, support Python 3.13 operation-log forwarding, and retain useful

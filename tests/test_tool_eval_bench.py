@@ -23,7 +23,7 @@ def test_default_args():
     fw = ToolEvalBenchFramework()
     defaults = fw.get_default_args()
     assert "backend" not in defaults
-    assert defaults["ref"] == "v2.6.0"
+    assert defaults["ref"] == "v2.8.0"
     assert defaults["timeout"] == 120
     assert defaults["parallel"] == 1
     assert defaults["max_turns"] == 8
@@ -178,7 +178,7 @@ def test_estimate_test_count_short():
 
 def test_estimate_test_count_hardmode():
     fw = ToolEvalBenchFramework()
-    assert fw.estimate_test_count({"hardmode": True}) == 88
+    assert fw.estimate_test_count({"hardmode": True}) == 97
 
 
 def test_estimate_test_count_explicit_scenarios():
@@ -336,7 +336,7 @@ def test_latest_command_uses_native_json_file_and_raw_values(tmp_path):
         },
         result_file=output,
     )
-    assert command[:5] == ["uvx", "--from", "git+https://github.com/SeraphimSerapis/tool-eval-bench@v2.6.0", "tool-eval-bench", "run"]
+    assert command[:5] == ["uvx", "--from", "git+https://github.com/SeraphimSerapis/tool-eval-bench@v2.8.0", "tool-eval-bench", "run"]
     assert command[command.index("--label") + 1] == label
     assert command[command.index("--json-file") + 1] == output
     assert command.count("--json-file") == 1 and "/wrong/path" not in command
@@ -359,7 +359,7 @@ def test_single_suite_task_round_trips_without_mutating_arguments():
     base = fw.get_default_args()
     tasks = fw.build_task_list(base, [{"scenarios": ["TC-01"], "label": "trial"}])
     restored = fw.build_task_list(base, [task.schedule_entry for task in tasks])
-    assert restored == tasks and tasks[0].run_args["ref"] == "v2.6.0"
+    assert restored == tasks and tasks[0].run_args["ref"] == "v2.8.0"
     tasks[0].run_args["scenarios"].append("TC-02")
     assert "scenarios" not in base
     assert tasks[0].schedule_entry["scenarios"] == ["TC-01"]
@@ -456,3 +456,19 @@ def test_boolean_flags_reject_non_boolean_values():
         fw.interpret_arg("no_think", "perhaps")
     with pytest.raises(ValueError, match="boolean"):
         fw.build_benchmark_command("http://localhost/v1", "test/model", {"label": True})
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ({"hardmode_only": True}, 28),
+        ({"hardmode": True, "short": True}, 43),
+        ({"ref": "v2.6.0", "hardmode": True}, 88),
+        ({"ref": "v2.6.0", "hardmode_only": True}, 19),
+        ({"ref": "main"}, None),
+        ({"scenario_pack": ["custom"], "pack_only": True}, None),
+        ({"scenarios": ["TC-01", "TC-01", "TC-02"], "trials": 2}, 4),
+    ],
+)
+def test_estimates_respect_known_version_and_selection(args, expected):
+    assert ToolEvalBenchFramework().estimate_test_count(args) == expected

@@ -40,7 +40,7 @@ def test_tool_suite_retries_failed_attempt_and_reuses_completed_output(scheduled
         return [sys.executable, "-c", source]
 
     monkeypatch.setattr(fw, "build_benchmark_command", command)
-    options = replace(env.options, framework=fw.framework_name, bench_args={"label": "first, second"})
+    options = replace(env.options, framework=fw.framework_name, bench_args={"label": "first, second", "ref": "v2.6.0"})
     with pytest.raises(BenchmarkFailed, match="incomplete"):
         benchmark(options, sctx=env.sctx)
     state_path = next(env.sctx.config.cache_dir.glob("benchmarks/bench_*/state.yaml"))
@@ -61,7 +61,10 @@ def test_tool_suite_retries_failed_attempt_and_reuses_completed_output(scheduled
     forbidden = Mock(side_effect=AssertionError("completed output must not require execution"))
     monkeypatch.setattr(fw, "build_benchmark_command", forbidden)
     monkeypatch.setattr(fw, "check_prerequisites", forbidden)
-    reused = resume_benchmark(state.benchmark_id, sctx=env.sctx)
+    saved_events = []
+    reused = resume_benchmark(state.benchmark_id, sctx=env.sctx, progress_callback=saved_events.append)
+    assert next(e for e in saved_events if e.kind == "results_update").data["results"] == payload
+    assert not any(e.kind == "task_start" for e in saved_events)
     assert reused.already_complete and reused.results["json"] == payload
     forbidden.assert_not_called()
 
@@ -137,7 +140,9 @@ def test_unmeasured_suite_cannot_publish_and_resume_retries(scheduled_env, monke
     command.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", ["perf_only", "mmlu_only", "skip_tool_eval", "context_pressure_sweep"])
+@pytest.mark.parametrize(
+    "mode", ["perf_only", "mmlu_only", "skip_tool_eval", "context_pressure_sweep", "needle_only", "decision_bench_only", "decision_live"]
+)
 def test_non_artifact_modes_rejected_before_launch(scheduled_env, monkeypatch, mode):
     from sparkrun.api import SparkrunError
 

@@ -110,6 +110,13 @@ def unavailable_prompt(*args, **kwargs):
     raise RuntimeError("This operation requires a worker input channel")
 
 
+def _benchmark_progress(sctx, event):
+    # Scenario observations already arrive through OperationState.feedback.
+    # Keep legacy benchmark events without publishing a second observation.
+    if event.kind != "task_progress":
+        sctx.operation.emit("progress", event=to_wire(event))
+
+
 def invoke(target, arguments, sctx, prompt=unavailable_prompt):
     from sparkrun import api
 
@@ -125,7 +132,7 @@ def invoke(target, arguments, sctx, prompt=unavailable_prompt):
     if "progress" in parameters:
         arguments["progress"] = lambda name, success: sctx.operation.emit("progress", label=name, success=success)
     if "progress_callback" in parameters:
-        arguments["progress_callback"] = lambda event: sctx.operation.emit("progress", event=to_wire(event))
+        arguments["progress_callback"] = lambda event: _benchmark_progress(sctx, event)
     if "decision_callback" in parameters:
         arguments["decision_callback"] = lambda decision: prompt("decision", decision.message, default=False)
     try:
@@ -148,7 +155,7 @@ def invoke_options(target, model, arguments, sctx, prompt=unavailable_prompt):
     if model == "RunOptions":
         arguments.update(detached=True, follow=False, owner="daemon:" + sctx.operation.id)
     if model == "BenchmarkOptions":
-        arguments["progress_callback"] = lambda event: sctx.operation.emit("progress", event=to_wire(event))
+        arguments["progress_callback"] = lambda event: _benchmark_progress(sctx, event)
         arguments["decision_callback"] = lambda decision: prompt("decision", decision.message, default=False)
         if "resume" in arguments:
             arguments["resume"] = api.ResumeMode(arguments["resume"])
