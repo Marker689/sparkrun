@@ -15,8 +15,23 @@ _worker = None
 class _FeedbackHandler(logging.Handler):
     def __init__(self):
         super().__init__(25)
-        self.lock = None  # Per-operation delivery serializes callbacks; avoid cross-operation lock inversion.
         self.local = threading.local()
+
+    def createLock(self):
+        # Like NullHandler, this sink has no shared I/O lock to register at fork.
+        # Delivery is serialized per operation to avoid lock inversion between
+        # concurrent operations and their callbacks.
+        self.lock = None
+
+    def handle(self, record):
+        # Python 3.13's Handler.handle requires a context-manager lock. Perform
+        # the same filtering here, including replacement records, without one.
+        accepted = self.filter(record)
+        if isinstance(accepted, logging.LogRecord):
+            record = accepted
+        if accepted:
+            self.emit(record)
+        return accepted
 
     def emit(self, record):
         if getattr(record, "sparkrun_feedback", False) or getattr(self.local, "busy", False):

@@ -12,6 +12,11 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Restore plugin versions in `setup version` without loading plugin code, including
+  disabled plugins. Fix daemon runtime leases under macOS temporary-directory
+  aliases, support Python 3.13 operation-log forwarding, and retain useful
+  supervisor launch diagnostics.
+
 - Add public structured plugin feedback with operation-bound reporters, nested
   activities, per-host counters, explicit exact/upper-bound totals, and heartbeats.
   Forward legacy operation progress/warnings into daemon job events without

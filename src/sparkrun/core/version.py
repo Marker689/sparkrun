@@ -128,5 +128,5 @@ def version_diagnostics(config) -> dict:
         "channel": config.self_update_channel,
         "distribution": {"id": profile.id, "package": profile.package, "version": base, "commit": commit},
         "core": {"package": "sparkrun", "version": base_version("sparkrun"), "commit": installed_commit("sparkrun")},
-        "plugins": [p.to_dict() for p in list_plugins(config) if p.loaded],
+        "plugins": [p.to_dict() for p in list_plugins(config)],
     }

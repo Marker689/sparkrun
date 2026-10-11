@@ -173,17 +173,18 @@ def acquire_decoder(arch: str, settings: dict, binary: Path) -> tuple[Path, str]
     if not archive.is_file() or file_digest(archive) != pin.get("sha256"):
         raise BinaryInvalid("decoder release archive checksum mismatch")
     with tarfile.open(archive, "r:gz") as tar:
-        def entry(name, maximum, optional=False):
+        def entry(name, maximum) -> bytes:
             matches = [e for e in tar.getmembers() if e.name in {name, "./" + name}]
-            if not matches and optional:
-                return None
             if len(matches) != 1 or not matches[0].isfile() or not 0 < matches[0].size <= maximum:
                 raise BinaryInvalid("release must contain one regular " + name)
-            with tar.extractfile(matches[0]) as stream:
+            stream = tar.extractfile(matches[0])
+            if stream is None:
+                raise BinaryInvalid("release entry missing: " + name)
+            with stream:
                 return stream.read(maximum + 1)
-        manifest_raw = entry("bundle.json", 64 << 10, optional=True)
-        if manifest_raw is None:
+        if not any(e.name in {"bundle.json", "./bundle.json"} for e in tar.getmembers()):
             return None
+        manifest_raw = entry("bundle.json", 64 << 10)
         manifest = json.loads(manifest_raw)
         if (manifest.get("format") != 1 or manifest.get("version") != __version__
                 or manifest.get("platform") != "linux/" + arch

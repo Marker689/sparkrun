@@ -2798,16 +2798,16 @@ class RegistryManager:
                 except Exception as error:
                     logger.debug("Skipping %s manifest %s: %s", recipe_format, f, error)
                     continue
-                entry = recipe_summary_from_data(data, f, name=handler.name_of(f, recipe_dir), registry_name=registry_name)
-                if entry is not None:
-                    recipes.append(entry)
+                summary = recipe_summary_from_data(data, f, name=handler.name_of(f, recipe_dir), registry_name=registry_name)
+                if summary is not None:
+                    recipes.append(summary)
             return recipes
 
         recipes = []
         for f in iter_asset_files(recipe_dir, RECIPE_ASSET):
-            entry = recipe_summary(f, registry_name=registry_name)
-            if entry is not None:
-                recipes.append(entry)
+            summary = recipe_summary(f, registry_name=registry_name)
+            if summary is not None:
+                recipes.append(summary)
         return recipes
 
     def list_foreign_format_recipes(self, include_hidden: bool = False) -> list[dict[str, Any]]:

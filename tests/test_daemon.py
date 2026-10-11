@@ -18,7 +18,8 @@ from sparkrun.daemon.state import Binding
 
 
 @pytest.fixture
-def binding(tmp_path, monkeypatch):
+def binding(daemon_test_directory, monkeypatch):
+    tmp_path = daemon_test_directory
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.core import daemon_registry
 

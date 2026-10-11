@@ -401,7 +401,7 @@ def format_host_table(
         fact = facts.get(host)
         role = "target" if is_solo else ("head" if position == 0 else "worker")
         row = [role, host]
-        if multi_rank:
+        if multi_rank and placement is not None:
             row.append(str(len(placement.ranks_on_host(host))))
         if fact is None or not fact["accelerators"]:
             row += ["unknown", "unknown"]

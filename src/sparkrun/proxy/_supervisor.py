@@ -219,8 +219,11 @@ def _alive(pid: int | None) -> bool:
 
 
 def _state_pid(state: dict) -> int | None:
+    value = state.get("pid")
+    if value is None:
+        return None
     try:
-        return int(state.get("pid"))
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -670,10 +673,7 @@ class GatewaySupervisor(GatewayState):
                 # Cleared by a stop (a failed restart records restart_failed
                 # instead, so this is never a crash).
                 return "stopped", None
-            try:
-                recorded = int(state.get("pid"))
-            except (TypeError, ValueError):
-                recorded = None
+            recorded = _state_pid(state)
             if recorded is not None and recorded != pid:
                 # A new record. Follow it when it is our managed restart, not a
                 # start someone else made after stopping us.

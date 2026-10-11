@@ -365,14 +365,15 @@ configured `next` works, but selecting it needs a generic CLI channel selector
 before the full custom-channel workflow is exposed.
 
 `setup version` displays the application package/version, profile ID, release
-channel, core package/version, installed commits when available, and loaded plugin
+channel, core package/version, installed commits when available, and discovered plugin
 versions with their package/source. Plugins without a declared version show
 `unknown` rather than inheriting the core version. The `--json` form exposes the
 same diagnostics as structured data for tooling and self-update.
 
 `setup version --json` retains top-level `version`, `commit`, `channel` for the
-running distribution and adds separate `distribution`, `core` and loaded `plugins`
-records. Package sources compare versions; Git sources compare commits. An
+running distribution and adds separate `distribution`, `core` and `plugins`
+records. Version inspection does not load plugins; each record reports selection
+and actual loaded state separately. Package sources compare versions; Git sources compare commits. An
 unchanged identity is not reported as an upgrade. Downstream update channels do
 not enable upstream experimental features unless `feature_channel` explicitly
 chooses that maturity policy.

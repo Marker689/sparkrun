@@ -79,7 +79,7 @@ def environment_state():
     from sparkrun.core.process_identity import user_identity
 
     uid = user_identity()
-    return private_directory(Path(tempfile.gettempdir()) / f"sparkrun-runtime-{uid}-{key}")
+    return private_directory(Path(tempfile.gettempdir()).resolve() / f"sparkrun-runtime-{uid}-{key}")
 
 
 @contextmanager

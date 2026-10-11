@@ -99,6 +99,10 @@ def isolate_stateful(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(_systemd, "SYSTEM_UNIT_DIR", tmp_path / "systemd-system")
     monkeypatch.setattr(_systemd, "user_unit_dir", lambda: tmp_path / "systemd-user")
     monkeypatch.delenv("SPARKRUN_PROXY_SUPERVISOR", raising=False)
+    # A CI runner can itself be a systemd service. Foreground test daemons
+    # must not inherit its service-mode marker; native service tests get their
+    # own marker from systemd when launched.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
     # The experimental local/k8s executors gate themselves off by default on
     # the stable channel (via is_multi_extension). Most of the suite exercises
     # their behavior directly and predates the feature-flag gating, so enable
@@ -669,3 +673,21 @@ def passive_recipe_item(monkeypatch):
         affects_fingerprint=False,
     )
     return "demo_annotations"
+
+
+@pytest.fixture
+def daemon_test_directory(tmp_path):
+    import os
+
+    if os.name != "nt":
+        yield tmp_path
+        return
+    # pytest's shared per-user temp parent may inherit public Windows ACLs.
+    # Own a private root instead of altering that parent or relaxing validation.
+    from tempfile import TemporaryDirectory
+    from sparkrun.utils.windows import secure_path
+
+    with TemporaryDirectory(prefix="sparkrun-tests-") as temporary:
+        root = Path(temporary)
+        secure_path(root)
+        yield root

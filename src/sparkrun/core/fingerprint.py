@@ -225,6 +225,8 @@ def _group_accelerators(
     current_count = 0
 
     def _flush() -> None:
+        if current is None:
+            return
         model, mem, cc = current
         grouped.append(
             AcceleratorSpec(

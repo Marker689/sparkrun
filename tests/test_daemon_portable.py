@@ -366,3 +366,45 @@ def test_allow_insecure_does_not_accept_partial_tls(binding, option):
     )
     assert result.returncode != 0 and "TLS requires both certificate and private key" in result.stderr
     assert binding.read_state() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX system temporary directory aliases")
+def test_runtime_lease_canonicalizes_system_temp_root(tmp_path, monkeypatch):
+    import tempfile
+    from sparkrun.core.runtime_lease import environment_state
+
+    target = tmp_path / "real-temp"
+    target.mkdir()
+    alias = tmp_path / "system-temp"
+    alias.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(alias))
+    directory = environment_state()
+    assert directory.parent == target.resolve()
+    assert directory.is_dir() and directory.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows ACLs")
+def test_windows_private_storage_rejects_replaceable_ancestor(binding):
+    import win32con
+    import win32security
+    from sparkrun.utils.windows import private_directory, secure_path, user_sid
+
+    parent = binding.directory / "public-parent"
+    parent.mkdir()
+    acl = win32security.ACL()
+    acl.AddAccessAllowedAce(win32security.ACL_REVISION, win32con.GENERIC_ALL, user_sid())
+    acl.AddAccessAllowedAce(win32security.ACL_REVISION, win32con.GENERIC_ALL, win32security.ConvertStringSidToSid("S-1-1-0"))
+    win32security.SetNamedSecurityInfo(
+        str(parent),
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        acl,
+        None,
+    )
+    with pytest.raises(ValueError, match="SID S-1-1-0, mask"):
+        private_directory(parent / "credentials")
+    assert not (parent / "credentials").exists()
+    secure_path(parent)
+    assert private_directory(parent / "credentials").is_dir()

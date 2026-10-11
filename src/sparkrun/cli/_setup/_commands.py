@@ -306,7 +306,7 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo, no_update
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable application, core, and plugin version information")
 @click.pass_context
 def setup_version(ctx, as_json):
-    """Show application, core, and loaded plugin versions.
+    """Show application, core, and discovered plugin versions without loading plugins.
 
     Includes the application profile, release channel, and installed Git
     commits when available. The self-update flow uses --json to compare builds.
@@ -333,7 +333,7 @@ def setup_version(ctx, as_json):
     click.echo("Channel:     %s" % data["channel"])
     click.echo("Core:        %s" % package_identity(data["core"]))
     click.echo()
-    click.echo("Loaded plugins:")
+    click.echo("Plugins:")
     if not data["plugins"]:
         click.echo("  (none)")
     for plugin in data["plugins"]:

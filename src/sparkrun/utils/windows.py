@@ -64,7 +64,10 @@ def check_private(path, *, ancestor=False):
             continue
         if kind == win32security.ACCESS_ALLOWED_ACE_TYPE:
             if win32security.ConvertSidToStringSid(sid) not in trusted and (not ancestor or mask & dangerous):
-                raise ValueError(f"Unsafe permissions on daemon path: {path}")
+                raise ValueError(
+                    f"Unsafe permissions on daemon path: {path} "
+                    f"(SID {win32security.ConvertSidToStringSid(sid)}, mask {mask:#x}, flags {flags:#x})"
+                )
         elif kind != win32security.ACCESS_DENIED_ACE_TYPE:
             raise ValueError(f"Unsupported ACL on daemon path: {path}")
 

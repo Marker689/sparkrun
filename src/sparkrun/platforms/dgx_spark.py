@@ -46,7 +46,7 @@ _DGX_SPARK_MAX_GPU_MEMORY_UTILIZATION = DGX_SPARK_SCHEDULING_FRACTION
 # value always wins: this only fills a gap, it never lowers what a recipe says.
 DGX_SPARK_DEFAULT_SERVE_GPU_MEMORY_UTILIZATION = 0.8
 
-_SERVE_MEMORY_DEFAULT = {"gpu_memory_utilization": DGX_SPARK_DEFAULT_SERVE_GPU_MEMORY_UTILIZATION}
+_SERVE_MEMORY_DEFAULT: dict[str, object] = {"gpu_memory_utilization": DGX_SPARK_DEFAULT_SERVE_GPU_MEMORY_UTILIZATION}
 
 # Per-runtime recipe-flag defaults for GB10.  Applied at the recipe-default
 # tier (only when the recipe/CLI are silent).  Memory-mapped GGUF loading

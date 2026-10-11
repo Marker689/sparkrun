@@ -236,6 +236,7 @@ def resolve_host_digest(image: str, hosts: list[str], ssh_kwargs: dict | None = 
         detail = "; ".join("%s: %s" % (h, i or "?") for h, (i, _d) in sorted(identities.items()))
         raise DigestResolutionError("the hosts hold different builds of %s (image ids %s)" % (image, detail))
     image_id = image_ids.pop()
+    assert image_id is not None  # Rejected above; preserve narrowing after set.pop().
     local_id, local_digests = _local_identity(image)
     holders = [digests for i, digests in [*identities.values(), (local_id, local_digests)] if i == image_id]
     candidates = set().union(*(_repo_digests(d, repository) for d in holders))

@@ -448,7 +448,7 @@ def test_version_diagnostics_separate_distribution_and_core_commits(monkeypatch)
     assert "Application: alternate-test 1.0 (commit alternate-test-commit)" in output.output
     assert "Core:        sparkrun 0.3.9 (commit sparkrun-commit)" in output.output
     if not data["plugins"]:
-        assert "Loaded plugins:\n  (none)" in output.output
+        assert "Plugins:\n  (none)" in output.output
     output = CliRunner().invoke(_commands.setup_version, ["--json"])
     assert output.exit_code == 0, output.output
     assert json.loads(output.output) == data

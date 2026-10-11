@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -129,7 +130,17 @@ class Coordinator:
                 child = launch(self.binding, job["id"], systemd=self.systemd)
                 if child is not None:
                     self.children[job["id"]] = child
-            except (OSError, RuntimeError, subprocess.SubprocessError):
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                # Subprocess exceptions include the complete systemd command,
+                # including --setenv telemetry credentials. Log the failure
+                # without exposing command arguments or captured output.
+                if isinstance(exc, subprocess.CalledProcessError):
+                    reason = f"supervisor exited with status {exc.returncode}"
+                elif isinstance(exc, subprocess.TimeoutExpired):
+                    reason = f"supervisor timed out after {exc.timeout} seconds"
+                else:
+                    reason = str(exc)
+                logging.getLogger(__name__).error("Could not launch daemon worker for job %s: %s", job["id"], reason)
                 self.store.finish(
                     job["id"], "lost", error={"detail": "Worker launch failed; inspect supervisor diagnostics before resubmitting"}
                 )

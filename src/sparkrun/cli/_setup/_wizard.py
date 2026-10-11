@@ -1018,6 +1018,10 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
     finally:
         recordings.close()
 
+    _finish_wizard(config, results, dry_run, wizard_run_kind, len(host_list), cx7_detected_any)
+
+
+def _finish_wizard(config, results, dry_run, wizard_run_kind, host_count, cx7_detected):
     # ── Phase 7: Summary ─────────────────────────────────────────
     click.echo()
     click.echo("Setup preview complete (no changes made)." if dry_run else "Setup finished; review the readiness results above.")
@@ -1051,9 +1055,9 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
         config,
         wizard_run_kind=wizard_run_kind,
         results=results,
-        cluster_node_count=len(host_list),
+        cluster_node_count=host_count,
         dry_run=dry_run,
-        cx7_detected=cx7_detected_any,
+        cx7_detected=cx7_detected,
     )
     click.echo()
 

@@ -370,7 +370,9 @@ def translate(entry: LilEntry, facts: CheckpointFacts, *, strict: bool = True) -
     ):
         if serving.get(key):
             defaults[flag] = True
-    multimodal = serving.get("multimodal") if isinstance(serving.get("multimodal"), dict) else {}
+    multimodal = serving.get("multimodal")
+    if not isinstance(multimodal, dict):
+        multimodal = {}
     if _present(multimodal, "encoder_tp_mode"):
         defaults["mm_encoder_tp_mode"] = multimodal["encoder_tp_mode"]
     if _present(multimodal, "processor_cache_gb"):

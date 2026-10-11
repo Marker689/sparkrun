@@ -417,3 +417,47 @@ def test_update_state_does_not_apply_posix_ownership_rules_without_uid(tmp_path,
     parent.chmod(0o777)
     monkeypatch.delattr(os, "getuid")
     assert private_directory(parent / "state").is_dir()
+
+
+def test_service_worker_guard_and_launch_diagnostics(binding, monkeypatch, caplog):
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.runtime_lease import runtime_identity
+    from sparkrun.daemon import supervisor
+    from sparkrun.daemon.jobs import JobStore
+    from sparkrun.core.daemon_registry import DaemonOp
+
+    monkeypatch.setenv("INVOCATION_ID", "test-service")
+    runtime = runtime_identity(SparkrunConfig(binding.config_path))
+    store = JobStore(binding.directory)
+    job = store.submit(DaemonOp("test.launch", lambda: None), {}, "test", "test", runtime)
+    supervisor.Coordinator(binding, store).tick(runtime)
+    assert store.get(job)["state"] == "lost"
+    assert "Service mode requires --worker-supervisor systemd" in caplog.text
+    assert job in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error,reason",
+    [
+        (subprocess.CalledProcessError(23, ["systemd-run", "--setenv=KEY=private-key"], stderr="private-key"), "status 23"),
+        (subprocess.TimeoutExpired(["systemd-run", "--setenv=KEY=private-key"], 20, stderr="private-key"), "timed out after 20"),
+    ],
+)
+def test_supervisor_launch_diagnostics_do_not_expose_command_secrets(binding, monkeypatch, caplog, error, reason):
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.runtime_lease import runtime_identity
+    from sparkrun.daemon import supervisor
+    from sparkrun.daemon.jobs import JobStore
+    from sparkrun.core.daemon_registry import DaemonOp
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(supervisor, "launch", fail)
+    runtime = runtime_identity(SparkrunConfig(binding.config_path))
+    store = JobStore(binding.directory)
+    job = store.submit(DaemonOp("test.launch", lambda: None), {}, "test", "test", runtime)
+    supervisor.Coordinator(binding, store).tick(runtime)
+    assert store.get(job)["state"] == "lost"
+    assert reason in caplog.text and job in caplog.text
+    assert "private-key" not in caplog.text

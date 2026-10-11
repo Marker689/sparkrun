@@ -203,7 +203,7 @@ class RelayProvider:
                     raise OperationError("pinned cache checks exceeded operation deadline")
                 if present and all(present.values()):
                     status(logger, 'source', 'OCI Relay: pinned image already verified on all %d receiver(s); no transfer', len(present))
-                    return ImageCopyResult(dict.fromkeys(request.targets, "already_present"), runtime_images=present)
+                    return ImageCopyResult(dict.fromkeys(request.targets, "already_present"), runtime_images={host: image for host, image in present.items() if image is not None})
                 if not registry:
                     # Offline/local mode can reuse a verified pin on a receiver,
                     # including imports whose Docker store lacks the RepoDigest.
@@ -384,8 +384,9 @@ class RelayProvider:
                 supported = [host for host in request.targets if "receiver-unpigz-v1" in getattr(runner, "binary_capabilities", {}).get(host, [])]
                 decoders = {arch: acquire_decoder(arch, settings, releases[arch][0])
                             for arch in dict.fromkeys(architectures[host] for host in supported)}
-                helpers = parallel([host for host in supported if decoders[architectures[host]] is not None],
-                                   lambda host: runner.stage_decoder(host, *decoders[architectures[host]]))
+                host_decoders = {host: artifact for host in supported
+                                 if (artifact := decoders[architectures[host]]) is not None}
+                helpers = parallel(host_decoders, lambda host: runner.stage_decoder(host, *host_decoders[host]))
             mark("binaries")
             progress.phase("selecting source and network routes", stage="routes")
             source_host = request.source_host

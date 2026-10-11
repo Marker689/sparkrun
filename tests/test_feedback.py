@@ -154,3 +154,17 @@ def test_launch_progress_observer_failure_is_advisory():
 
     with operation_scope(state=OperationState(events=unavailable)):
         LaunchProgress().phase(1)
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_log_bridge_preserves_filter_replacement_and_rejection(allow):
+    from sparkrun.core.feedback_logging import _FeedbackHandler
+
+    handler = _FeedbackHandler()
+    record = logging.makeLogRecord({"name": "original", "msg": "private detail", "levelno": logging.WARNING})
+    replacement = logging.makeLogRecord({"name": "filtered", "msg": "safe detail", "levelno": logging.WARNING})
+    handler.addFilter(lambda _: replacement if allow else False)
+    seen = []
+    with operation_scope(state=OperationState(events=seen.append)):
+        assert handler.handle(record) is (replacement if allow else False)
+    assert [event["message"] for event in seen] == (["safe detail"] if allow else [])

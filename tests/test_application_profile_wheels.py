@@ -129,7 +129,7 @@ def test_wheel_launchers_help_version_completion_and_isolation(wheels, tmp_path)
         assert "Application: " + command + " " in result.stdout
         assert "Channel:     stable" in result.stdout
         assert f"Core:        sparkrun {CORE_VERSION}" in result.stdout
-        assert "Loaded plugins:" in result.stdout
+        assert "Plugins:" in result.stdout
         if command == "profile-test-app":
             assert "Profile:     profile-test-app" in result.stdout
             assert "profile-test-plugin: 0.1.0 (profile-test-plugin; installed; required)" in result.stdout
@@ -167,7 +167,7 @@ print(json.dumps({'config': str(c.config.config_path.parent), 'cache': str(c.con
     assert data["core"]["version"] == CORE_VERSION
     plugin = next(p for p in data["plugins"] if p["name"] == "profile-test-plugin")
     assert plugin["package"] == "profile-test-plugin" and plugin["version"] == "0.1.0"
-    assert plugin["module"] == "profile_test_plugin" and plugin["required"] and plugin["loaded"]
+    assert plugin["module"] == "profile_test_plugin" and plugin["required"] and not plugin["loaded"]
 
 
 def test_same_wheel_plugin_explicitly_selected_in_sparkrun(wheels, tmp_path):
@@ -177,7 +177,17 @@ def test_same_wheel_plugin_explicitly_selected_in_sparkrun(wheels, tmp_path):
     result = invoke(wheels, tmp_path, "sparkrun", "setup", "plugins", "list", "--json")
     assert result.returncode == 0, result.stderr
     plugin = next(p for p in json.loads(result.stdout) if p["name"] == "profile-test-plugin")
-    assert plugin["selected"] and plugin["loaded"] and plugin["failure"] is None
+    assert plugin["selected"] and not plugin["loaded"] and plugin["failure"] is None
+    # Metadata inspection must not substitute for proving real registration.
+    code = (
+        "from sparkrun.application import initialize; "
+        "from sparkrun.core.plugin_inventory import list_plugins; "
+        "c = initialize(); "
+        "p = next(p for p in list_plugins(c.config) if p.name == 'profile-test-plugin'); "
+        "assert p.loaded and p.failure is None"
+    )
+    result = invoke(wheels, tmp_path, "python", "-c", code)
+    assert result.returncode == 0, result.stderr
     config.write_text("integrations:\n  profile-test-plugin: false\n")
     code = "from sparkrun.application import initialize; import sys; initialize(); assert 'profile_test_plugin' not in sys.modules"
     result = invoke(wheels, tmp_path, "python", "-c", code)
@@ -215,7 +225,7 @@ def test_inventory_keeps_oci_relay_without_removed_plugins(wheels, tmp_path):
     rows = data if isinstance(data, list) else data["plugins"]
     assert {"sparkroute", "coldsnap"}.isdisjoint(item["name"] for item in rows)
     row = next(item for item in rows if item["name"] == "oci_relay")
-    assert row["loaded"] and row["enabled"] and row["failure"] is None
+    assert not row["loaded"] and row["enabled"] and row["failure"] is None
 
 
 def test_alternate_tune_default_can_be_overridden_without_affecting_sparkrun(wheels, tmp_path):
@@ -236,8 +246,8 @@ def test_arena_plugin_profile_defaults_and_override(wheels, tmp_path):
         assert "arena" not in plugins
         plugin = plugins["sparkarena"]
         assert plugin["module"] == "sparkrun.plugins.sparkarena"
-        assert plugin["loaded"] is enabled
-        assert plugin["version"] == (CORE_VERSION if enabled else None)
+        assert not plugin["loaded"] and plugin["enabled"] is enabled
+        assert plugin["version"] == CORE_VERSION
         result = invoke(wheels, tmp_path, command, "--help")
         assert result.returncode == 0, result.stderr
         assert ("  arena " in result.stdout) is enabled
@@ -303,8 +313,8 @@ def test_installed_k8s_plugin_defaults_and_explicit_opt_in(wheels, tmp_path, com
     result = invoke(wheels, tmp_path, command, "setup", "plugins", "list", "--json")
     assert result.returncode == 0, result.stderr
     row = next(row for row in json.loads(result.stdout) if row["name"] == "k8s")
-    assert row["loaded"] is enabled and row["enabled"] is enabled
-    assert row["version"] == (CORE_VERSION if enabled else None)
+    assert not row["loaded"] and row["enabled"] is enabled
+    assert row["version"] == CORE_VERSION
     result = invoke(wheels, tmp_path, command, "setup", "features", "list", "--json")
     assert result.returncode == 0, result.stderr
     flags = {row["name"] for row in json.loads(result.stdout)}

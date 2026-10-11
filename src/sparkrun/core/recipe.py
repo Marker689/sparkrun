@@ -31,6 +31,7 @@ from sparkrun.utils.text import (
 )
 
 if TYPE_CHECKING:
+    from sparkrun.core.recipe_overrides import OverrideResolution
     from sparkrun.core.registry import RegistryManager
     from sparkrun.models.vram import VRAMEstimate
 
@@ -1345,7 +1346,7 @@ class Recipe:
         from sparkrun.core.recipe_overrides import parse_overrides
 
         self.overrides = parse_overrides(data.get("overrides"))
-        self.override_resolution = None
+        self.override_resolution: OverrideResolution | None = None
         self._declared: dict[str, Any] | None = None
 
         # What the CLI set directly on this recipe object (-e / -o env.* /
