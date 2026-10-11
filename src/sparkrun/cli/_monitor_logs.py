@@ -1,0 +1,2071 @@
+"""Pure log-view models, scope helpers, and SelectionList for monitor TUI log streaming.
+
+Implements rule 0b selection list, LogBuffer with per-source paging offsets
+and eviction, ViewState stream state machine, and log dump/prefix formatting.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum, IntEnum
+import logging
+import os
+import re
+import threading
+from typing import Any, Iterator, Sequence
+import bisect
+
+from rich.segment import Segment
+from rich.text import Text
+from textual import events, work
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical
+from textual.geometry import Size
+from textual.screen import ModalScreen
+from textual.scroll_view import ScrollView
+from textual.strip import Strip
+from textual.widgets import Input, OptionList, Static
+from textual.widgets.option_list import Option
+
+from sparkrun.api._errors import SparkrunError
+from sparkrun.api._logs import SCOPE_ALL, LogTarget, open_log_target
+from sparkrun.core.monitoring import HostActivity, MonitorFrame
+from sparkrun.orchestration.job_metadata import load_job_metadata
+from sparkrun.orchestration.logs import LogLine, LogSource
+
+logger = logging.getLogger(__name__)
+
+
+class LogScope(IntEnum):
+    CONTAINER = 1
+    NODE = 2
+    CLUSTER = 3
+
+
+@dataclass(frozen=True)
+class ScopeSummary:
+    node_containers: int
+    cluster_containers: int
+    cluster_hosts: int
+
+
+def _hosts_match(h1: str, h2: str) -> bool:
+    if h1 == h2:
+        return True
+    return h1.split("@")[-1].lower() == h2.split("@")[-1].lower()
+
+
+def workload_scope_summary(frame: MonitorFrame, cluster_id: str, host: str) -> ScopeSummary:
+    node_containers = 0
+    cluster_containers = 0
+    cluster_hosts = 0
+
+    if frame and frame.hosts:
+        for act in frame.hosts:
+            host_count = 0
+            if act.workloads:
+                for w in act.workloads:
+                    if w.cluster_id == cluster_id:
+                        host_count += len(w.containers) if w.containers else 1
+            if host_count > 0:
+                cluster_hosts += 1
+                cluster_containers += host_count
+                if _hosts_match(act.host, host):
+                    node_containers += host_count
+
+    return ScopeSummary(
+        node_containers=node_containers,
+        cluster_containers=cluster_containers,
+        cluster_hosts=cluster_hosts,
+    )
+
+
+def distinct_scopes(summary: ScopeSummary) -> list[LogScope]:
+    scopes = [LogScope.CONTAINER]
+    if summary.node_containers > 1:
+        scopes.append(LogScope.NODE)
+    if summary.cluster_containers > summary.node_containers:
+        scopes.append(LogScope.CLUSTER)
+    return scopes
+
+
+def canonical_scope(scope: LogScope | int, summary: ScopeSummary) -> LogScope:
+    scope = LogScope(scope)
+    if scope == LogScope.CONTAINER:
+        return LogScope.CONTAINER
+    if scope == LogScope.NODE:
+        if summary.node_containers <= 1:
+            return LogScope.CONTAINER
+        return LogScope.NODE
+    if scope == LogScope.CLUSTER:
+        if summary.cluster_containers <= summary.node_containers:
+            return canonical_scope(LogScope.NODE, summary)
+        return LogScope.CLUSTER
+    return scope
+
+
+def target_args(scope: LogScope | int, host: str, container: str) -> dict[str, Any]:
+    scope = LogScope(scope)
+    if scope == LogScope.CONTAINER:
+        return {"host": host, "container": container, "scope": SCOPE_ALL}
+    if scope == LogScope.NODE:
+        return {"host": host, "scope": SCOPE_ALL}
+    if scope == LogScope.CLUSTER:
+        return {"host": None, "scope": SCOPE_ALL}
+    raise ValueError(f"Unknown scope: {scope!r}")
+
+
+def _sanitize_slug(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(text))
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-._")
+    return cleaned or "log"
+
+
+def default_dump_path(
+    label: str,
+    scope: LogScope | int,
+    host: str,
+    container: str,
+    now: datetime | None = None,
+) -> str:
+    scope = LogScope(scope)
+    if now is None:
+        now = datetime.now()
+    elif isinstance(now, (int, float)):
+        now = datetime.fromtimestamp(now)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+
+    safe_label = _sanitize_slug(label)
+    safe_host = _sanitize_slug(host)
+    safe_container = _sanitize_slug(container)
+
+    if scope == LogScope.CONTAINER:
+        return f"./{safe_label}-{safe_host}-{safe_container}-{ts}.log"
+    elif scope == LogScope.NODE:
+        return f"./{safe_label}-{safe_host}-{ts}.log"
+    elif scope == LogScope.CLUSTER:
+        return f"./{safe_label}-all-{ts}.log"
+    raise ValueError(f"Unknown scope: {scope!r}")
+
+
+def format_prefix(line: LogLine, multi_host: bool = False, multi_source: bool = False) -> str:
+    if not multi_source and not multi_host:
+        return ""
+    parts = []
+    if multi_host:
+        parts.append(line.host)
+    parts.append(line.role)
+    if line.rank is not None:
+        parts.append(str(line.rank))
+    return f"[{'/'.join(parts)}]"
+
+
+def entry_plain_text(entry: LogLine | Marker | str) -> str:
+    """Return the plain text of *entry* with ANSI escape sequences stripped, cached per entry."""
+    if isinstance(entry, LogLine):
+        plain = getattr(entry, "_plain_text", None)
+        if plain is None:
+            plain = Text.from_ansi(entry.text).plain
+            try:
+                object.__setattr__(entry, "_plain_text", plain)
+            except Exception:
+                pass
+        return plain
+    elif isinstance(entry, Marker):
+        return entry.text
+    return str(entry)
+
+
+def render_text(
+    line: LogLine | str,
+    *,
+    color: bool = True,
+    pattern: str | re.Pattern | None = None,
+    multi_host: bool = False,
+    multi_source: bool = False,
+    prefix: str | None = None,
+    is_current_match: bool = False,
+) -> Text:
+    if isinstance(line, LogLine):
+        raw_text = line.text
+        if prefix is None:
+            prefix = format_prefix(line, multi_host=multi_host, multi_source=multi_source)
+    else:
+        raw_text = str(line)
+        if prefix is None and (multi_host or multi_source):
+            prefix = ""
+
+    if color:
+        body = Text.from_ansi(raw_text)
+    else:
+        body = Text(entry_plain_text(line) if isinstance(line, LogLine) else Text.from_ansi(raw_text).plain)
+
+    if pattern:
+        try:
+            regex = re.compile(pattern) if isinstance(pattern, str) else pattern
+            hl_style = "bold reverse underline" if is_current_match else "reverse"
+            body.highlight_regex(regex, style=hl_style)
+        except re.error:
+            pass
+
+    if prefix:
+        p_str = prefix.strip()
+        prefix_text = Text(f"{p_str} ")
+        full_text = prefix_text + body
+    else:
+        full_text = body
+
+    return full_text
+
+
+@dataclass(frozen=True)
+class Marker:
+    text: str
+
+
+LOADING_MARKER = Marker("— loading older lines —")
+START_OF_LOG_MARKER = Marker("— start of log —")
+STREAM_ENDED_MARKER = Marker("— log stream ended —")
+OLDER_UNAVAILABLE_MARKER = Marker("— older lines unavailable for this executor —")
+LOG_RESTARTED_MARKER = Marker("— log restarted —")
+TERMINAL_MARKERS = (STREAM_ENDED_MARKER, LOG_RESTARTED_MARKER)
+
+
+@dataclass(frozen=True)
+class WorkloadRow:
+    key: str
+    text: str
+    is_header: bool = False
+    cluster_id: str = ""
+    container: str = ""
+    role: str = ""
+    status: str = ""
+    ranks: int = 1
+
+    @property
+    def container_name(self) -> str:
+        return self.container
+
+    @property
+    def ranks_on_host(self) -> int:
+        return self.ranks
+
+
+def workload_rows(activity: HostActivity | None, cache_dir: str | None = None) -> list[WorkloadRow]:
+    from sparkrun.core.application_profile import get_application_profile
+
+    if activity is None or not activity.workloads:
+        return [WorkloadRow(key="empty", text="[dim]No %s workloads running[/dim]" % get_application_profile().command, is_header=True)]
+
+    rows: list[WorkloadRow] = []
+    for w in activity.workloads:
+        meta = load_job_metadata(w.cluster_id, cache_dir=cache_dir) or {}
+        recipe = w.recipe_name or meta.get("recipe", "")
+        model = meta.get("model", "")
+        runtime = w.runtime_name or meta.get("runtime", "")
+        tp = meta.get("tensor_parallel", "")
+
+        rank_tag = f" [dim]×{w.ranks_on_host}[/dim]" if w.ranks_on_host > 1 else ""
+        meta_parts: list[str] = []
+        if recipe:
+            meta_parts.append(f"recipe=[bold]{recipe}[/bold]")
+        if model:
+            meta_parts.append(f"model={model}")
+        if runtime:
+            meta_parts.append(f"runtime={runtime}")
+        if tp:
+            meta_parts.append(f"tp={tp}")
+
+        header_lines = [f"[bold]{w.cluster_id}[/bold]{rank_tag}"]
+        if meta_parts:
+            header_lines.append(f"  [dim]{', '.join(meta_parts)}[/dim]")
+        header_text = "\n".join(header_lines)
+
+        rows.append(
+            WorkloadRow(
+                key=f"header:{w.cluster_id}",
+                text=header_text,
+                is_header=True,
+                cluster_id=w.cluster_id,
+                ranks=w.ranks_on_host,
+            )
+        )
+
+        if w.containers:
+            for c in w.containers:
+                role_tag = f" [dim]({c.role})[/dim]" if c.role and c.role != "?" else ""
+                status_tag = f" [dim]— {c.status}[/dim]" if c.status else ""
+                c_text = f"  {c.name}{role_tag}{status_tag}"
+                rows.append(
+                    WorkloadRow(
+                        key=f"{w.cluster_id}:{c.name}",
+                        text=c_text,
+                        is_header=False,
+                        cluster_id=w.cluster_id,
+                        container=c.name,
+                        role=c.role,
+                        status=c.status,
+                        ranks=w.ranks_on_host,
+                    )
+                )
+
+    return rows
+
+
+class LogBuffer:
+    """Bounded buffer of LogLine and Marker items with per-source paging offsets."""
+
+    def __init__(self, entries: Sequence[LogLine | Marker] | None = None) -> None:
+        self._entries: deque[LogLine | Marker] = deque(entries or [])
+        self._base_offset: int = 0
+        self._skips: dict[tuple[str, str], int] = {}
+        self._exhausted: dict[tuple[str, str], bool] = {}
+        self._search_pattern: re.Pattern | None = None
+        self._search_matches: deque[int] = deque()
+        self.evicted_live: int = 0
+        self.evicted_history: int = 0
+        self.pending_markers: list[Marker] = []
+
+        for entry in self._entries:
+            if isinstance(entry, LogLine):
+                key = (entry.host, entry.container)
+                self._skips[key] = self._skips.get(key, 0) + 1
+
+    @property
+    def entries(self) -> list[LogLine | Marker]:
+        return list(self._entries)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, index: int) -> LogLine | Marker:
+        return self._entries[index]
+
+    def __iter__(self) -> Iterator[LogLine | Marker]:
+        return iter(self._entries)
+
+    def get_skip(self, source: LogSource | LogLine | tuple[str, str]) -> int:
+        key = self._source_key(source)
+        return self._skips.get(key, 0)
+
+    def is_exhausted(self, source: LogSource | LogLine | tuple[str, str]) -> bool:
+        key = self._source_key(source)
+        return self._exhausted.get(key, False)
+
+    def mark_exhausted(self, source: LogSource | LogLine | tuple[str, str]) -> None:
+        key = self._source_key(source)
+        self._exhausted[key] = True
+
+    def reload_tail(self, lines: Sequence[LogLine]) -> list[Marker]:
+        """Replace the whole buffer with a freshly read tail.
+
+        Resets offsets, exhaustion, eviction counters and the search index
+        (re-running the active search), then re-appends the pending terminal
+        markers in chronological order after the fresh lines. Returns them.
+        """
+        carried = list(self.pending_markers)
+        self._entries.clear()
+        self._base_offset = 0
+        self._skips.clear()
+        self._exhausted.clear()
+        self._search_matches.clear()
+        self.evicted_live = 0
+        self.evicted_history = 0
+        self.pending_markers = []
+        for entry in lines:
+            self.append(entry)
+        for marker in carried:
+            self.append(marker)
+        if self._search_pattern is not None:
+            self.search(self._search_pattern)
+        return carried
+
+    @property
+    def stream_ended(self) -> bool:
+        return STREAM_ENDED_MARKER in self.pending_markers or any(e == STREAM_ENDED_MARKER for e in self._entries)
+
+    def append(self, entry: LogLine | Marker) -> bool:
+        if self.evicted_live > 0:
+            if isinstance(entry, LogLine):
+                self.evicted_live += 1
+                key = self._source_key(entry)
+                self._skips[key] = self._skips.get(key, 0) + 1
+            elif entry in TERMINAL_MARKERS:
+                self.pending_markers.append(entry)
+            return False
+
+        if isinstance(entry, LogLine):
+            key = self._source_key(entry)
+            self._skips[key] = self._skips.get(key, 0) + 1
+        abs_idx = self._base_offset + len(self._entries)
+        self._entries.append(entry)
+        if self._search_pattern is not None:
+            if self._matches_pattern(entry, self._search_pattern):
+                self._search_matches.append(abs_idx)
+        return True
+
+    def prepend_page(
+        self,
+        source_or_lines: Any,
+        lines: list[LogLine | Marker] | None = None,
+        *,
+        exhausted: bool = False,
+        separator: str | Marker | None = None,
+    ) -> None:
+        if lines is None:
+            page_lines = list(source_or_lines)
+            source = None
+        else:
+            page_lines = list(lines)
+            source = source_or_lines
+
+        if source is not None:
+            key = self._source_key(source)
+            line_count = sum(1 for item in page_lines if isinstance(item, LogLine))
+            self._skips[key] = self._skips.get(key, 0) + line_count
+            if exhausted:
+                self._exhausted[key] = True
+        else:
+            for item in page_lines:
+                if isinstance(item, LogLine):
+                    key = (item.host, item.container)
+                    self._skips[key] = self._skips.get(key, 0) + 1
+
+        to_prepend: list[LogLine | Marker] = []
+        if separator is not None:
+            sep_marker = Marker(separator) if isinstance(separator, str) else separator
+            to_prepend.append(sep_marker)
+        to_prepend.extend(page_lines)
+
+        self._base_offset -= len(to_prepend)
+        self._entries.extendleft(reversed(to_prepend))
+
+        if self._search_pattern is not None:
+            new_matches = []
+            for idx, entry in enumerate(to_prepend):
+                if self._matches_pattern(entry, self._search_pattern):
+                    new_matches.append(self._base_offset + idx)
+            self._search_matches.extendleft(reversed(new_matches))
+
+    def evict(
+        self,
+        cap: int,
+        viewport: int | tuple[int, int] = 0,
+        drop_from: str | None = None,
+    ) -> int:
+        excess = len(self._entries) - cap
+        if excess <= 0:
+            return 0
+
+        if drop_from == "top":
+            from_top = True
+        elif drop_from == "bottom":
+            from_top = False
+        else:
+            if isinstance(viewport, (tuple, list)):
+                v_top, v_bottom = viewport[0], viewport[1]
+            else:
+                v_top = v_bottom = viewport
+
+            dist_to_top = v_top
+            dist_to_bottom = (len(self._entries) - 1) - v_bottom
+            from_top = dist_to_top >= dist_to_bottom
+
+        if from_top:
+            # Drop from top (oldest history)
+            for _ in range(excess):
+                item = self._entries.popleft()
+                if isinstance(item, LogLine):
+                    key = (item.host, item.container)
+                    if key in self._skips:
+                        self._skips[key] = max(0, self._skips[key] - 1)
+                    self._exhausted[key] = False
+
+            self._base_offset += excess
+            self.evicted_history += excess
+
+            while self._search_matches and self._search_matches[0] < self._base_offset:
+                self._search_matches.popleft()
+        else:
+            # Drop from bottom (newest live lines)
+            dropped = []
+            for _ in range(excess):
+                dropped.append(self._entries.pop())
+            live_dropped = 0
+            dropped_terminal: list[Marker] = []
+            for item in reversed(dropped):
+                if isinstance(item, LogLine):
+                    live_dropped += 1
+                elif item in TERMINAL_MARKERS:
+                    dropped_terminal.append(item)
+            # Dropped entries precede everything already pending.
+            self.pending_markers[:0] = dropped_terminal
+            self.evicted_live += live_dropped
+
+            max_abs_idx = self._base_offset + len(self._entries) - 1
+            while self._search_matches and self._search_matches[-1] > max_abs_idx:
+                self._search_matches.pop()
+
+        return excess
+
+    def search(self, pattern: str | re.Pattern | None) -> list[int]:
+        if not pattern:
+            self._search_pattern = None
+            self._search_matches.clear()
+            return []
+
+        # Validate / compile regex first. An invalid regex must NOT wipe the previous search.
+        regex = re.compile(pattern) if isinstance(pattern, str) else pattern
+
+        self._search_pattern = regex
+        self._search_matches.clear()
+        for idx, entry in enumerate(self._entries):
+            if self._matches_pattern(entry, regex):
+                self._search_matches.append(self._base_offset + idx)
+        return [abs_idx - self._base_offset for abs_idx in self._search_matches]
+
+    @property
+    def search_matches(self) -> list[int]:
+        return [abs_idx - self._base_offset for abs_idx in self._search_matches]
+
+    @property
+    def search_pattern(self) -> re.Pattern | None:
+        return self._search_pattern
+
+    @staticmethod
+    def _source_key(source: Any) -> tuple[str, str]:
+        if isinstance(source, tuple) and len(source) == 2:
+            return (str(source[0]), str(source[1]))
+        if hasattr(source, "host") and hasattr(source, "container"):
+            return (source.host, source.container)
+        return (str(source), "")
+
+    @staticmethod
+    def _matches_pattern(entry: LogLine | Marker, regex: re.Pattern | str) -> bool:
+        if not isinstance(entry, LogLine):
+            return False
+        if isinstance(regex, str):
+            try:
+                regex = re.compile(regex)
+            except re.error:
+                return False
+        return bool(regex.search(entry_plain_text(entry)))
+
+
+class FollowState(str, Enum):
+    FOLLOWING = "following"
+    PAUSED = "paused"
+    SCROLLED = "scrolled"
+
+
+class ViewState:
+    """Scroll and follow state machine."""
+
+    def __init__(self, state: FollowState = FollowState.FOLLOWING, pending_lines: int = 0) -> None:
+        self.state: FollowState = state
+        self.pending_lines: int = pending_lines
+
+    @property
+    def is_following(self) -> bool:
+        return self.state == FollowState.FOLLOWING
+
+    @property
+    def is_paused(self) -> bool:
+        return self.state == FollowState.PAUSED
+
+    @property
+    def is_scrolled(self) -> bool:
+        return self.state == FollowState.SCROLLED
+
+    @property
+    def status_label(self) -> str:
+        if self.pending_lines > 0:
+            return f"{self.state.value} (+{self.pending_lines})"
+        return self.state.value
+
+    def on_new_line(self, count: int = 1) -> None:
+        if self.state in (FollowState.PAUSED, FollowState.SCROLLED):
+            self.pending_lines += count
+
+    def on_scroll(self, at_bottom: bool) -> None:
+        if at_bottom:
+            if self.state == FollowState.SCROLLED:
+                self.state = FollowState.FOLLOWING
+                self.pending_lines = 0
+        else:
+            if self.state == FollowState.FOLLOWING:
+                self.state = FollowState.SCROLLED
+
+    def on_space(self, at_bottom: bool = True) -> bool:
+        """Process space bar press.
+
+        Returns True if action jumps to end, False otherwise.
+        """
+        if self.state == FollowState.SCROLLED or not at_bottom:
+            self.state = FollowState.FOLLOWING
+            self.pending_lines = 0
+            return True
+        elif self.state == FollowState.FOLLOWING:
+            self.state = FollowState.PAUSED
+            return False
+        elif self.state == FollowState.PAUSED:
+            self.state = FollowState.FOLLOWING
+            self.pending_lines = 0
+            return False
+        return False
+
+
+class SelectionList(OptionList):
+    """OptionList adhering to rule 0b:
+
+    - Hidden highlight initially via `-concealed` CSS class.
+    - First arrow (`up`/`down` etc.) or `enter` sets `revealed` and lets the key through.
+    - `reveal()` and `conceal()` programmatic toggles.
+    - Highlighted index is preserved while concealed.
+    """
+
+    DEFAULT_CSS = """
+    SelectionList.-concealed > .option-list--option-highlighted,
+    SelectionList.-concealed:focus > .option-list--option-highlighted {
+        color: $foreground;
+        background: transparent;
+        text-style: none;
+    }
+    """
+
+    def __init__(self, *options: Any, revealed: bool = False, **kwargs: Any) -> None:
+        super().__init__(*options, **kwargs)
+        self.revealed: bool = revealed
+        if not self.revealed:
+            self.add_class("-concealed")
+
+    def reveal(self) -> None:
+        self.revealed = True
+        self.remove_class("-concealed")
+
+    def conceal(self) -> None:
+        self.revealed = False
+        self.add_class("-concealed")
+
+    async def _on_key(self, event: events.Key) -> None:
+        if not self.revealed and event.key in ("up", "down", "enter", "home", "end", "pageup", "pagedown"):
+            self.reveal()
+        await super()._on_key(event)
+
+
+class WorkloadList(SelectionList):
+    """Workload container selection list adhering to rule 0b."""
+
+    class OpenLog(events.Message):
+        """Posted when a container is chosen to open logs."""
+
+        def __init__(self, host: str, cluster_id: str, container: str) -> None:
+            super().__init__()
+            self.host = host
+            self.cluster_id = cluster_id
+            self.container = container
+
+    class RequestDump(events.Message):
+        """Posted when dump modal is requested."""
+
+        def __init__(self, host: str, cluster_id: str, container: str, scope: LogScope = LogScope.CONTAINER) -> None:
+            super().__init__()
+            self.host = host
+            self.cluster_id = cluster_id
+            self.container = container
+            self.scope = scope
+
+    class BackToHosts(events.Message):
+        """Posted when user requests back navigation."""
+
+    BINDINGS = [
+        Binding("enter", "select_container", "Logs", priority=True),
+        Binding("d", "dump_container", "Dump", priority=True),
+        Binding("escape", "back_to_hosts", "Back", priority=True),
+        Binding("q", "back_to_hosts", "Back", show=False, priority=True),
+    ]
+
+    def __init__(self, host: str = "", rows: Sequence[WorkloadRow] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.host: str = host
+        self._rows: list[WorkloadRow] = []
+        if rows:
+            self.set_rows(rows, host=host)
+
+    def set_rows(self, rows: Sequence[WorkloadRow], host: str = "") -> None:
+        new_rows = list(rows)
+        if host:
+            self.host = host
+        if [r.key for r in self._rows] == [r.key for r in new_rows] and [r.text for r in self._rows] == [r.text for r in new_rows]:
+            return
+
+        old_key = None
+        old_idx = self.highlighted
+        if self._rows and self.highlighted is not None and 0 <= self.highlighted < len(self._rows):
+            old_key = self._rows[self.highlighted].key
+
+        self._rows = new_rows
+        self.clear_options()
+
+        first_selectable = None
+        target_idx = None
+        selectable_indices: list[int] = []
+
+        for idx, r in enumerate(self._rows):
+            is_disabled = r.is_header or not r.container
+            opt = Option(prompt=r.text, id=r.key, disabled=is_disabled)
+            self.add_option(opt)
+            if not is_disabled:
+                selectable_indices.append(idx)
+                if first_selectable is None:
+                    first_selectable = idx
+                if old_key is not None and r.key == old_key:
+                    target_idx = idx
+
+        if target_idx is not None:
+            self.highlighted = target_idx
+        elif selectable_indices:
+            ref = old_idx if old_idx is not None else 0
+            self.highlighted = min(selectable_indices, key=lambda i: abs(i - ref))
+        else:
+            self.highlighted = None
+
+    def action_select_container(self) -> None:
+        if self.highlighted is None or not (0 <= self.highlighted < len(self._rows)):
+            return
+        row = self._rows[self.highlighted]
+        if row.is_header or not row.container:
+            return
+        self.post_message(self.OpenLog(self.host, row.cluster_id, row.container))
+
+    def action_dump_container(self) -> None:
+        if self.highlighted is None or not (0 <= self.highlighted < len(self._rows)):
+            return
+        row = self._rows[self.highlighted]
+        if row.is_header or not row.container:
+            return
+        self.post_message(self.RequestDump(self.host, row.cluster_id, row.container, LogScope.CONTAINER))
+
+    def action_back_to_hosts(self) -> None:
+        self.post_message(self.BackToHosts())
+
+
+class LogView(ScrollView):
+    """Line API virtual log widget rendering lines from LogBuffer."""
+
+    DEFAULT_CSS = """
+    LogView {
+        width: 1fr;
+        height: 1fr;
+        background: $background;
+        color: $foreground;
+        overflow-y: scroll;
+        overflow-x: auto;
+    }
+    """
+
+    class NearTop(events.Message):
+        """Posted when scroll position comes within one page of top of loaded buffer."""
+
+    class ScrollPositionChanged(events.Message):
+        """Posted when vertical scroll changes."""
+
+        def __init__(self, at_bottom: bool) -> None:
+            super().__init__()
+            self.at_bottom = at_bottom
+
+    def __init__(
+        self,
+        buffer: LogBuffer,
+        *,
+        color: bool = True,
+        highlight: bool = True,
+        wrap: bool = False,
+        search_pattern: re.Pattern | str | None = None,
+        multi_host: bool = False,
+        multi_source: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.can_focus = True
+        self.buffer = buffer
+        self.color: bool = color
+        self.highlight: bool = highlight
+        self.wrap: bool = wrap
+        self.search_pattern: re.Pattern | str | None = search_pattern
+        self.multi_host: bool = multi_host
+        self.multi_source: bool = multi_source
+        self.current_match_entry: int | None = None
+
+        self._wrap_map: list[tuple[int, int]] = []
+        self._wrap_base: int = 0
+        self._wrap_origin: int = 0
+        self._max_width: int = 80
+
+    @property
+    def is_at_bottom(self) -> bool:
+        if self.virtual_size.height <= self.scrollable_content_region.height:
+            return True
+        return self.scroll_y >= self.max_scroll_y - 0.5
+
+    def _rendered_plain_line(self, entry: LogLine | Marker) -> str:
+        plain = entry_plain_text(entry) if isinstance(entry, LogLine) else entry.text
+        if isinstance(entry, LogLine):
+            prefix = format_prefix(entry, multi_host=self.multi_host, multi_source=self.multi_source)
+            if prefix:
+                return f"{prefix} {plain}"
+        return plain
+
+    def _wrap_row_count(self) -> int:
+        return len(self._wrap_map) - self._wrap_origin
+
+    def _wrap_row(self, virtual_y: int) -> tuple[int, int]:
+        stored, sub = self._wrap_map[self._wrap_origin + virtual_y]
+        return stored - self._wrap_base, sub
+
+    def _compact_wrap_map(self) -> None:
+        if self._wrap_origin <= 0:
+            return
+        if self._wrap_origin >= len(self._wrap_map):
+            self._wrap_map.clear()
+            self._wrap_origin = 0
+            return
+        if self._wrap_origin >= 1024:
+            del self._wrap_map[: self._wrap_origin]
+            self._wrap_origin = 0
+
+    def entry_to_virtual_row(self, entry_idx: int) -> int:
+        if not self.wrap:
+            return max(0, min(entry_idx, len(self.buffer)))
+        n = self._wrap_row_count()
+        if entry_idx <= 0 or n <= 0:
+            return 0
+        threshold = entry_idx + self._wrap_base
+        vy = bisect.bisect_left(self._wrap_map, threshold, lo=self._wrap_origin, key=lambda x: x[0])
+        return min(vy - self._wrap_origin, n)
+
+    def virtual_row_to_entry(self, virtual_row: int) -> int:
+        if not self.wrap:
+            return max(0, min(virtual_row, len(self.buffer)))
+        n = self._wrap_row_count()
+        if n <= 0:
+            return 0
+        if virtual_row <= 0:
+            return self._wrap_map[self._wrap_origin][0] - self._wrap_base
+        if virtual_row >= n:
+            return self._wrap_map[-1][0] - self._wrap_base
+        return self._wrap_map[self._wrap_origin + virtual_row][0] - self._wrap_base
+
+    def scroll_to_end(self, animate: bool = False) -> None:
+        self.scroll_end(animate=animate, x_axis=False)
+
+    def scroll_to_line(self, line_idx: int, animate: bool = False) -> None:
+        vy = self.entry_to_virtual_row(line_idx)
+        self.scroll_to(y=vy, animate=animate)
+
+    def on_entries_evicted(self, top_evicted: int = 0, bot_evicted: int = 0) -> None:
+        content_width = self.scrollable_content_region.width or 80
+        if self.wrap:
+            if top_evicted > 0:
+                threshold = self._wrap_base + top_evicted
+                idx = bisect.bisect_left(self._wrap_map, threshold, lo=self._wrap_origin, key=lambda x: x[0])
+                evicted_vrows = idx - self._wrap_origin
+                self._wrap_origin = idx
+                self._wrap_base += top_evicted
+                self._compact_wrap_map()
+                self.scroll_to(y=max(0.0, self.scroll_y - evicted_vrows), animate=False)
+            if bot_evicted > 0:
+                limit = len(self.buffer) + self._wrap_base
+                while self._wrap_map and self._wrap_map[-1][0] >= limit:
+                    self._wrap_map.pop()
+            self.virtual_size = Size(content_width, self._wrap_row_count())
+        else:
+            if top_evicted > 0:
+                self.scroll_to(y=max(0.0, self.scroll_y - top_evicted), animate=False)
+            self.virtual_size = Size(max(content_width, self._max_width), len(self.buffer))
+        self.refresh()
+
+    def on_entry_appended(self, entry: LogLine | Marker) -> None:
+        idx = len(self.buffer) - 1
+        content_width = self.scrollable_content_region.width or 80
+        full_plain = self._rendered_plain_line(entry)
+        if self.wrap:
+            stored = idx + self._wrap_base
+            if len(full_plain) <= content_width or not self.is_mounted:
+                self._wrap_map.append((stored, 0))
+            else:
+                console = self.app.console
+                opts = console.options.update_width(content_width)
+                text = render_text(
+                    entry,
+                    color=self.color,
+                    pattern=(self.search_pattern if self.highlight else None),
+                    multi_host=self.multi_host,
+                    multi_source=self.multi_source,
+                )
+                segs = list(console.render(text, opts))
+                split = list(Segment.split_lines(segs))
+                count = max(1, len(split))
+                for sub in range(count):
+                    self._wrap_map.append((stored, sub))
+            self.virtual_size = Size(content_width, self._wrap_row_count())
+        else:
+            plain_len = len(full_plain)
+            if plain_len > self._max_width:
+                self._max_width = plain_len
+            w = max(content_width, self._max_width)
+            self.virtual_size = Size(w, len(self.buffer))
+        self.refresh()
+
+    def refresh_buffer(self) -> None:
+        content_width = self.scrollable_content_region.width or 80
+        if self.wrap:
+            wrap_map: list[tuple[int, int]] = []
+            console = self.app.console if self.is_mounted else None
+            opts = console.options.update_width(content_width) if console else None
+
+            for idx, entry in enumerate(self.buffer._entries):
+                full_plain = self._rendered_plain_line(entry)
+                if len(full_plain) <= content_width or not console:
+                    wrap_map.append((idx, 0))
+                else:
+                    text = render_text(
+                        entry,
+                        color=self.color,
+                        pattern=(self.search_pattern if self.highlight else None),
+                        multi_host=self.multi_host,
+                        multi_source=self.multi_source,
+                    )
+                    segs = list(console.render(text, opts))
+                    split = list(Segment.split_lines(segs))
+                    count = max(1, len(split))
+                    for sub in range(count):
+                        wrap_map.append((idx, sub))
+            self._wrap_map = wrap_map
+            self._wrap_base = 0
+            self._wrap_origin = 0
+            self.virtual_size = Size(content_width, len(wrap_map))
+        else:
+            max_w = content_width
+            for entry in self.buffer._entries:
+                plain_len = len(self._rendered_plain_line(entry))
+                if plain_len > max_w:
+                    max_w = plain_len
+            self._max_width = max_w
+            self.virtual_size = Size(max_w, len(self.buffer))
+        self.refresh()
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self.wrap:
+            self.refresh_buffer()
+
+    def on_mount(self) -> None:
+        self.refresh_buffer()
+
+    def watch_scroll_y(self, old_val: float, new_val: float) -> None:
+        super().watch_scroll_y(old_val, new_val)
+        page_threshold = max(1, self.scrollable_content_region.height)
+        if new_val < old_val and new_val <= page_threshold:
+            self.post_message(self.NearTop())
+        self.post_message(self.ScrollPositionChanged(self.is_at_bottom))
+
+    def action_scroll_up(self) -> None:
+        page_threshold = max(1, self.scrollable_content_region.height)
+        if self.scroll_y <= page_threshold:
+            self.post_message(self.NearTop())
+        super().action_scroll_up()
+
+    def action_page_up(self) -> None:
+        page_threshold = max(1, self.scrollable_content_region.height)
+        if self.scroll_y <= page_threshold:
+            self.post_message(self.NearTop())
+        super().action_page_up()
+
+    def action_scroll_home(self) -> None:
+        self.post_message(self.NearTop())
+        super().action_scroll_home()
+
+    def render_line(self, y: int) -> Strip:
+        scroll_x, scroll_y = self.scroll_offset
+        virtual_y = int(scroll_y + y)
+        width = self.scrollable_content_region.width or 80
+
+        if not self.wrap:
+            if virtual_y < 0 or virtual_y >= len(self.buffer):
+                return Strip.blank(width, self.rich_style)
+            entry = self.buffer._entries[virtual_y]
+            is_curr = self.current_match_entry is not None and self.current_match_entry == virtual_y
+            text = render_text(
+                entry,
+                color=self.color,
+                pattern=(self.search_pattern if self.highlight else None),
+                multi_host=self.multi_host,
+                multi_source=self.multi_source,
+                is_current_match=is_curr,
+            )
+            console = self.app.console
+            opts = console.options.update(overflow="ignore", no_wrap=True).update_width(max(width, self._max_width))
+            segs = list(console.render(text, opts))
+            split = list(Segment.split_lines(segs))
+            strip = Strip.from_lines(split)[0] if split else Strip.blank(width, self.rich_style)
+            return strip.crop_extend(scroll_x, scroll_x + width, self.rich_style).apply_style(self.rich_style)
+        else:
+            if virtual_y < 0 or virtual_y >= self._wrap_row_count():
+                return Strip.blank(width, self.rich_style)
+            entry_idx, sub_idx = self._wrap_row(virtual_y)
+            if entry_idx < 0 or entry_idx >= len(self.buffer):
+                return Strip.blank(width, self.rich_style)
+            entry = self.buffer._entries[entry_idx]
+            is_curr = self.current_match_entry is not None and self.current_match_entry == entry_idx
+            text = render_text(
+                entry,
+                color=self.color,
+                pattern=(self.search_pattern if self.highlight else None),
+                multi_host=self.multi_host,
+                multi_source=self.multi_source,
+                is_current_match=is_curr,
+            )
+            console = self.app.console
+            opts = console.options.update_width(width)
+            segs = list(console.render(text, opts))
+            split = list(Segment.split_lines(segs))
+            if sub_idx < len(split):
+                strip = Strip.from_lines([split[sub_idx]])[0]
+            else:
+                strip = Strip.blank(width, self.rich_style)
+            return strip.crop_extend(0, width, self.rich_style).apply_style(self.rich_style)
+
+
+def _trim_page_drift(
+    lines: list[LogLine],
+    *,
+    count_before_read: int | None = None,
+    snap_count: int | None = None,
+    loaded_skip: int | None = None,
+    snap_skip: int | None = None,
+) -> list[LogLine]:
+    """Drop page-tail lines accounted for by live growth up to remote read time.
+
+    Overlap is proven only by delivered counts captured at or before remote read
+    time compared to snapshot counts. Line text is never inspected: coincidental
+    repeats at the seam are real history. If nothing arrived before the read,
+    the page is kept intact — duplicates beat dropped lines.
+    """
+    if count_before_read is not None and snap_count is not None:
+        growth = max(0, int(count_before_read) - int(snap_count))
+    elif loaded_skip is not None and snap_skip is not None:
+        growth = max(0, int(loaded_skip) - int(snap_skip))
+    else:
+        growth = 0
+    if not growth or not lines:
+        return lines
+    return lines[: -min(growth, len(lines))]
+
+
+class LogPane(Vertical):
+    """Log viewer pane filling the node body below node stats."""
+
+    CAP: int = 50_000
+
+    DEFAULT_CSS = """
+    LogPane {
+        width: 1fr;
+        height: 1fr;
+        layout: vertical;
+        background: $background;
+    }
+    LogPane > #log-title {
+        height: 1;
+        width: 1fr;
+        background: $surface;
+        color: $text;
+        text-style: bold;
+        padding: 0 1;
+    }
+    LogPane > LogView {
+        height: 1fr;
+        width: 1fr;
+    }
+    LogPane > #log-search {
+        height: 1;
+        width: 1fr;
+        display: none;
+        border: none;
+        padding: 0 1;
+        background: $surface;
+    }
+    LogPane > #log-status {
+        height: 1;
+        width: 1fr;
+        background: $surface;
+        color: $text-muted;
+        padding: 0 1;
+    }
+    """
+
+    class Closed(events.Message):
+        """Posted when the log pane is closed."""
+
+    class RequestDump(events.Message):
+        """Posted when dump modal is requested."""
+
+        def __init__(self, host: str, cluster_id: str, container: str, scope: LogScope) -> None:
+            super().__init__()
+            self.host = host
+            self.cluster_id = cluster_id
+            self.container = container
+            self.scope = scope
+
+    BINDINGS = [
+        Binding("space", "toggle_pause_or_end", "Pause/Follow", priority=True),
+        Binding("1", "scope_container", "Container", priority=True),
+        Binding("2", "scope_node", "Node", priority=True),
+        Binding("3", "scope_cluster", "Cluster", priority=True),
+        Binding("c", "toggle_color", "Color", priority=True),
+        Binding("h", "toggle_highlight", "Highlight", priority=True),
+        Binding("l", "toggle_wrap", "Wrap", priority=True),
+        Binding("slash", "open_search", "Search", key_display="/", priority=True),
+        Binding("n", "search_next", "Next match", priority=True),
+        Binding("b", "search_prev", "Prev match", priority=True),
+        Binding("d", "dump_logs", "Dump", priority=True),
+        Binding("escape", "close_pane", "Back", priority=True),
+        Binding("q", "close_pane", "Back", show=False, priority=True),
+    ]
+
+    def __init__(
+        self,
+        host: str,
+        cluster_id: str,
+        container: str,
+        scope: LogScope | int = LogScope.CONTAINER,
+        *,
+        frame: MonitorFrame | None = None,
+        summary: ScopeSummary | None = None,
+        cluster: str | None = None,
+        cache_dir: str | None = None,
+        sctx: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.host: str = host
+        self.cluster_id: str = cluster_id
+        self.container: str = container
+        self.scope: LogScope = LogScope(scope)
+        self.cluster: str | None = cluster
+        self.cache_dir: str | None = cache_dir
+        self.sctx: Any = sctx
+
+        self.CAP: int = self.CAP
+        self.buffer: LogBuffer = LogBuffer()
+        self.view_state: ViewState = ViewState()
+        self.scope_summary: ScopeSummary | None = summary or (workload_scope_summary(frame, cluster_id, host) if frame else None)
+
+        self._cancel: threading.Event = threading.Event()
+        self._generation: int = 0
+        self.target: LogTarget | None = None
+        self._loading_page: bool = False
+        self._page_failed: bool = False
+        self._current_match_idx: int | None = None
+        self._current_match_abs: int | None = None
+        self._delivered_lock: threading.Lock = threading.Lock()
+        self._delivered_counts: dict[tuple[str, str], int] = {}
+
+        self.log_view: LogView = LogView(self.buffer)
+
+    def _source_key(self, source: LogSource | LogLine | tuple[str, str]) -> tuple[str, str]:
+        if isinstance(source, tuple):
+            return source
+        return (source.host, source.container)
+
+    def _get_delivered_count(self, source: LogSource | LogLine | tuple[str, str]) -> int:
+        key = self._source_key(source)
+        with self._delivered_lock:
+            return self._delivered_counts.get(key, 0)
+
+    def _inc_delivered_count(self, source: LogSource | LogLine | tuple[str, str]) -> None:
+        key = self._source_key(source)
+        with self._delivered_lock:
+            self._delivered_counts[key] = self._delivered_counts.get(key, 0) + 1
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="log-title")
+        yield self.log_view
+        yield Input(id="log-search", placeholder="Regex search (enter to submit, esc to cancel)")
+        yield Static(id="log-status")
+
+    def on_mount(self) -> None:
+        self._update_title()
+        self._update_status()
+        self.log_view.focus()
+        self._start_follow_worker(self.scope)
+
+    def _update_title(self) -> None:
+        meta = load_job_metadata(self.cluster_id, cache_dir=self.cache_dir) or {}
+        recipe = meta.get("recipe", "")
+        label = recipe or self.cluster_id
+        short_id = self.cluster_id[:8] if len(self.cluster_id) > 8 else self.cluster_id
+        title = f"[bold]{label}[/bold] [dim]({short_id})[/dim] — [bold]{self.container}[/bold]"
+        title_widget = self.query_one("#log-title", Static)
+        title_widget.update(title)
+
+    def _update_status(self) -> None:
+        state_str = self.view_state.status_label
+        summary = self.scope_summary
+        if self.scope == LogScope.CONTAINER:
+            scope_str = f"1 container {self.container}"
+        elif self.scope == LogScope.NODE:
+            k = summary.node_containers if summary else 1
+            scope_str = f"2 node {self.host} ({k} containers)"
+        elif self.scope == LogScope.CLUSTER:
+            n = summary.cluster_containers if summary else 1
+            m = summary.cluster_hosts if summary else 1
+            scope_str = f"3 cluster ({n} containers on {m} hosts)"
+        else:
+            scope_str = f"scope {self.scope}"
+
+        color_str = f"color {'on' if self.log_view.color else 'off'}"
+        hl_str = f"highlight {'on' if self.log_view.highlight else 'off'}"
+        wrap_str = f"wrap {'on' if self.log_view.wrap else 'off'}"
+
+        parts = [state_str, scope_str, color_str, hl_str, wrap_str]
+        if self.buffer.search_pattern is not None:
+            count = len(self.buffer.search_matches)
+            if count > 0 and self._current_match_idx is not None and 0 <= self._current_match_idx < count:
+                parts.append(f"{count} matches in loaded lines (match {self._current_match_idx + 1}/{count})")
+            else:
+                parts.append(f"{count} matches in loaded lines")
+
+        status_text = " | ".join(parts)
+        status_widget = self.query_one("#log-status", Static)
+        status_widget.update(status_text)
+
+    def _is_match_visible(self, match_entry: int) -> bool:
+        scroll_y = int(self.log_view.scroll_offset[1])
+        height = max(1, self.log_view.scrollable_content_region.height)
+        top_entry = self.log_view.virtual_row_to_entry(scroll_y)
+        bot_entry = self.log_view.virtual_row_to_entry(scroll_y + height - 1)
+        return top_entry <= match_entry <= bot_entry
+
+    def _set_current_match(self, idx: int | None) -> None:
+        matches = self.buffer.search_matches
+        if idx is None or not matches or not (0 <= idx < len(matches)):
+            self._current_match_idx = None
+            self._current_match_abs = None
+            self.log_view.current_match_entry = None
+            return
+        self._current_match_idx = idx
+        self._current_match_abs = self.buffer._base_offset + matches[idx]
+        self.log_view.current_match_entry = matches[idx]
+
+    def _rederive_match_cursor(self) -> None:
+        abs_idx = self._current_match_abs
+        if abs_idx is None or self.buffer.search_pattern is None:
+            self._current_match_idx = None
+            self.log_view.current_match_entry = None
+            return
+        rel = abs_idx - self.buffer._base_offset
+        if rel < 0 or rel >= len(self.buffer):
+            self._set_current_match(None)
+            return
+        matches = self.buffer.search_matches
+        try:
+            idx = matches.index(rel)
+        except ValueError:
+            self._set_current_match(None)
+            return
+        self._current_match_idx = idx
+        self.log_view.current_match_entry = rel
+
+    def update_frame(self, frame: MonitorFrame | None) -> None:
+        if frame is not None:
+            self.scope_summary = workload_scope_summary(frame, self.cluster_id, self.host)
+            self._update_status()
+
+    def _start_follow_worker(self, target_scope: LogScope) -> None:
+        self._cancel = threading.Event()
+        self._generation += 1
+        with self._delivered_lock:
+            self._delivered_counts.clear()
+        self._follow_worker(target_scope, self._cancel, self._generation)
+
+    @work(thread=True, exclusive=True, group="follow")
+    def _follow_worker(self, target_scope: LogScope, cancel: threading.Event, gen: int) -> None:
+        try:
+            args = target_args(target_scope, self.host, self.container)
+            target = open_log_target(
+                self.cluster_id,
+                cluster=self.cluster,
+                cache_dir=self.cache_dir,
+                sctx=self.sctx,
+                **args,
+            )
+            if cancel.is_set():
+                return
+            self.app.call_from_thread(self._on_target_ready, target, gen)
+
+            for line in target.follow(tail=200, cancel=cancel):
+                if cancel.is_set() or gen != self._generation:
+                    break
+                self._inc_delivered_count(line)
+                self.app.call_from_thread(self._on_line, line, gen, True)
+
+            if not cancel.is_set():
+                self.app.call_from_thread(self._on_stream_ended, gen)
+        except SparkrunError as e:
+            if not cancel.is_set():
+                self.app.call_from_thread(self._on_error, str(e), gen)
+        except Exception as e:
+            if not cancel.is_set():
+                logger.exception("Unexpected error in follow worker")
+                self.app.call_from_thread(self._on_error, str(e), gen)
+
+    def _on_target_ready(self, target: LogTarget, gen: int) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        self.target = target
+        multi_host = len({s.host for s in target.sources}) > 1
+        multi_source = len(target.sources) > 1
+        self.log_view.multi_host = multi_host
+        self.log_view.multi_source = multi_source
+
+    def _on_line(self, line: LogLine, gen: int, from_follow: bool = False) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        if not from_follow:
+            self._inc_delivered_count(line)
+        top_entry = self.log_view.virtual_row_to_entry(int(self.log_view.scroll_offset[1]))
+        bottom_entry = self.log_view.virtual_row_to_entry(
+            int(self.log_view.scroll_offset[1]) + self.log_view.scrollable_content_region.height
+        )
+        hist_before = self.buffer.evicted_history
+        live_before = self.buffer.evicted_live
+        appended = self.buffer.append(line)
+        if not appended:
+            self.view_state.on_new_line()
+            self._update_status()
+            return
+
+        if self.view_state.is_following:
+            self.buffer.evict(cap=self.CAP, drop_from="top")
+        else:
+            self.buffer.evict(cap=self.CAP, viewport=(top_entry, bottom_entry))
+        top_evicted = self.buffer.evicted_history - hist_before
+        bot_evicted = self.buffer.evicted_live - live_before
+
+        if top_evicted > 0 or bot_evicted > 0:
+            self.log_view.on_entries_evicted(top_evicted=top_evicted, bot_evicted=bot_evicted)
+            self._rederive_match_cursor()
+
+        self.view_state.on_new_line()
+        if bot_evicted == 0:
+            self.log_view.on_entry_appended(line)
+        if self.view_state.is_following:
+            self.log_view.scroll_to_end()
+        self._update_status()
+
+    def _on_stream_ended(self, gen: int) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        if not self.buffer.stream_ended:
+            self.buffer.append(STREAM_ENDED_MARKER)
+            self.log_view.on_entry_appended(STREAM_ENDED_MARKER)
+            if self.view_state.is_following:
+                self.log_view.scroll_to_end()
+            self._update_status()
+
+    def _on_error(self, err_msg: str, gen: int) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        err_marker = Marker(f"[red]{err_msg}[/red]")
+        self.buffer.append(err_marker)
+        self.log_view.on_entry_appended(err_marker)
+        if self.view_state.is_following:
+            self.log_view.scroll_to_end()
+        self._update_status()
+
+    def on_log_view_near_top(self, event: LogView.NearTop) -> None:
+        self._trigger_page_fetch()
+
+    def on_log_view_scroll_position_changed(self, event: LogView.ScrollPositionChanged) -> None:
+        self.view_state.on_scroll(event.at_bottom)
+        self._update_status()
+
+    def _trigger_page_fetch(self) -> None:
+        if self._loading_page or self.target is None:
+            return
+        if not self.target.windowing_supported:
+            if not any(e == OLDER_UNAVAILABLE_MARKER for e in self.buffer._entries):
+                self.buffer.prepend_page([OLDER_UNAVAILABLE_MARKER])
+                self.log_view.refresh_buffer()
+                self._rederive_match_cursor()
+            return
+
+        sorted_sources = sorted(
+            self.target.sources,
+            key=lambda s: (s.rank is None, s.rank if s.rank is not None else 0, s.host, s.container),
+        )
+        rev_sources = list(reversed(sorted_sources))
+        source_skips: list[tuple[LogSource, int, int]] = []
+        for s in rev_sources:
+            if not self.buffer.is_exhausted(s):
+                source_skips.append((s, self.buffer.get_skip(s), self._get_delivered_count(s)))
+
+        if not source_skips:
+            if not any(e == START_OF_LOG_MARKER for e in self.buffer._entries):
+                self.buffer.prepend_page([START_OF_LOG_MARKER])
+                self.log_view.refresh_buffer()
+                self._rederive_match_cursor()
+            return
+
+        self._loading_page = True
+        self._page_failed = False
+        old_scroll_y = self.log_view.scroll_y
+        self.buffer.prepend_page([LOADING_MARKER])
+        self.log_view.refresh_buffer()
+        self._rederive_match_cursor()
+        marker_rows = self.log_view.entry_to_virtual_row(1)
+        self.log_view.scroll_to(y=old_scroll_y + marker_rows, animate=False)
+
+        gen = self._generation
+        self._page_worker(self.target, source_skips, self._cancel, gen)
+
+    @work(thread=True, exclusive=False, group="page")
+    def _page_worker(
+        self,
+        target: LogTarget,
+        source_skips: list[tuple[LogSource, int, int]],
+        cancel: threading.Event,
+        gen: int,
+    ) -> None:
+        fetched_pages: list[tuple[LogSource, list[LogLine], bool]] = []
+        try:
+            for source, skip, snap_count in source_skips:
+                if cancel.is_set():
+                    return
+                if hasattr(target, "before_page") and callable(target.before_page):
+                    target.before_page()
+                count_before_read = self._get_delivered_count(source)
+                lines = target.page(source, skip=skip, count=500)
+                exhausted = len(lines) < 500
+                trimmed_lines = _trim_page_drift(
+                    lines,
+                    count_before_read=count_before_read,
+                    snap_count=snap_count,
+                )
+                fetched_pages.append((source, trimmed_lines, exhausted))
+
+            if not cancel.is_set():
+                self.app.call_from_thread(self._on_page_success, fetched_pages, target, gen)
+        except Exception as e:
+            if not cancel.is_set():
+                logger.warning("Error fetching older log page: %s", e)
+                self.app.call_from_thread(self._on_page_failure, str(e), gen)
+
+    def _on_page_success(
+        self,
+        fetched_pages: list[tuple[LogSource, list[LogLine], bool]],
+        target: LogTarget,
+        gen: int,
+    ) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        removed_loading = False
+        marker_rows = 0
+        if self.buffer._entries and self.buffer._entries[0] == LOADING_MARKER:
+            marker_rows = self.log_view.entry_to_virtual_row(1)
+            self.buffer._entries.popleft()
+            self.buffer._base_offset += 1
+            removed_loading = True
+
+        curr_scroll_y = max(0.0, self.log_view.scroll_y - (marker_rows if removed_loading else 0))
+        old_entries_count = len(self.buffer._entries)
+
+        multi_source = len(target.sources) > 1
+        multi_host = len({s.host for s in target.sources}) > 1
+
+        for source, lines, exhausted in fetched_pages:
+            sep = None
+            if multi_source and lines:
+                role = source.role or "?"
+                rank_str = f"/{source.rank}" if source.rank is not None else ""
+                if multi_host:
+                    sep = f"── {source.host}/{role}{rank_str} ──"
+                else:
+                    sep = f"── {role}{rank_str} ──"
+            self.buffer.prepend_page(source, lines, exhausted=exhausted, separator=sep)
+
+        all_exhausted = all(self.buffer.is_exhausted(s) for s in target.sources)
+        if all_exhausted and not any(e == START_OF_LOG_MARKER for e in self.buffer._entries):
+            self.buffer.prepend_page([START_OF_LOG_MARKER])
+
+        new_entries_count = len(self.buffer._entries)
+        prepended_entries = new_entries_count - old_entries_count
+
+        # Enforce 50k cap on back-scroll paging:
+        # Excess lines are dropped from bottom (newest live lines), keeping anchor intact.
+        self.buffer.evict(cap=self.CAP, drop_from="bottom")
+
+        self.log_view.refresh_buffer()
+        delta_vrows = self.log_view.entry_to_virtual_row(prepended_entries)
+        anchored_y = max(0.0, curr_scroll_y + delta_vrows)
+        self.log_view.scroll_to(y=anchored_y, animate=False)
+
+        self._rederive_match_cursor()
+
+        self._loading_page = False
+        self._update_status()
+
+    def _on_page_failure(self, err_msg: str, gen: int) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        if self.buffer._entries and self.buffer._entries[0] == LOADING_MARKER:
+            marker_rows = self.log_view.entry_to_virtual_row(1)
+            self.buffer._entries.popleft()
+            self.buffer._base_offset += 1
+            self.log_view.scroll_to(y=max(0.0, self.log_view.scroll_y - marker_rows), animate=False)
+
+        self._loading_page = False
+        self._page_failed = True
+        err_marker = Marker(f"[red]Page fetch failed: {err_msg}[/red]")
+        self.buffer.prepend_page([err_marker])
+        self.log_view.refresh_buffer()
+        self._rederive_match_cursor()
+        self._update_status()
+
+    def _reload_tail(self) -> None:
+        if self.target is None:
+            return
+        gen = self._generation
+        self._reload_tail_worker(self.target, self._cancel, gen)
+
+    @work(thread=True, exclusive=False)
+    def _reload_tail_worker(self, target: LogTarget, cancel: threading.Event, gen: int) -> None:
+        try:
+            lines = list(target.read(follow=False, tail=200, cancel=cancel))
+            if not cancel.is_set():
+                self.app.call_from_thread(self._on_reload_tail_success, lines, gen)
+        except Exception as e:
+            logger.warning("Failed to reload tail: %s", e)
+            if not cancel.is_set():
+                self.app.call_from_thread(self._on_error, f"Failed to reload tail: {e}", gen)
+
+    def _on_reload_tail_success(self, lines: list[LogLine], gen: int) -> None:
+        if not self.is_mounted or gen != self._generation or self._cancel.is_set():
+            return
+        self.buffer.reload_tail(lines)
+        with self._delivered_lock:
+            self._delivered_counts.clear()
+            for line in lines:
+                key = (line.host, line.container)
+                self._delivered_counts[key] = self._delivered_counts.get(key, 0) + 1
+        self.view_state.state = FollowState.FOLLOWING
+        self.view_state.pending_lines = 0
+        self._set_current_match(None)
+        self.log_view.refresh_buffer()
+        self.log_view.scroll_to_end()
+        self._update_status()
+
+    def action_toggle_pause_or_end(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        if self.buffer.evicted_live > 0:
+            self._reload_tail()
+            return
+        at_bottom = self.log_view.is_at_bottom
+        jumped = self.view_state.on_space(at_bottom=at_bottom)
+        if jumped or self.view_state.is_following:
+            self.log_view.scroll_to_end()
+        self._update_status()
+
+    def action_scope_container(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self._switch_scope(LogScope.CONTAINER)
+
+    def action_scope_node(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self._switch_scope(LogScope.NODE)
+
+    def action_scope_cluster(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self._switch_scope(LogScope.CLUSTER)
+
+    def _switch_scope(self, new_scope: LogScope) -> None:
+        if new_scope == self.scope:
+            return
+        summary = self.scope_summary
+        if summary is not None:
+            old_canon = canonical_scope(self.scope, summary)
+            new_canon = canonical_scope(new_scope, summary)
+            if old_canon == new_canon:
+                self.scope = new_scope
+                self._update_status()
+                return
+
+        self.scope = new_scope
+        self._cancel.set()
+        self._generation += 1
+        with self._delivered_lock:
+            self._delivered_counts.clear()
+        self.workers.cancel_group(self, "page")
+        self.workers.cancel_group(self, "follow")
+        self._loading_page = False
+        self._page_failed = False
+        self.target = None
+        self.log_view.multi_host = False
+        self.log_view.multi_source = False
+
+        old_pattern = self.buffer.search_pattern
+        self.buffer = LogBuffer()
+        self._set_current_match(None)
+        if old_pattern is not None:
+            matches = self.buffer.search(old_pattern)
+            self.log_view.search_pattern = old_pattern
+            if matches:
+                self._set_current_match(0)
+        else:
+            self.log_view.search_pattern = None
+
+        self.view_state = ViewState()
+        self.log_view.buffer = self.buffer
+        self.log_view.refresh_buffer()
+        self._update_status()
+        self._start_follow_worker(self.scope)
+
+    def action_toggle_color(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self.log_view.color = not self.log_view.color
+        self.log_view.refresh()
+        self._update_status()
+
+    def action_toggle_highlight(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self.log_view.highlight = not self.log_view.highlight
+        self.log_view.refresh()
+        self._update_status()
+
+    def action_toggle_wrap(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self.log_view.wrap = not self.log_view.wrap
+        self.log_view.refresh_buffer()
+        self._update_status()
+
+    def action_open_search(self) -> None:
+        search_input = self.query_one("#log-search", Input)
+        search_input.display = True
+        search_input.value = ""
+        search_input.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "log-search":
+            val = event.value.strip()
+            if not val:
+                self.buffer.search(None)
+                self.log_view.search_pattern = None
+                self._set_current_match(None)
+                event.input.display = False
+                self.log_view.focus()
+                self.log_view.refresh()
+                self._update_status()
+                return
+
+            try:
+                matches = self.buffer.search(val)
+            except re.error as e:
+                event.input.value = f"Invalid regex: {e}"
+                return
+
+            self.log_view.search_pattern = self.buffer.search_pattern
+            event.input.display = False
+            self.log_view.focus()
+
+            if matches:
+                current_entry = self.log_view.virtual_row_to_entry(int(self.log_view.scroll_offset[1]))
+                candidates = [i for i, m in enumerate(matches) if m >= current_entry]
+                self._set_current_match(candidates[0] if candidates else 0)
+                self.log_view.scroll_to_line(matches[self._current_match_idx])
+            else:
+                self._set_current_match(None)
+
+            self.log_view.refresh()
+            self._update_status()
+
+    def action_search_next(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        matches = self.buffer.search_matches
+        if not matches:
+            return
+        current_entry = self.log_view.virtual_row_to_entry(int(self.log_view.scroll_offset[1]))
+        if (
+            self._current_match_idx is None
+            or not (0 <= self._current_match_idx < len(matches))
+            or not self._is_match_visible(matches[self._current_match_idx])
+        ):
+            candidates = [i for i, m in enumerate(matches) if m > current_entry]
+            self._set_current_match(candidates[0] if candidates else 0)
+        else:
+            self._set_current_match((self._current_match_idx + 1) % len(matches))
+        self.log_view.scroll_to_line(matches[self._current_match_idx])
+        self.log_view.refresh()
+        self._update_status()
+
+    def action_search_prev(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        matches = self.buffer.search_matches
+        if not matches:
+            return
+        current_entry = self.log_view.virtual_row_to_entry(int(self.log_view.scroll_offset[1]))
+        if (
+            self._current_match_idx is None
+            or not (0 <= self._current_match_idx < len(matches))
+            or not self._is_match_visible(matches[self._current_match_idx])
+        ):
+            candidates = [i for i, m in enumerate(matches) if m < current_entry]
+            self._set_current_match(candidates[-1] if candidates else len(matches) - 1)
+        else:
+            self._set_current_match((self._current_match_idx - 1) % len(matches))
+        self.log_view.scroll_to_line(matches[self._current_match_idx])
+        self.log_view.refresh()
+        self._update_status()
+
+    def action_dump_logs(self) -> None:
+        if self.query_one("#log-search", Input).has_focus:
+            return
+        self.post_message(self.RequestDump(self.host, self.cluster_id, self.container, self.scope))
+
+    def action_close_pane(self) -> None:
+        search_input = self.query_one("#log-search", Input)
+        if search_input.display:
+            self.buffer.search(None)
+            self.log_view.search_pattern = None
+            self._set_current_match(None)
+            search_input.display = False
+            self.log_view.focus()
+            self.log_view.refresh()
+            self._update_status()
+            return
+        self.close()
+        self.post_message(self.Closed())
+
+    def close(self) -> None:
+        self._cancel.set()
+        self._generation += 1
+        self.workers.cancel_group(self, "page")
+        self.workers.cancel_group(self, "follow")
+
+    def on_unmount(self) -> None:
+        self._cancel.set()
+        self._generation += 1
+        self.workers.cancel_group(self, "page")
+        self.workers.cancel_group(self, "follow")
+
+
+def format_scope_option(scope: LogScope | int, host: str, container: str, summary: ScopeSummary) -> str:
+    scope = LogScope(scope)
+    if scope == LogScope.CONTAINER:
+        return f"1  This container ({container})"
+    elif scope == LogScope.NODE:
+        return f"2  This node ({host}, {summary.node_containers} containers)"
+    elif scope == LogScope.CLUSTER:
+        return f"3  Whole cluster ({summary.cluster_containers} containers on {summary.cluster_hosts} hosts)"
+    raise ValueError(f"Unknown scope: {scope!r}")
+
+
+class DumpLogScreen(ModalScreen[Any]):
+    """Modal screen for dumping workload logs to a local file."""
+
+    DEFAULT_CSS = """
+    DumpLogScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }
+    #dump-dialog {
+        width: 72;
+        height: auto;
+        max-height: 85%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #dump-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #dump-scope-list {
+        height: auto;
+        max-height: 5;
+        margin-bottom: 1;
+        border: round $primary;
+    }
+    #dump-path-label {
+        margin-top: 1;
+        color: $text;
+    }
+    #dump-path-input {
+        margin-bottom: 1;
+    }
+    #dump-overwrite-list {
+        display: none;
+        height: auto;
+        max-height: 4;
+        margin-top: 1;
+        border: round $warning;
+    }
+    #dump-error {
+        height: auto;
+        color: $error;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(
+        self,
+        host: str,
+        cluster_id: str,
+        container: str,
+        default_scope: LogScope | int = LogScope.CONTAINER,
+        *,
+        frame: MonitorFrame | None = None,
+        summary: ScopeSummary | None = None,
+        cluster: str | None = None,
+        cache_dir: str | None = None,
+        sctx: Any = None,
+        recipe_name: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.host: str = host
+        self.cluster_id: str = cluster_id
+        self.container: str = container
+        self.cluster: str | None = cluster
+        self.cache_dir: str | None = cache_dir
+        self.sctx: Any = sctx
+
+        if recipe_name:
+            self.label: str = recipe_name
+        else:
+            meta = load_job_metadata(cluster_id, cache_dir=cache_dir) or {}
+            self.label = meta.get("recipe") or cluster_id
+
+        self.summary: ScopeSummary = summary or (
+            workload_scope_summary(frame, cluster_id, host)
+            if frame
+            else ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+        )
+        self._scopes: list[LogScope] = distinct_scopes(self.summary)
+        self._has_scope_list: bool = len(self._scopes) > 1
+
+        canon_default = canonical_scope(default_scope, self.summary)
+        if canon_default in self._scopes:
+            self._default_scope_idx: int = self._scopes.index(canon_default)
+            self.chosen_scope: LogScope = canon_default
+        else:
+            self._default_scope_idx = 0
+            self.chosen_scope = self._scopes[0]
+
+        self._scope_options: list[tuple[LogScope, str]] = [
+            (s, format_scope_option(s, self.host, self.container, self.summary)) for s in self._scopes
+        ]
+
+        self._path_edited: bool = False
+        self._initial_path: str = default_dump_path(self.label, self.chosen_scope, self.host, self.container)
+        self._last_default_path: str = self._initial_path
+        self._pending_dump_path: str | None = None
+        self._cancel: threading.Event = threading.Event()
+        self._dumping: bool = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dump-dialog"):
+            yield Static(f"Dump logs: {self.label}", id="dump-title")
+            if self._has_scope_list:
+                yield SelectionList(
+                    *[Option(prompt=text, id=str(int(s))) for s, text in self._scope_options],
+                    id="dump-scope-list",
+                    revealed=False,
+                )
+            yield Static("File path:", id="dump-path-label")
+            yield Input(value=self._initial_path, id="dump-path-input")
+            yield SelectionList(
+                Option("Overwrite", id="overwrite"),
+                Option("Cancel", id="cancel"),
+                id="dump-overwrite-list",
+                revealed=False,
+            )
+            yield Static(id="dump-error")
+
+    def on_mount(self) -> None:
+        if self._has_scope_list:
+            scope_list = self.query_one("#dump-scope-list", SelectionList)
+            scope_list.conceal()
+            scope_list.highlighted = self._default_scope_idx
+            scope_list.focus()
+        else:
+            self.query_one("#dump-path-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if self._dumping:
+            return
+        if event.input.id == "dump-path-input":
+            if event.value != self._last_default_path:
+                self._path_edited = True
+            if self._pending_dump_path is not None and event.value != self._pending_dump_path:
+                self._pending_dump_path = None
+                try:
+                    overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+                    overwrite_list.display = False
+                    self._set_error("")
+                except Exception:
+                    pass
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if self._dumping:
+            return
+        if event.option_list.id == "dump-scope-list":
+            idx = event.option_index
+            if 0 <= idx < len(self._scopes):
+                self.chosen_scope = self._scopes[idx]
+                if not self._path_edited:
+                    new_path = default_dump_path(self.label, self.chosen_scope, self.host, self.container)
+                    self._last_default_path = new_path
+                    self.query_one("#dump-path-input", Input).value = new_path
+            self.query_one("#dump-path-input", Input).focus()
+        elif event.option_list.id == "dump-overwrite-list":
+            if event.option_id == "overwrite" or event.option_index == 0:
+                if self._pending_dump_path:
+                    self._start_dump(self._pending_dump_path, overwrite=True)
+            else:
+                self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self._dumping:
+            return
+        if event.input.id == "dump-path-input":
+            path_str = event.value.strip()
+            if not path_str:
+                self._set_error("File path cannot be empty")
+                return
+            resolved = os.path.abspath(os.path.expanduser(path_str))
+            parent = os.path.dirname(resolved)
+            if not os.path.isdir(parent):
+                self._set_error(f"Directory {parent!r} does not exist")
+                return
+            if not os.access(parent, os.W_OK):
+                self._set_error(f"Directory {parent!r} is not writable")
+                return
+            if os.path.exists(resolved):
+                self._prompt_overwrite(resolved)
+                return
+            self._start_dump(resolved, overwrite=False)
+
+    def _prompt_overwrite(self, resolved_path: str) -> None:
+        self._pending_dump_path = resolved_path
+        self._set_error("[yellow]File exists. Confirm overwrite:[/yellow]")
+        overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+        overwrite_list.display = True
+        overwrite_list.conceal()
+        overwrite_list.highlighted = 1  # Cancel is default
+        overwrite_list.focus()
+
+    def _set_error(self, message: str) -> None:
+        try:
+            self.query_one("#dump-error", Static).update(message)
+        except Exception:
+            pass
+
+    def action_cancel(self) -> None:
+        if self._dumping:
+            self._cancel.set()
+            self.workers.cancel_group(self, "dump")
+            self.dismiss(None)
+            return
+        focused = self.focused
+        if focused and focused.id == "dump-path-input" and self._has_scope_list:
+            self.query_one("#dump-scope-list", SelectionList).focus()
+            return
+        self._cancel.set()
+        self.workers.cancel_group(self, "dump")
+        self.dismiss(None)
+
+    def on_unmount(self) -> None:
+        self._cancel.set()
+        self.workers.cancel_group(self, "dump")
+
+    def _start_dump(self, path: str, overwrite: bool) -> None:
+        if self._dumping:
+            return
+        self._dumping = True
+        try:
+            self.query_one("#dump-path-input", Input).disabled = True
+            if self._has_scope_list:
+                self.query_one("#dump-scope-list", SelectionList).disabled = True
+            overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+            if overwrite_list.display:
+                overwrite_list.disabled = True
+        except Exception:
+            pass
+        self._set_error("[cyan]Dumping logs…[/cyan]")
+        scope = self.chosen_scope
+        self._dump_worker(path, overwrite, scope)
+
+    @work(thread=True, exclusive=True, group="dump")
+    def _dump_worker(self, path: str, overwrite: bool, scope: LogScope) -> None:
+        try:
+            t_args = target_args(scope, self.host, self.container)
+            target = open_log_target(
+                self.cluster_id,
+                cluster=self.cluster,
+                cache_dir=self.cache_dir,
+                sctx=self.sctx,
+                **t_args,
+            )
+            count = target.dump(path, overwrite=overwrite, cancel=self._cancel)
+            if self._cancel.is_set():
+                return
+
+            if scope == LogScope.CONTAINER:
+                scope_desc = f"container {self.container}"
+            elif scope == LogScope.NODE:
+                scope_desc = f"node {self.host}"
+            else:
+                scope_desc = "cluster"
+
+            def _on_success() -> None:
+                if self._cancel.is_set():
+                    return
+                self.app.notify(f"Dumped {count} line(s) ({scope_desc}) to {path}")
+                self.dismiss(path)
+
+            self.app.call_from_thread(_on_success)
+        except Exception as e:
+            if self._cancel.is_set():
+                return
+
+            def _on_err(err_msg: str) -> None:
+                self._dumping = False
+                try:
+                    path_input = self.query_one("#dump-path-input", Input)
+                    path_input.disabled = False
+                    if self._has_scope_list:
+                        self.query_one("#dump-scope-list", SelectionList).disabled = False
+                    overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+                    if overwrite_list.display:
+                        overwrite_list.disabled = False
+                    path_input.focus()
+                except Exception:
+                    pass
+                self._set_error(f"[red]{err_msg}[/red]")
+
+            self.app.call_from_thread(_on_err, str(e))

@@ -1,0 +1,2671 @@
+"""Tests for cli/_monitor_logs.py: pure log-view models, scope helpers, and SelectionList."""
+
+from __future__ import annotations
+
+from collections import deque
+from datetime import datetime
+import re
+import threading
+import time
+from typing import Any, Iterator, Sequence
+
+import pytest
+from rich.text import Text
+from textual.app import App, ComposeResult
+from textual.widgets import Input, Static
+
+from sparkrun.api._errors import SparkrunError
+from sparkrun.cli._monitor_logs import (
+    FollowState,
+    LogBuffer,
+    LogPane,
+    LogScope,
+    LogView,
+    Marker,
+    START_OF_LOG_MARKER,
+    STREAM_ENDED_MARKER,
+    LOADING_MARKER,
+    LOG_RESTARTED_MARKER,
+    OLDER_UNAVAILABLE_MARKER,
+    ScopeSummary,
+    SelectionList,
+    ViewState,
+    WorkloadList,
+    DumpLogScreen,
+    canonical_scope,
+    default_dump_path,
+    distinct_scopes,
+    format_prefix,
+    render_text,
+    target_args,
+    workload_rows,
+    WorkloadRow,
+    workload_scope_summary,
+    _trim_page_drift,
+)
+from sparkrun.core.cluster_status import ContainerDetail, RunningWorkload
+from sparkrun.core.monitoring import HostActivity, MonitorFrame
+from sparkrun.orchestration.logs import LogLine, LogSource
+
+
+# ---------------------------------------------------------------------------
+# Scope Helpers & Target Args & Dump Path
+# ---------------------------------------------------------------------------
+
+
+def test_workload_scope_summary():
+    # 1. Solo workload: 1 container on h1
+    w1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="solo", status="Up", image="img"),),
+    )
+    frame1 = MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w1,)),))
+    s1 = workload_scope_summary(frame1, "cid1", "h1")
+    assert s1 == ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+
+    # 2. Two containers of cid1 on h1, none elsewhere
+    w2 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(
+            ContainerDetail(name="c1", role="head", status="Up", image="img"),
+            ContainerDetail(name="c2", role="worker", status="Up", image="img"),
+        ),
+    )
+    frame2 = MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w2,)), HostActivity(host="h2")))
+    s2 = workload_scope_summary(frame2, "cid1", "h1")
+    assert s2 == ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)
+
+    # 3. One container on h1, one container on h2
+    w3_h1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+    w3_h2 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c2", role="worker", status="Up", image="img"),),
+    )
+    frame3 = MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w3_h1,)), HostActivity(host="h2", workloads=(w3_h2,))))
+    s3 = workload_scope_summary(frame3, "cid1", "h1")
+    assert s3 == ScopeSummary(node_containers=1, cluster_containers=2, cluster_hosts=2)
+
+    # 4. Two on h1, one on h2
+    w4_h1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(
+            ContainerDetail(name="c1", role="head", status="Up", image="img"),
+            ContainerDetail(name="c2", role="worker", status="Up", image="img"),
+        ),
+    )
+    w4_h2 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c3", role="worker", status="Up", image="img"),),
+    )
+    frame4 = MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w4_h1,)), HostActivity(host="h2", workloads=(w4_h2,))))
+    s4 = workload_scope_summary(frame4, "cid1", "h1")
+    assert s4 == ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)
+
+    # Workload with no container details defaults to 1 container
+    w_empty = RunningWorkload(cluster_id="cid1", containers=())
+    frame_empty = MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w_empty,)),))
+    s_empty = workload_scope_summary(frame_empty, "cid1", "h1")
+    assert s_empty == ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+
+    # Empty frame
+    assert workload_scope_summary(None, "cid1", "h1") == ScopeSummary(0, 0, 0)
+
+    # 5. Ray unranked worker case (role="worker") and user@host matching
+    w_ray = RunningWorkload(
+        cluster_id="cid_ray",
+        containers=(
+            ContainerDetail(name="ray_head", role="head", status="Up", image="ray:vllm"),
+            ContainerDetail(name="ray_worker_1", role="worker", status="Up", image="ray:vllm"),
+        ),
+    )
+    w_ray_remote = RunningWorkload(
+        cluster_id="cid_ray",
+        containers=(ContainerDetail(name="ray_worker_2", role="worker", status="Up", image="ray:vllm"),),
+    )
+    frame_ray = MonitorFrame(
+        hosts=(
+            HostActivity(host="ubuntu@h1", workloads=(w_ray,)),
+            HostActivity(host="ubuntu@h2", workloads=(w_ray_remote,)),
+        )
+    )
+    # Target "h1" matches "ubuntu@h1"
+    s_ray_h1 = workload_scope_summary(frame_ray, "cid_ray", "h1")
+    assert s_ray_h1 == ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)
+
+    # Target "h2" matches "ubuntu@h2"
+    s_ray_h2 = workload_scope_summary(frame_ray, "cid_ray", "h2")
+    assert s_ray_h2 == ScopeSummary(node_containers=1, cluster_containers=3, cluster_hosts=2)
+
+    # Target "h3" (mismatch) has 0 node containers
+    s_ray_h3 = workload_scope_summary(frame_ray, "cid_ray", "h3")
+    assert s_ray_h3 == ScopeSummary(node_containers=0, cluster_containers=3, cluster_hosts=2)
+
+
+def test_distinct_scopes():
+    # Solo workload: [1]
+    assert distinct_scopes(ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)) == [LogScope.CONTAINER]
+
+    # Two containers on one host, none elsewhere: [1, 2]
+    assert distinct_scopes(ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)) == [
+        LogScope.CONTAINER,
+        LogScope.NODE,
+    ]
+
+    # One container on each of two hosts: [1, 3]
+    assert distinct_scopes(ScopeSummary(node_containers=1, cluster_containers=2, cluster_hosts=2)) == [
+        LogScope.CONTAINER,
+        LogScope.CLUSTER,
+    ]
+
+    # Two on this host plus one elsewhere: [1, 2, 3]
+    assert distinct_scopes(ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)) == [
+        LogScope.CONTAINER,
+        LogScope.NODE,
+        LogScope.CLUSTER,
+    ]
+
+
+def test_canonical_scope():
+    # When solo: all scopes map to 1
+    solo = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+    assert canonical_scope(LogScope.CONTAINER, solo) == LogScope.CONTAINER
+    assert canonical_scope(LogScope.NODE, solo) == LogScope.CONTAINER
+    assert canonical_scope(LogScope.CLUSTER, solo) == LogScope.CONTAINER
+
+    # When 2 on host, none elsewhere: 3 maps to 2, 2 stays 2, 1 stays 1
+    two_node = ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)
+    assert canonical_scope(LogScope.CONTAINER, two_node) == LogScope.CONTAINER
+    assert canonical_scope(LogScope.NODE, two_node) == LogScope.NODE
+    assert canonical_scope(LogScope.CLUSTER, two_node) == LogScope.NODE
+
+    # When 1 on host, 1 elsewhere: 2 maps to 1, 3 stays 3
+    one_each = ScopeSummary(node_containers=1, cluster_containers=2, cluster_hosts=2)
+    assert canonical_scope(LogScope.CONTAINER, one_each) == LogScope.CONTAINER
+    assert canonical_scope(LogScope.NODE, one_each) == LogScope.CONTAINER
+    assert canonical_scope(LogScope.CLUSTER, one_each) == LogScope.CLUSTER
+
+    # When 2 on host, 1 elsewhere: all 3 distinct
+    all_three = ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)
+    assert canonical_scope(LogScope.CONTAINER, all_three) == LogScope.CONTAINER
+    assert canonical_scope(LogScope.NODE, all_three) == LogScope.NODE
+    assert canonical_scope(LogScope.CLUSTER, all_three) == LogScope.CLUSTER
+
+
+def test_target_args():
+    assert target_args(LogScope.CONTAINER, "h1", "c1") == {"host": "h1", "container": "c1", "scope": "all"}
+    assert target_args(LogScope.NODE, "h1", "c1") == {"host": "h1", "scope": "all"}
+    assert target_args(LogScope.CLUSTER, "h1", "c1") == {"host": None, "scope": "all"}
+
+    with pytest.raises(ValueError):
+        target_args(99, "h1", "c1")
+
+
+def test_default_dump_path():
+    fixed_time = datetime(2026, 10, 11, 14, 30, 45)
+    ts = "20261011-143045"
+
+    p1 = default_dump_path("my-recipe", LogScope.CONTAINER, "spark-01", "my-cont", now=fixed_time)
+    assert p1 == f"./my-recipe-spark-01-my-cont-{ts}.log"
+
+    p2 = default_dump_path("my-recipe", LogScope.NODE, "spark-01", "my-cont", now=fixed_time)
+    assert p2 == f"./my-recipe-spark-01-{ts}.log"
+
+    p3 = default_dump_path("my-recipe", LogScope.CLUSTER, "spark-01", "my-cont", now=fixed_time)
+    assert p3 == f"./my-recipe-all-{ts}.log"
+
+    # Qualified registry recipe label and user@host: sanitized to safe filename without subdirectories
+    p_qual = default_dump_path("@official/qwen3", LogScope.CONTAINER, "user@h1", "c1", now=fixed_time)
+    assert p_qual == f"./official-qwen3-user-h1-c1-{ts}.log"
+    # Ensure no subdirectories in filename
+    assert "/" not in p_qual.removeprefix("./")
+
+
+# ---------------------------------------------------------------------------
+# Formatting: format_prefix & render_text
+# ---------------------------------------------------------------------------
+
+
+def test_format_prefix():
+    line = LogLine(host="h1", container="c1", text="msg", role="worker", rank=1)
+
+    # Multi host -> [host/role/rank]
+    assert format_prefix(line, multi_host=True, multi_source=True) == "[h1/worker/1]"
+
+    # Single host, multi source -> [role/rank]
+    assert format_prefix(line, multi_host=False, multi_source=True) == "[worker/1]"
+
+    # Neither -> empty
+    assert format_prefix(line, multi_host=False, multi_source=False) == ""
+
+    # Rank is None
+    line_no_rank = LogLine(host="h1", container="c1", text="msg", role="solo", rank=None)
+    assert format_prefix(line_no_rank, multi_host=True, multi_source=True) == "[h1/solo]"
+    assert format_prefix(line_no_rank, multi_host=False, multi_source=True) == "[solo]"
+
+
+def test_render_text_color_and_strip():
+    ansi_msg = "\x1b[32mSuccess\x1b[0m: details"
+
+    # Color on: Rich parsed ANSI
+    t_color = render_text(ansi_msg, color=True)
+    assert isinstance(t_color, Text)
+    assert "Success" in t_color.plain
+    assert len(t_color.spans) > 0  # ANSI styling present
+
+    # Color off: stripped plain text
+    t_plain = render_text(ansi_msg, color=False)
+    assert isinstance(t_plain, Text)
+    assert t_plain.plain == "Success: details"
+    assert len(t_plain.spans) == 0  # ANSI stripped
+
+
+def test_render_text_search_highlights():
+    line = LogLine(host="h1", container="c1", text="error in worker node", role="worker", rank=0)
+
+    # Regex highlight appears in both color and plain modes
+    t_col = render_text(line, color=True, pattern="error")
+    assert any(s.style == "reverse" for s in t_col.spans)
+
+    t_plain = render_text(line, color=False, pattern="error")
+    assert any(s.style == "reverse" for s in t_plain.spans)
+
+    # Regex pattern matching worker: prefix must NOT be highlighted, only body
+    t_pref = render_text(line, color=True, pattern="worker", multi_host=False, multi_source=True)
+    assert t_pref.plain == "[worker/0] error in worker node"
+    reverse_spans = [s for s in t_pref.spans if s.style == "reverse"]
+    assert len(reverse_spans) == 1
+    assert reverse_spans[0].start == 20
+    assert reverse_spans[0].end == 26
+    assert t_pref.plain[reverse_spans[0].start : reverse_spans[0].end] == "worker"
+
+    # Search on ANSI text: highlight matches parsed text
+    ansi_line = LogLine(host="h1", container="c1", text="\x1b[32mINFO\x1b[0m 10-11 start", role="worker", rank=0)
+    t_ansi = render_text(ansi_line, color=True, pattern="INFO 10")
+    rev_ansi = [s for s in t_ansi.spans if s.style == "reverse"]
+    assert len(rev_ansi) == 1
+    assert t_ansi.plain[rev_ansi[0].start : rev_ansi[0].end] == "INFO 10"
+
+
+def test_render_text_with_prefix():
+    line = LogLine(host="h1", container="c1", text="hello", role="worker", rank=0)
+    t = render_text(line, multi_host=True, multi_source=True)
+    assert t.plain.startswith("[h1/worker/0] ")
+    assert t.plain.endswith("hello")
+
+
+# ---------------------------------------------------------------------------
+# workload_rows
+# ---------------------------------------------------------------------------
+
+
+def test_workload_rows(monkeypatch):
+    # Empty
+    assert workload_rows(None)[0].key == "empty"
+    assert workload_rows(HostActivity(host="h1"))[0].key == "empty"
+
+    # Running workload with container details
+    wl = RunningWorkload(
+        cluster_id="sparkrun_abc",
+        recipe_name="qwen3-1.7b-vllm",
+        runtime_name="vllm",
+        ranks_on_host=2,
+        containers=(
+            ContainerDetail(name="sparkrun_abc_head", role="head", status="Up 5m", image="vllm:latest"),
+            ContainerDetail(name="sparkrun_abc_worker_0", role="worker", status="Up 5m", image="vllm:latest"),
+        ),
+    )
+    act = HostActivity(host="h1", workloads=(wl,))
+    rows = workload_rows(act)
+
+    assert len(rows) == 3
+    # Header row
+    assert rows[0].is_header is True
+    assert rows[0].key == "header:sparkrun_abc"
+    assert "sparkrun_abc" in rows[0].text
+    assert "×2" in rows[0].text
+    assert "recipe=" in rows[0].text
+
+    # Container rows
+    assert rows[1].is_header is False
+    assert rows[1].key == "sparkrun_abc:sparkrun_abc_head"
+    assert rows[1].container == "sparkrun_abc_head"
+    assert rows[1].role == "head"
+
+    assert rows[2].is_header is False
+    assert rows[2].key == "sparkrun_abc:sparkrun_abc_worker_0"
+    assert rows[2].container == "sparkrun_abc_worker_0"
+    assert rows[2].role == "worker"
+
+    # Real job metadata keys: recipe, runtime, model, tensor_parallel
+    def fake_load_job_metadata(cluster_id, cache_dir=None):
+        return {
+            "recipe": "@official/qwen3-30b-vllm",
+            "runtime": "vllm-distributed",
+            "model": "Qwen/Qwen3-30B",
+            "tensor_parallel": 4,
+        }
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.load_job_metadata", fake_load_job_metadata)
+
+    wl_meta = RunningWorkload(
+        cluster_id="sparkrun_meta",
+        ranks_on_host=4,
+        containers=(ContainerDetail(name="sparkrun_meta_0", role="node_0", status="Up", image="vllm"),),
+    )
+    act_meta = HostActivity(host="h1", workloads=(wl_meta,))
+    rows_meta = workload_rows(act_meta)
+    assert len(rows_meta) == 2
+    header_text = rows_meta[0].text
+    assert "recipe=[bold]@official/qwen3-30b-vllm[/bold]" in header_text
+    assert "model=Qwen/Qwen3-30B" in header_text
+    assert "runtime=vllm-distributed" in header_text
+    assert "tp=4" in header_text
+
+    # Solo workload with no containers: only header row produced, NO fake container row
+    wl_no_containers = RunningWorkload(
+        cluster_id="sparkrun_no_cont",
+        ranks_on_host=1,
+        containers=(),
+    )
+    act_no_cont = HostActivity(host="h1", workloads=(wl_no_containers,))
+    rows_no_cont = workload_rows(act_no_cont)
+    assert len(rows_no_cont) == 1
+    assert rows_no_cont[0].is_header is True
+    assert rows_no_cont[0].cluster_id == "sparkrun_no_cont"
+    assert rows_no_cont[0].key == "header:sparkrun_no_cont"
+
+
+# ---------------------------------------------------------------------------
+# LogBuffer: Paging Offsets, Interleaving, Eviction, Search
+# ---------------------------------------------------------------------------
+
+
+def test_log_buffer_append_and_prepend_skip_offsets():
+    buf = LogBuffer()
+    src1 = LogSource(host="h1", container="c1", role="solo", rank=0)
+    src2 = LogSource(host="h2", container="c2", role="solo", rank=1)
+
+    # Initial append: 3 lines for src1, 2 for src2
+    buf.append(LogLine(host="h1", container="c1", text="line 1", role="solo", rank=0))
+    buf.append(LogLine(host="h1", container="c1", text="line 2", role="solo", rank=0))
+    buf.append(LogLine(host="h2", container="c2", text="h2 line 1", role="solo", rank=1))
+    buf.append(LogLine(host="h1", container="c1", text="line 3", role="solo", rank=0))
+    buf.append(LogLine(host="h2", container="c2", text="h2 line 2", role="solo", rank=1))
+
+    assert buf.get_skip(src1) == 3
+    assert buf.get_skip(src2) == 2
+
+    # Prepend page of 2 lines for src1
+    page1 = [
+        LogLine(host="h1", container="c1", text="old line -2", role="solo", rank=0),
+        LogLine(host="h1", container="c1", text="old line -1", role="solo", rank=0),
+    ]
+    buf.prepend_page(src1, page1)
+    assert buf.get_skip(src1) == 5
+    assert buf.get_skip(src2) == 2
+
+    # Markers do not increment skip
+    buf.append(Marker("marker"))
+    assert buf.get_skip(src1) == 5
+    assert buf.get_skip(src2) == 2
+
+    # Interleaved live line append for src1
+    buf.append(LogLine(host="h1", container="c1", text="line 4", role="solo", rank=0))
+    assert buf.get_skip(src1) == 6
+    assert buf.get_skip(src2) == 2
+
+    # Prepend page with separator and exhausted=True
+    page_old = [
+        LogLine(host="h1", container="c1", text="first ever line 0", role="solo", rank=0),
+    ]
+    buf.prepend_page(src1, page_old, separator=START_OF_LOG_MARKER, exhausted=True)
+    assert buf[0] == START_OF_LOG_MARKER
+    assert buf[1].text == "first ever line 0"
+    assert buf.is_exhausted(src1) is True
+    assert buf.get_skip(src1) == 7  # 6 + 1 (LogLine only, not marker)
+
+
+def test_log_buffer_eviction_top_and_bottom():
+    buf = LogBuffer()
+    src1 = LogSource(host="h1", container="c1", role="solo", rank=0)
+    src2 = LogSource(host="h2", container="c2", role="solo", rank=1)
+
+    # Interleaved lines: 6 from src1, 4 from src2 (total 10)
+    # 0: src1, 1: src1, 2: src2, 3: src1, 4: src2, 5: src1, 6: src2, 7: src1, 8: src2, 9: src1
+    for i in range(10):
+        if i in (2, 4, 6, 8):
+            buf.append(LogLine(host="h2", container="c2", text=f"src2 line {i}", role="solo", rank=1))
+        else:
+            buf.append(LogLine(host="h1", container="c1", text=f"src1 line {i}", role="solo", rank=0))
+
+    assert len(buf) == 10
+    assert buf.get_skip(src1) == 6
+    assert buf.get_skip(src2) == 4
+
+    # Eviction with (top, bottom) viewport tuple:
+    # 1. Viewport (6, 8) -> user near bottom (dist_to_top=6, dist_to_bottom=9-8=1)
+    # Evict to cap 8: excess 2 lines dropped from top (lines 0 and 1, both src1)
+    evicted = buf.evict(cap=8, viewport=(6, 8))
+    assert evicted == 2
+    assert len(buf) == 8
+    assert buf.get_skip(src1) == 4  # 6 - 2 = 4
+    assert buf.get_skip(src2) == 4  # unchanged, no src2 lines were dropped
+    assert buf[0].container == "c2"  # line 2 was src2
+
+    # 2. Viewport (1, 3) -> user near top (dist_to_top=1, dist_to_bottom=7-3=4)
+    # Add 4 lines (making 12)
+    for i in range(10, 14):
+        buf.append(LogLine(host="h1", container="c1", text=f"src1 line {i}", role="solo", rank=0))
+    assert len(buf) == 12
+
+    # Evict to cap 8 with viewport (1, 3): excess 4 lines dropped from bottom (newest live lines)
+    evicted_bot = buf.evict(cap=8, viewport=(1, 3))
+    assert evicted_bot == 4
+    assert len(buf) == 8
+    assert buf.evicted_live == 4
+
+    # 3. Append after bottom eviction:
+    # While evicted_live > 0, appended live lines are counted and skip is incremented,
+    # but they are NOT added to entries (preventing an untracked gap in the buffer)
+    old_len = len(buf)
+    skip_src1_before = buf.get_skip(src1)
+    buf.append(LogLine(host="h1", container="c1", text="live after bottom evict", role="solo", rank=0))
+    assert len(buf) == old_len
+    assert buf.evicted_live == 5
+    assert buf.get_skip(src1) == skip_src1_before + 1
+
+    # 4. Exhausted reset on top eviction:
+    # Mark src exhausted, then prepend marker and lines, then evict from top
+    buf_ex = LogBuffer()
+    src = LogSource(host="h1", container="c1", role="solo", rank=0)
+    for i in range(6):
+        buf_ex.append(LogLine(host="h1", container="c1", text=f"l{i}", role="solo", rank=0))
+    buf_ex.prepend_page(
+        src,
+        [
+            LogLine(host="h1", container="c1", text="p1", role="solo", rank=0),
+            LogLine(host="h1", container="c1", text="p2", role="solo", rank=0),
+        ],
+        separator=Marker("marker"),
+        exhausted=True,
+    )
+    assert buf_ex.is_exhausted(src) is True
+    assert buf_ex.get_skip(src) == 8  # 6 + 2
+    # Evict to cap 6 near bottom (viewport=8) -> drops marker and p1, p2 (3 items)
+    ev = buf_ex.evict(cap=6, viewport=8)
+    assert ev == 3
+    assert len(buf_ex) == 6
+    # Skip drops from 8 to 6 (marker doesn't decrement skip, only 2 LogLines)
+    assert buf_ex.get_skip(src) == 6
+    # Exhausted flag is reset to False because start of log was evicted
+    assert buf_ex.is_exhausted(src) is False
+
+
+def _ll(text, container="c1"):
+    return LogLine(host="h1", container=container, text=text, role="solo", rank=0)
+
+
+def test_log_buffer_bottom_eviction_retains_terminal_markers_and_reload_tail():
+    buf = LogBuffer()
+    for i in range(5):
+        buf.append(_ll(f"line {i}"))
+    buf.append(LOADING_MARKER)
+    assert buf.stream_ended is False
+
+    # Bottom eviction drops the transient loading marker and line 4.
+    assert buf.evict(cap=4, viewport=0) == 2
+    assert buf.evicted_live == 1
+    assert buf.pending_markers == []  # transient marker not preserved
+
+    buf.append(STREAM_ENDED_MARKER)
+    assert buf.evicted_live == 1
+    assert buf.pending_markers == [STREAM_ENDED_MARKER]
+    assert buf.stream_ended is True
+    buf.append(_ll("live after"))
+    assert buf.evicted_live == 2
+
+    buf.search("line")
+    carried = buf.reload_tail([_ll("t3"), _ll("t4 line"), _ll("n1 line")])
+    assert carried == [STREAM_ENDED_MARKER]
+    assert buf.entries[:3] == [_ll("t3"), _ll("t4 line"), _ll("n1 line")]
+    assert buf.entries[-1] == STREAM_ENDED_MARKER
+    assert len(buf) == 4
+    assert buf.evicted_live == 0 and buf.evicted_history == 0
+    assert buf.pending_markers == []
+    assert buf.get_skip(("h1", "c1")) == 3
+    assert buf._base_offset == 0
+    assert buf.is_exhausted(("h1", "c1")) is False
+    assert buf.search_matches == [1, 2]
+    assert buf.stream_ended is True
+
+
+def test_log_buffer_pending_markers_chronological_and_not_deduped():
+    buf = LogBuffer()
+    for i in range(4):
+        buf.append(_ll(f"l{i}"))
+    buf.append(LOG_RESTARTED_MARKER)
+    buf.append(_ll("l4"))
+    buf.append(STREAM_ENDED_MARKER)
+    # entries: l0..l3, R, l4, S -> drop S first, then R
+    buf.evict(cap=6, viewport=0)
+    assert buf.pending_markers == [STREAM_ENDED_MARKER]
+    buf.evict(cap=4, viewport=0)
+    assert buf.pending_markers == [LOG_RESTARTED_MARKER, STREAM_ENDED_MARKER]
+
+    # Genuine repeated restarts are both kept
+    buf.append(LOG_RESTARTED_MARKER)
+    buf.append(LOG_RESTARTED_MARKER)
+    assert buf.pending_markers == [LOG_RESTARTED_MARKER, STREAM_ENDED_MARKER, LOG_RESTARTED_MARKER, LOG_RESTARTED_MARKER]
+
+
+def test_log_buffer_eviction_amortized_performance_and_invariants():
+    buf = LogBuffer()
+    assert isinstance(buf._entries, deque)
+    assert isinstance(buf._search_matches, deque)
+
+    # Populate 50,000 lines
+    for i in range(50000):
+        text = f"target line {i}" if i % 10 == 0 else f"other line {i}"
+        buf.append(LogLine(host="h1", container="c1", text=text, role="solo", rank=0))
+
+    assert len(buf) == 50000
+    # Search for target -> 5,000 matches
+    matches = buf.search("target")
+    assert len(matches) == 5000
+    assert matches[0] == 0
+    assert matches[1] == 10
+
+    # Defensive return: mutating result doesn't corrupt buffer
+    matches.append(999999)
+    assert 999999 not in buf.search_matches
+    defensive_matches = buf.search_matches
+    defensive_matches.append(888888)
+    assert 888888 not in buf.search_matches
+    assert buf.search_pattern is not None
+    assert buf.search_pattern.pattern == "target"
+
+    # Append 1,000 lines at cap=50000 with viewport at bottom
+    t0 = time.perf_counter()
+    for i in range(1000):
+        buf.append(LogLine(host="h1", container="c1", text=f"live target {50000 + i}", role="solo", rank=0))
+        buf.evict(cap=50000, viewport=50000)
+    elapsed = time.perf_counter() - t0
+
+    # Invariants check:
+    assert len(buf) == 50000
+    assert buf._base_offset == 1000
+    assert buf.evicted_history == 1000
+
+    # Matches check: the first 100 matches (which were at index < 1000) got evicted from the top,
+    # and 1,000 live target matches were appended at the bottom.
+    current_matches = buf.search_matches
+    assert len(current_matches) == 5000 - 100 + 1000
+    # Verify that the relative match coordinates in current_matches correctly match the lines in buf
+    for m_idx in (0, len(current_matches) // 2, -1):
+        line_idx = current_matches[m_idx]
+        assert "target" in buf[line_idx].text
+
+    # Performance check: 1000 append+evict operations at 50k cap must be O(1) amortized (< 0.2s)
+    assert elapsed < 0.2
+
+
+def test_log_buffer_search():
+    buf = LogBuffer()
+    buf.append(LogLine(host="h1", container="c1", text="first apple", role="solo", rank=0))
+    buf.append(LogLine(host="h1", container="c1", text="second banana", role="solo", rank=0))
+    buf.append(LogLine(host="h1", container="c1", text="third apple pie", role="solo", rank=0))
+
+    matches = buf.search("apple")
+    assert matches == [0, 2]
+    assert buf.search_matches == [0, 2]
+
+    # Append new line matching search pattern -> updates search index
+    buf.append(LogLine(host="h1", container="c1", text="fourth apple crumble", role="solo", rank=0))
+    assert buf.search_matches == [0, 2, 3]
+
+    # Prepend page shifts search indices
+    page = [LogLine(host="h1", container="c1", text="prepended apple", role="solo", rank=0)]
+    buf.prepend_page(LogSource("h1", "c1", "solo", 0), page)
+    assert buf.search_matches == [0, 1, 3, 4]
+
+    # Search on ANSI text: matches ANSI-stripped plain text, not escape codes
+    buf_ansi = LogBuffer()
+    buf_ansi.append(LogLine(host="h1", container="c1", text="\x1b[32mINFO\x1b[0m 10-11 start", role="solo", rank=0))
+    buf_ansi.append(LogLine(host="h1", container="c1", text="plain 32m line", role="solo", rank=0))
+    assert buf_ansi.search("INFO 10") == [0]
+    # "32m" only matches the literal text in line 1, not the ANSI escape code in line 0
+    assert buf_ansi.search("32m") == [1]
+
+    # Markers do not count as search matches
+    buf_ansi.append(Marker("— start of log —"))
+    assert buf_ansi.search("start of log") == []
+
+    # Invalid regex raises re.error and preserves previous search pattern and matches
+    buf_ansi.search("INFO 10")
+    assert buf_ansi.search_matches == [0]
+    with pytest.raises(re.error):
+        buf_ansi.search("(")
+    assert buf_ansi.search_matches == [0]
+
+
+# ---------------------------------------------------------------------------
+# ViewState: Scroll and Follow State Machine
+# ---------------------------------------------------------------------------
+
+
+def test_view_state_transitions():
+    vs = ViewState()
+    assert vs.is_following is True
+    assert vs.state == FollowState.FOLLOWING
+    assert vs.pending_lines == 0
+
+    # New lines while following do not accumulate pending
+    vs.on_new_line(5)
+    assert vs.pending_lines == 0
+
+    # Scroll away from bottom -> SCROLLED
+    vs.on_scroll(at_bottom=False)
+    assert vs.is_scrolled is True
+    assert vs.state == FollowState.SCROLLED
+
+    # New lines while scrolled accumulate
+    vs.on_new_line(3)
+    assert vs.pending_lines == 3
+    assert "+3" in vs.status_label
+
+    # Space while scrolled -> jumps to end and resumes following
+    jumped = vs.on_space(at_bottom=False)
+    assert jumped is True
+    assert vs.is_following is True
+    assert vs.state == FollowState.FOLLOWING
+    assert vs.pending_lines == 0
+
+    # Space while at bottom -> toggles pause
+    jumped = vs.on_space(at_bottom=True)
+    assert jumped is False
+    assert vs.is_paused is True
+    assert vs.state == FollowState.PAUSED
+
+    # Lines while paused accumulate
+    vs.on_new_line(2)
+    assert vs.pending_lines == 2
+
+    # Space again while paused -> resumes following and clears pending
+    jumped = vs.on_space(at_bottom=True)
+    assert jumped is False
+    assert vs.is_following is True
+    assert vs.state == FollowState.FOLLOWING
+    assert vs.pending_lines == 0
+
+
+# ---------------------------------------------------------------------------
+# SelectionList: Rule 0b Pilot App
+# ---------------------------------------------------------------------------
+
+
+class _SelectionListApp(App):
+    def __init__(self, *options, **kwargs):
+        super().__init__(**kwargs)
+        self.options = options
+        self.selected_index = None
+
+    def compose(self) -> ComposeResult:
+        yield SelectionList(*self.options, id="test-list")
+
+    def on_option_list_option_selected(self, event):
+        self.selected_index = event.option_index
+
+
+def test_selection_list_first_down_reveals_and_moves():
+    async def _run():
+        app = _SelectionListApp("Row 0", "Row 1", "Row 2")
+        async with app.run_test() as pilot:
+            sl = app.query_one(SelectionList)
+            assert sl.has_class("-concealed")
+            assert not sl.revealed
+            assert sl.highlighted == 0
+
+            # Rendered appearance while concealed: row 0 looks identical to unhighlighted row 1
+            strip0 = sl.render_line(0)
+            strip1 = sl.render_line(1)
+            styles0 = [seg.style for seg in strip0 if seg.text.strip()]
+            styles1 = [seg.style for seg in strip1 if seg.text.strip()]
+            assert styles0[0].bgcolor == styles1[0].bgcolor
+            assert styles0[0].color == styles1[0].color
+            assert not styles0[0].bold
+
+            # Press down: reveals highlight AND moves to row 1
+            await pilot.press("down")
+            assert not sl.has_class("-concealed")
+            assert sl.revealed
+            assert sl.highlighted == 1
+
+            # Rendered appearance after reveal: highlighted row 1 renders bold with highlighted bgcolor
+            strip1_rev = sl.render_line(1)
+            styles1_rev = [seg.style for seg in strip1_rev if seg.text.strip()]
+            assert styles1_rev[0].bold is True
+            assert styles1_rev[0].bgcolor != styles0[0].bgcolor
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_selection_list_first_enter_selects_default_row():
+    async def _run():
+        app = _SelectionListApp("Default 0", "Row 1", "Row 2")
+        async with app.run_test() as pilot:
+            sl = app.query_one(SelectionList)
+            assert sl.has_class("-concealed")
+            assert not sl.revealed
+            assert sl.highlighted == 0
+
+            # Press enter: reveals and selects row 0
+            await pilot.press("enter")
+            assert app.selected_index == 0
+            assert sl.revealed
+            assert not sl.has_class("-concealed")
+
+    import asyncio
+
+    asyncio.run(_run())
+
+
+def test_selection_list_programmatic_reveal_and_conceal():
+    sl = SelectionList("A", "B", "C")
+    assert not sl.revealed
+    assert sl.has_class("-concealed")
+    sl.highlighted = 2
+
+    sl.reveal()
+    assert sl.revealed
+    assert not sl.has_class("-concealed")
+    assert sl.highlighted == 2
+
+    sl.conceal()
+    assert not sl.revealed
+    assert sl.has_class("-concealed")
+    assert sl.highlighted == 2
+
+
+# ---------------------------------------------------------------------------
+# Fake LogTarget & Test Apps
+# ---------------------------------------------------------------------------
+
+
+class FakeLogTarget:
+    def __init__(
+        self,
+        sources: Sequence[LogSource] | None = None,
+        lines: Sequence[LogLine] | None = None,
+        history: dict[tuple[str, str], list[LogLine]] | None = None,
+        windowing_supported: bool = True,
+        error_on_follow: Exception | None = None,
+        error_on_page: Exception | None = None,
+        error_on_dump: Exception | None = None,
+    ) -> None:
+        self.sources = tuple(sources or [LogSource(host="h1", container="c1", role="head", rank=0)])
+        self._lines = list(lines or [])
+        self._history = history or {}
+        self.windowing_supported = windowing_supported
+        self.error_on_follow = error_on_follow
+        self.error_on_page = error_on_page
+        self.error_on_dump = error_on_dump
+        self.follow_cancel: threading.Event | None = None
+        self.page_calls: list[dict[str, Any]] = []
+        self.dump_calls: list[dict[str, Any]] = []
+
+    def follow(self, tail: int | None = 200, cancel: threading.Event | None = None) -> Iterator[LogLine]:
+        self.follow_cancel = cancel
+        if self.error_on_follow:
+            raise self.error_on_follow
+        for line in self._lines:
+            if cancel and cancel.is_set():
+                break
+            yield line
+
+    def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+        self.page_calls.append({"source": source, "skip": skip, "count": count})
+        if self.error_on_page:
+            raise self.error_on_page
+        key = (source.host, source.container)
+        hist = self._history.get(key, [])
+        if skip >= len(hist):
+            return []
+        start = max(0, len(hist) - skip - count)
+        end = len(hist) - skip
+        return hist[start:end]
+
+    def read(self, *, follow: bool = False, tail: int | None = 200, cancel: threading.Event | None = None) -> Iterator[LogLine]:
+        if cancel and cancel.is_set():
+            return
+        yield from self._lines[-tail:] if tail else self._lines
+
+    def dump(self, path: str, *, overwrite: bool = False, cancel: threading.Event | None = None) -> int:
+        import os
+
+        self.dump_calls.append({"path": path, "overwrite": overwrite})
+        if self.error_on_dump:
+            raise self.error_on_dump
+        if os.path.exists(path) and not overwrite:
+            raise SparkrunError(f"Target file {path!r} already exists")
+        partial = f"{path}.partial"
+        with open(partial, "w", encoding="utf-8") as f:
+            for line in self._lines:
+                if cancel and cancel.is_set():
+                    try:
+                        os.unlink(partial)
+                    except OSError:
+                        pass
+                    return 0
+                f.write(line.text + "\n")
+        os.replace(partial, path)
+        return len(self._lines)
+
+
+class _LogPaneTestApp(App):
+    def __init__(self, pane: LogPane, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.pane = pane
+        self.closed = False
+        self.dump_request = None
+
+    def compose(self) -> ComposeResult:
+        yield self.pane
+
+    def on_log_pane_closed(self, event: LogPane.Closed) -> None:
+        self.closed = True
+
+    def on_log_pane_request_dump(self, event: LogPane.RequestDump) -> None:
+        self.dump_request = event
+
+
+class _WorkloadListTestApp(App):
+    def __init__(self, wl: WorkloadList, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.wl = wl
+        self.opened_log = None
+        self.dump_request = None
+        self.backed_to_hosts = False
+
+    def compose(self) -> ComposeResult:
+        yield self.wl
+
+    def on_workload_list_open_log(self, event: WorkloadList.OpenLog) -> None:
+        self.opened_log = (event.host, event.cluster_id, event.container)
+
+    def on_workload_list_request_dump(self, event: WorkloadList.RequestDump) -> None:
+        self.dump_request = (event.host, event.cluster_id, event.container, event.scope)
+
+    def on_workload_list_back_to_hosts(self, event: WorkloadList.BackToHosts) -> None:
+        self.backed_to_hosts = True
+
+
+# ---------------------------------------------------------------------------
+# LogView & LogPane Pilot Tests
+# ---------------------------------------------------------------------------
+
+
+def test_log_view_widget():
+    import asyncio
+
+    async def _run():
+        buf = LogBuffer()
+        for i in range(5):
+            buf.append(LogLine(host="h1", container="c1", role="head", rank=0, text=f"\x1b[32mline {i}\x1b[0m"))
+
+        view = LogView(buf)
+
+        class ViewApp(App):
+            def compose(self) -> ComposeResult:
+                yield view
+
+        app = ViewApp()
+        async with app.run_test():
+            assert view.virtual_size.height == 5
+            assert view.is_at_bottom is True
+
+            # Line rendering with color=True preserves ANSI styling
+            strip0_color = view.render_line(0)
+            assert any(seg.style.color and seg.style.color.number == 2 for seg in strip0_color)
+
+            # Toggle color=False strips ANSI
+            view.color = False
+            view.refresh()
+            strip0_nocolor = view.render_line(0)
+            assert not any(seg.style.color and seg.style.color.number == 2 for seg in strip0_nocolor)
+
+            # Search highlighting
+            view.search_pattern = "line 0"
+            view.highlight = True
+            view.refresh()
+            strip0_hl = view.render_line(0)
+            rev_segs = [seg for seg in strip0_hl if seg.style.reverse]
+            assert len(rev_segs) > 0
+
+            view.highlight = False
+            view.refresh()
+            strip0_nohl = view.render_line(0)
+            rev_segs_off = [seg for seg in strip0_nohl if seg.style.reverse]
+            assert len(rev_segs_off) == 0
+
+            # Toggle wrap
+            view.wrap = True
+            view.refresh_buffer()
+            assert view.wrap is True
+            assert len(view._wrap_map) >= 5
+
+            # Incremental append
+            new_line = LogLine(host="h1", container="c1", role="head", rank=0, text="line 5 appended")
+            buf.append(new_line)
+            view.on_entry_appended(new_line)
+            assert len(view._wrap_map) >= 6
+
+            # Scroll to line
+            view.scroll_to_line(2)
+            assert view.scroll_offset[1] <= len(view._wrap_map)
+
+    asyncio.run(_run())
+
+
+def test_log_pane_follow_and_controls(monkeypatch):
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", role="head", rank=0, text=f"step {i}: status ok") for i in range(10)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid123456789",
+            container="c1",
+            scope=LogScope.CONTAINER,
+            summary=ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            # Wait for follow worker to finish initial lines
+            await pilot.pause(0.1)
+
+            # 10 lines + stream ended marker
+            assert len(pane.buffer) == 11
+            assert pane.buffer.stream_ended is True
+
+            # Title
+            title = pane.query_one("#log-title", Static).content
+            assert "cid12345" in str(title)
+            assert "c1" in str(title)
+
+            # Status bar
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "following" in status
+            assert "1 container c1" in status
+            assert "color on" in status
+            assert "highlight on" in status
+            assert "wrap off" in status
+
+            # Color toggle 'c'
+            await pilot.press("c")
+            assert pane.log_view.color is False
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "color off" in status
+
+            # Highlight toggle 'h'
+            await pilot.press("h")
+            assert pane.log_view.highlight is False
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "highlight off" in status
+
+            # Wrap toggle 'l'
+            await pilot.press("l")
+            assert pane.log_view.wrap is True
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "wrap on" in status
+
+            # Search with '/'
+            await pilot.press("slash")
+            search_inp = pane.query_one("#log-search")
+            assert search_inp.display is True
+            assert search_inp.has_focus is True
+
+            # Type pattern and press enter
+            search_inp.value = "step 5"
+            await pilot.press("enter")
+            assert search_inp.display is False
+            assert pane.buffer.search_pattern is not None
+            assert len(pane.buffer.search_matches) == 1
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "1 matches in loaded lines" in status
+
+            # Jump with 'n' and 'b'
+            await pilot.press("n")
+            await pilot.press("b")
+
+            # Invalid regex handling
+            await pilot.press("slash")
+            search_inp.value = "[unclosed("
+            await pilot.press("enter")
+            assert search_inp.display is True
+            assert "Invalid regex:" in search_inp.value
+            # Previous search matches preserved
+            assert len(pane.buffer.search_matches) == 1
+
+            # Escape closes search input and clears
+            await pilot.press("escape")
+            assert search_inp.display is False
+
+            # Space toggles pause
+            await pilot.press("space")
+            assert pane.view_state.is_paused is True
+            assert "paused" in str(pane.query_one("#log-status", Static).content)
+
+            # Space again resumes following
+            await pilot.press("space")
+            assert pane.view_state.is_following is True
+            assert "following" in str(pane.query_one("#log-status", Static).content)
+
+            # 'd' opens dump modal
+            await pilot.press("d")
+            assert app.dump_request is not None
+            assert app.dump_request.container == "c1"
+            assert app.dump_request.scope == LogScope.CONTAINER
+
+            # 'escape' closes log pane and sets cancel event
+            assert not pane._cancel.is_set()
+            await pilot.press("escape")
+            assert app.closed is True
+            assert pane._cancel.is_set()
+
+    asyncio.run(_run())
+
+
+def test_log_pane_scope_switching(monkeypatch):
+    import asyncio
+
+    opened_targets: list[dict[str, Any]] = []
+
+    def fake_open(*args, **kwargs):
+        t = FakeLogTarget(lines=[LogLine(host="h1", container="c1", role="head", rank=0, text="hello")])
+        opened_targets.append(kwargs)
+        return t
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", fake_open)
+
+    async def _run():
+        summary = ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            scope=LogScope.CONTAINER,
+            summary=summary,
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            assert len(opened_targets) == 1
+            assert opened_targets[0]["container"] == "c1"
+
+            # 1 -> 2: non-equivalent scope switch
+            old_cancel = pane._cancel
+            await pilot.press("2")
+            await pilot.pause(0.1)
+            assert old_cancel.is_set()  # previous follow worker cancelled
+            assert pane.scope == LogScope.NODE
+            assert len(opened_targets) == 2
+            assert "container" not in opened_targets[1]
+            assert opened_targets[1]["host"] == "h1"
+
+            # Pressing '2' again (current scope): rule 0a least astonishment, no reload
+            await pilot.press("2")
+            await pilot.pause(0.05)
+            assert len(opened_targets) == 2
+
+            # Now test equivalent scope switch:
+            pane.scope_summary = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+            pane.scope = LogScope.CONTAINER
+            # 1 -> 2 when node_containers == 1 is equivalent
+            await pilot.press("2")
+            await pilot.pause(0.05)
+            # Scope updated in UI, but no new target opened
+            assert pane.scope == LogScope.NODE
+            assert len(opened_targets) == 2
+            assert "2 node h1" in str(pane.query_one("#log-status", Static).content)
+
+    asyncio.run(_run())
+
+
+def test_log_pane_paging_and_windowing(monkeypatch):
+    import asyncio
+
+    src1 = LogSource(host="h1", container="c1", role="head", rank=0)
+    src2 = LogSource(host="h1", container="c2", role="worker", rank=1)
+    hist = {
+        ("h1", "c1"): [LogLine(host="h1", container="c1", role="head", rank=0, text=f"c1 history {i}") for i in range(600)],
+        ("h1", "c2"): [LogLine(host="h1", container="c2", role="worker", rank=1, text=f"c2 history {i}") for i in range(600)],
+    }
+    tail_lines = [
+        LogLine(host="h1", container="c1", role="head", rank=0, text="c1 tail 0"),
+        LogLine(host="h1", container="c2", role="worker", rank=1, text="c2 tail 0"),
+    ]
+    target = FakeLogTarget(sources=[src1, src2], lines=tail_lines, history=hist)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            scope=LogScope.NODE,
+            summary=ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            initial_count = len(pane.buffer)
+
+            # Trigger page fetch via NearTop
+            pane._trigger_page_fetch()
+            await pilot.pause(0.1)
+
+            # Page calls were made in reverse rank order (src2 then src1)
+            assert len(target.page_calls) == 2
+            assert target.page_calls[0]["source"].rank == 1
+            assert target.page_calls[1]["source"].rank == 0
+
+            # Buffer has prepended lines and separators
+            assert len(pane.buffer) > initial_count
+
+            # Exhaustion test: fetch remaining lines
+            pane._trigger_page_fetch()
+            await pilot.pause(0.1)
+
+            # Both sources now returned < 500 lines so they are exhausted
+            assert pane.buffer.is_exhausted(src1)
+            assert pane.buffer.is_exhausted(src2)
+            # START_OF_LOG_MARKER prepended
+            assert START_OF_LOG_MARKER in pane.buffer._entries
+
+            # Triggering near top again when exhausted does not make further page calls
+            calls_before = len(target.page_calls)
+            pane._trigger_page_fetch()
+            await pilot.pause(0.05)
+            assert len(target.page_calls) == calls_before
+
+    asyncio.run(_run())
+
+
+def test_log_pane_windowing_unsupported_and_error(monkeypatch):
+    import asyncio
+
+    target_no_win = FakeLogTarget(lines=[LogLine(host="h1", container="c1", role="head", rank=0, text="line 0")], windowing_supported=False)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target_no_win)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            scope=LogScope.CONTAINER,
+            summary=ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            pane._trigger_page_fetch()
+            await pilot.pause(0.05)
+            # OLDER_UNAVAILABLE_MARKER displayed and page never called
+            assert OLDER_UNAVAILABLE_MARKER in pane.buffer._entries
+            assert len(target_no_win.page_calls) == 0
+
+    asyncio.run(_run())
+
+
+def test_log_pane_error_handling(monkeypatch):
+    import asyncio
+
+    target_err = FakeLogTarget(error_on_follow=SparkrunError("Host connection refused"))
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target_err)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            scope=LogScope.CONTAINER,
+            summary=ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            # Red error marker in buffer
+            assert any("Host connection refused" in str(e) for e in pane.buffer._entries)
+
+    asyncio.run(_run())
+
+
+def test_log_pane_space_tail_reload(monkeypatch):
+    import asyncio
+
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", role="head", rank=0, text=f"line {i}") for i in range(20)])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            scope=LogScope.CONTAINER,
+            summary=ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            # Simulate bottom eviction
+            pane.buffer.evicted_live = 5
+            # Space triggers reload_tail
+            await pilot.press("space")
+            await pilot.pause(0.1)
+            assert pane.buffer.evicted_live == 0
+            assert pane.view_state.is_following is True
+
+    asyncio.run(_run())
+
+
+def test_workload_list_pilot():
+    import asyncio
+
+    rows = [
+        WorkloadRow(key="header:cid1", text="cid1", is_header=True, cluster_id="cid1"),
+        WorkloadRow(key="cid1:c1", text="  c1", is_header=False, cluster_id="cid1", container="c1"),
+        WorkloadRow(key="cid1:c2", text="  c2", is_header=False, cluster_id="cid1", container="c2"),
+    ]
+    wl = WorkloadList(host="h1", rows=rows)
+    app = _WorkloadListTestApp(wl)
+
+    async def _run():
+        async with app.run_test() as pilot:
+            assert wl.highlighted == 1  # first container row highlighted by default
+            assert wl.has_class("-concealed")
+
+            # First down reveals and moves to row 2 (second container)
+            await pilot.press("down")
+            assert wl.revealed is True
+            assert wl.highlighted == 2
+
+            # Enter selects container
+            await pilot.press("enter")
+            assert app.opened_log == ("h1", "cid1", "c2")
+
+            # 'd' requests dump
+            await pilot.press("d")
+            assert app.dump_request == ("h1", "cid1", "c2", LogScope.CONTAINER)
+
+            # 'escape' requests back to hosts
+            await pilot.press("escape")
+            assert app.backed_to_hosts is True
+
+            # set_rows preserves highlighted key
+            new_rows = [
+                WorkloadRow(key="header:cid1", text="cid1", is_header=True, cluster_id="cid1"),
+                WorkloadRow(key="cid1:c2", text="  c2 (updated)", is_header=False, cluster_id="cid1", container="c2"),
+            ]
+            wl.set_rows(new_rows, host="h1")
+            assert wl.highlighted == 1
+            assert wl._rows[1].key == "cid1:c2"
+
+            # When container disappears, highlight moves to nearest selectable row
+            wl.highlighted = 1
+            disappeared_rows = [
+                WorkloadRow(key="header:cid1", text="cid1", is_header=True, cluster_id="cid1"),
+                WorkloadRow(key="cid1:c0", text="  c0", is_header=False, cluster_id="cid1", container="c0"),
+                WorkloadRow(key="cid1:c3", text="  c3", is_header=False, cluster_id="cid1", container="c3"),
+            ]
+            wl.set_rows(disappeared_rows, host="h1")
+            # Old index was 1, nearest selectable is index 1 (c0)
+            assert wl.highlighted == 1
+            assert wl._rows[1].key == "cid1:c0"
+
+    asyncio.run(_run())
+
+
+def test_log_pane_inflight_page_scope_switch(monkeypatch):
+    """Scope switch mid-fetch resets _loading_page, cancels page worker, and paging still works."""
+    import asyncio
+
+    page_started = threading.Event()
+    page_proceed = threading.Event()
+
+    class BlockingPageTarget(FakeLogTarget):
+        def page(self, source, *, skip, count=500):
+            page_started.set()
+            page_proceed.wait(timeout=2.0)
+            return super().page(source, skip=skip, count=count)
+
+    src1 = LogSource(host="h1", container="c1", role="head", rank=0)
+    hist1 = {("h1", "c1"): [LogLine(host="h1", container="c1", text=f"h1 {i}") for i in range(100)]}
+    hist2 = {("h1", "c1"): [LogLine(host="h1", container="c1", text=f"cluster {i}") for i in range(100)]}
+
+    target1 = BlockingPageTarget(sources=[src1], lines=[LogLine(host="h1", container="c1", text="tail 1")], history=hist1)
+    target2 = FakeLogTarget(sources=[src1], lines=[LogLine(host="h1", container="c1", text="tail 2")], history=hist2)
+
+    opened = []
+
+    def fake_open(*a, **kw):
+        if kw.get("scope") == "head" or kw.get("container") == "c1":
+            opened.append("target1")
+            return target1
+        opened.append("target2")
+        return target2
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", fake_open)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            scope=LogScope.CONTAINER,
+            summary=ScopeSummary(node_containers=1, cluster_containers=2, cluster_hosts=2),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            assert pane.target is target1
+
+            # Set an active search pattern
+            pane.buffer.search("tail")
+            assert pane.buffer.search_pattern is not None
+
+            # Start a page fetch that blocks
+            pane._trigger_page_fetch()
+            await pilot.pause(0.05)
+            assert pane._loading_page is True
+            assert page_started.is_set()
+
+            # Switch scope while page is in flight
+            await pilot.press("3")
+            await pilot.pause(0.1)
+
+            # Unblock the old page worker
+            page_proceed.set()
+            await pilot.pause(0.1)
+
+            # _loading_page reset, new scope opened, search pattern carried over
+            assert pane._loading_page is False
+            assert pane.scope == LogScope.CLUSTER
+            assert pane.target is target2
+            assert pane.buffer.search_pattern == re.compile("tail")
+
+            # Subsequent page fetch works in new scope
+            calls_before = len(target2.page_calls)
+            pane._trigger_page_fetch()
+            await pilot.pause(0.1)
+            assert len(target2.page_calls) > calls_before
+            assert pane._loading_page is False
+
+    asyncio.run(_run())
+
+
+def test_log_pane_wrapped_search_navigation_and_input(monkeypatch):
+    """Wrapped rows do not cause search jumps to skip match entries."""
+    import asyncio
+
+    # Create lines where each line is 100 characters long
+    # On an 80-column terminal, each line wraps to 2 virtual rows
+    lines = []
+    for i in range(40):
+        marker = "MATCH" if i in (2, 6, 12, 18, 25) else "NOPE"
+        lines.append(LogLine(host="h1", container="c1", text=f"entry {i} {marker} " + ("x" * 80)))
+
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            # Toggle wrap on
+            await pilot.press("l")
+            assert pane.log_view.wrap is True
+
+            # Open search input and type pattern
+            await pilot.press("slash")
+            search_inp = pane.query_one("#log-search", Input)
+            assert search_inp.display is True
+            assert search_inp.has_focus is True
+
+            # Verify typing characters (including priority key characters like 'n', 'c')
+            await pilot.press("M", "A", "T", "C", "H")
+            assert search_inp.value == "MATCH"
+            await pilot.press("enter")
+
+            assert search_inp.display is False
+            # Scroll to top to test forward navigation
+            pane.log_view.scroll_to(y=0, animate=False)
+            pane._set_current_match(None)
+            await pilot.pause(0.1)
+
+            expected_matches = list(pane.buffer.search_matches)
+
+            # Press 'n' sequentially: must visit each match in order
+            visited_entries = []
+            for _ in range(len(expected_matches)):
+                await pilot.press("n")
+                curr_vy = int(pane.log_view.scroll_offset[1])
+                curr_entry = pane.log_view.virtual_row_to_entry(curr_vy)
+                visited_entries.append(curr_entry)
+
+            assert visited_entries == expected_matches
+
+            # Press 'b' sequentially: must visit in reverse
+            rev_visited = []
+            for _ in range(len(expected_matches)):
+                await pilot.press("b")
+                curr_vy = int(pane.log_view.scroll_offset[1])
+                curr_entry = pane.log_view.virtual_row_to_entry(curr_vy)
+                rev_visited.append(curr_entry)
+
+            assert rev_visited == [
+                expected_matches[-2],
+                expected_matches[-3],
+                expected_matches[-4],
+                expected_matches[0],
+                expected_matches[-1],
+            ]
+
+    asyncio.run(_run())
+
+
+def test_log_pane_wrap_eviction_no_phantom_rows(monkeypatch):
+    """Buffer eviction in wrap mode leaves no phantom rows in _wrap_map."""
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i} " + ("longtext " * 12)) for i in range(30)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        pane.CAP = 10  # Cap at 10 lines
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            # Enable wrapping
+            pane.log_view.wrap = True
+            await pilot.pause(0.15)
+
+            # Buffer has exactly 10 entries
+            assert len(pane.buffer) == 10
+            # Virtual size and live wrap map match the 10 entries exactly
+            origin = pane.log_view._wrap_origin
+            base = pane.log_view._wrap_base
+            live_wrap = pane.log_view._wrap_map[origin:]
+            assert len(live_wrap) == pane.log_view.virtual_size.height
+            # Every live entry index in _wrap_map must be in range 0..9
+            entry_indices = {e_idx - base for e_idx, _ in live_wrap}
+            assert entry_indices == set(range(10))
+
+            # Render each line: must succeed with no IndexError
+            for y in range(len(live_wrap)):
+                strip = pane.log_view.render_line(y)
+                assert strip is not None
+
+    asyncio.run(_run())
+
+
+def test_log_pane_stale_generation_callbacks_ignored(monkeypatch):
+    """Callbacks tagged with a stale generation are discarded."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="initial")])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            initial_count = len(pane.buffer)
+            current_gen = pane._generation
+
+            # Stale line callback
+            stale_line = LogLine(host="h1", container="c1", text="stale line")
+            pane._on_line(stale_line, gen=current_gen - 1)
+            assert len(pane.buffer) == initial_count
+
+            # Stale target ready callback
+            bogus_target = FakeLogTarget(lines=[])
+            pane._on_target_ready(bogus_target, gen=current_gen - 1)
+            assert pane.target is not bogus_target
+
+            # Stale page success callback
+            pane._on_page_success([], bogus_target, gen=current_gen - 1)
+            assert len(pane.buffer) == initial_count
+
+    asyncio.run(_run())
+
+
+def test_log_pane_wrapped_page_anchoring(monkeypatch):
+    """When wrapped lines are prepended, scroll_y is anchored by the virtual row delta."""
+    import asyncio
+
+    # Tail has 20 lines (each 1 row)
+    tail = [LogLine(host="h1", container="c1", text=f"tail {i}") for i in range(20)]
+    # History has 100 lines that wrap to 3 virtual rows each (width 40, length 100)
+    hist_lines = [LogLine(host="h1", container="c1", text=f"page {i} " + ("y" * 90)) for i in range(100)]
+    target = FakeLogTarget(
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+        lines=tail,
+        history={("h1", "c1"): hist_lines},
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(40, 20)) as pilot:
+            await pilot.pause(0.1)
+            pane.log_view.wrap = True
+            pane.log_view.refresh_buffer()
+
+            # Scroll to virtual row 2
+            pane.log_view.scroll_to(y=2, animate=False)
+            assert pane.log_view.scroll_y == 2
+
+            # Fetch page
+            pane._trigger_page_fetch()
+            await pilot.pause(0.15)
+
+            # History lines prepended; verify scroll_y was shifted to anchor
+            assert pane.log_view.scroll_y > 2
+            # Verify the entry at the viewport top is still the same line ("tail 2")
+            # 80 older lines + START_OF_LOG_MARKER were prepended, so original entry 2 is now at index 83
+            anchor_entry = pane.log_view.virtual_row_to_entry(int(pane.log_view.scroll_y))
+            assert anchor_entry == 83
+            assert pane.buffer[anchor_entry].text == "tail 2"
+
+    asyncio.run(_run())
+
+
+def test_log_pane_pause_and_stream_end(monkeypatch):
+    """Pause accumulates pending lines; stream end marker appended."""
+    import asyncio
+
+    class StreamingTarget(FakeLogTarget):
+        def follow(self, tail=200, cancel=None):
+            yield LogLine(host="h1", container="c1", text="line 0")
+            yield LogLine(host="h1", container="c1", text="line 1")
+
+    target = StreamingTarget()
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            assert pane.view_state.is_following is True
+
+            # Pause via space
+            await pilot.press("space")
+            assert pane.view_state.is_paused is True
+
+            # Deliver new line while paused
+            pane._on_line(LogLine(host="h1", container="c1", text="line 2"), gen=pane._generation)
+            assert pane.view_state.pending_lines == 1
+            assert "paused (+1)" in str(pane.query_one("#log-status", Static).content)
+
+            # Stream ended while paused
+            pane._on_stream_ended(gen=pane._generation)
+            assert STREAM_ENDED_MARKER in pane.buffer._entries
+
+            # Unpause via space -> resumes following
+            await pilot.press("space")
+            assert pane.view_state.is_following is True
+            assert pane.view_state.pending_lines == 0
+
+    asyncio.run(_run())
+
+
+def test_log_pane_search_last_screen_and_following_wraparound(monkeypatch):
+    """Search matches in the last screenful can be traversed with 'n'/'b' and wrap around."""
+    import asyncio
+
+    # 40 lines; matches at lines 6, 36, 38, 39
+    lines = []
+    for i in range(40):
+        marker = "TARGET" if i in (6, 36, 38, 39) else "other"
+        lines.append(LogLine(host="h1", container="c1", text=f"line {i} {marker}"))
+
+    target = FakeLogTarget(lines=lines, windowing_supported=False)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            for _ in range(40):
+                if len([e for e in pane.buffer._entries if isinstance(e, LogLine)]) >= 40:
+                    break
+                await pilot.pause(0.05)
+            await pilot.pause(0.05)
+
+            # In default following state, user is at the bottom (lines ~20..39)
+            assert pane.view_state.is_following is True
+            assert pane.log_view.is_at_bottom is True
+
+            # Open search and submit
+            await pilot.press("slash")
+            search_inp = pane.query_one("#log-search", Input)
+            search_inp.value = "TARGET"
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+
+            assert len(pane.buffer.search_matches) == 4
+            # While at bottom, first match in/after viewport was selected (e.g. 36)
+            assert pane.log_view.current_match_entry in (36, 38, 39)
+
+            # Press 'n' to step to 38
+            await pilot.press("n")
+            assert pane.log_view.current_match_entry == 38
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "match 3/4" in status
+
+            # Press 'n' to step to 39
+            await pilot.press("n")
+            assert pane.log_view.current_match_entry == 39
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "match 4/4" in status
+
+            # Press 'n': wraps around back to match 6 at the top!
+            await pilot.press("n")
+            # NearTop prepends OLDER_UNAVAILABLE_MARKER when scrolling to 6, shifting indices by 1
+            shifted_matches = list(pane.buffer.search_matches)
+            assert pane.log_view.current_match_entry == shifted_matches[0]
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "match 1/4" in status
+
+            # Press 'b': wraps backwards to the last match!
+            await pilot.press("b")
+            assert pane.log_view.current_match_entry == shifted_matches[-1]
+            assert pane.log_view.is_at_bottom is True
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "match 4/4" in status
+
+            # Press 'b': steps to the second-to-last match
+            await pilot.press("b")
+            assert pane.log_view.current_match_entry == shifted_matches[-2]
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "match 3/4" in status
+
+    asyncio.run(_run())
+
+
+def test_log_pane_paging_enforces_cap_from_bottom(monkeypatch):
+    """Paging older lines enforces the CAP by dropping newest lines from bottom."""
+    import asyncio
+
+    tail = [LogLine(host="h1", container="c1", text=f"tail {i}") for i in range(10)]
+    hist = {("h1", "c1"): [LogLine(host="h1", container="c1", text=f"hist {i}") for i in range(100)]}
+    target = FakeLogTarget(
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+        lines=tail,
+        history=hist,
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        pane.CAP = 10
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            # Buffer initially has 10 lines + stream ended marker
+            assert len([e for e in pane.buffer._entries if isinstance(e, LogLine)]) == 10
+            assert pane.buffer.evicted_live == 0
+
+            # Trigger first page fetch (fetches 500 lines or up to history length 100)
+            pane._trigger_page_fetch()
+            await pilot.pause(0.15)
+
+            # Cap must be strictly respected!
+            assert len(pane.buffer) <= 10
+            # Bottom lines must have been evicted into evicted_live
+            assert pane.buffer.evicted_live > 0
+
+            # Trigger another page fetch (if any remains)
+            pane._trigger_page_fetch()
+            await pilot.pause(0.15)
+            assert len(pane.buffer) <= 10
+
+            # Pressing space when evicted_live > 0 reloads tail
+            await pilot.press("space")
+            await pilot.pause(0.15)
+            assert pane.buffer.evicted_live == 0
+            assert pane.view_state.is_following is True
+
+    asyncio.run(_run())
+
+
+def test_trim_page_drift_uses_snapshot_counts_not_text():
+    """Seam trim is proven by skip growth only; repeated text is not overlap."""
+    heartbeats = [LogLine(host="h1", container="c1", text="heartbeat") for _ in range(10)]
+    # No live growth: keep the whole page, including identical lines.
+    assert _trim_page_drift(heartbeats, loaded_skip=15, snap_skip=15) == heartbeats
+    assert _trim_page_drift(heartbeats, loaded_skip=15, snap_skip=20) == heartbeats
+
+    unique = [LogLine(host="h1", container="c1", text=f"line {i}") for i in range(10)]
+    # 3 live lines arrived: drop the last 3 regardless of text.
+    trimmed = _trim_page_drift(unique, loaded_skip=53, snap_skip=50)
+    assert [e.text for e in trimmed] == [f"line {i}" for i in range(7)]
+
+    # Growth larger than the page drops everything (still no text matching).
+    assert _trim_page_drift(unique, loaded_skip=80, snap_skip=50) == []
+
+
+def test_log_pane_paging_repeated_lines_no_drift_keeps_history(monkeypatch):
+    """Identical lines at the seam with no growth are kept, not treated as overlap."""
+    import asyncio
+
+    class UnifiedTarget(FakeLogTarget):
+        def __init__(self, log_list: list[LogLine], **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.full_log = log_list
+
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            self.page_calls.append({"source": source, "skip": skip, "count": count})
+            total = len(self.full_log)
+            start = max(0, total - skip - count)
+            end = max(0, total - skip)
+            return list(self.full_log[start:end])
+
+    # 15 unique + 10 identical heartbeats + 10 unique = 35. Tail is last 15:
+    # 5 heartbeats + 10 unique. Page (skip=15) is 15 unique + 5 heartbeats.
+    full = [LogLine(host="h1", container="c1", text=f"unique {i}") for i in range(15)]
+    full.extend(LogLine(host="h1", container="c1", text="heartbeat") for _ in range(10))
+    full.extend(LogLine(host="h1", container="c1", text=f"tail {i}") for i in range(10))
+    target = UnifiedTarget(
+        log_list=full,
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+        lines=full[-15:],
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            for _ in range(40):
+                n_lines = len([e for e in pane.buffer._entries if isinstance(e, LogLine)])
+                if n_lines >= 15:
+                    break
+                await pilot.pause(0.05)
+            assert len([e for e in pane.buffer._entries if isinstance(e, LogLine)]) == 15
+
+            pane._trigger_page_fetch()
+            await pilot.pause(0.15)
+
+            texts = [e.text for e in pane.buffer._entries if isinstance(e, LogLine)]
+            assert texts.count("heartbeat") == 10
+            assert len(texts) == 35
+            assert texts[:15] == [f"unique {i}" for i in range(15)]
+            assert texts[-10:] == [f"tail {i}" for i in range(10)]
+
+    asyncio.run(_run())
+
+
+def test_log_pane_paging_live_growth_trims_by_skip_count(monkeypatch):
+    """Live lines during an in-flight page trim only the proven growth count."""
+    import asyncio
+
+    class BlockingGrowTarget(FakeLogTarget):
+        def __init__(self, log_list: list[LogLine], **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.full_log = log_list
+            self.page_started = threading.Event()
+            self.page_continue = threading.Event()
+
+        def before_page(self) -> None:
+            self.page_started.set()
+            self.page_continue.wait(timeout=2)
+
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            self.page_calls.append({"source": source, "skip": skip, "count": count})
+            total = len(self.full_log)
+            start = max(0, total - skip - count)
+            end = max(0, total - skip)
+            return list(self.full_log[start:end])
+
+    original = [LogLine(host="h1", container="c1", text=f"log line {i}") for i in range(100)]
+    target = BlockingGrowTarget(
+        log_list=list(original),
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+        lines=original[50:],
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            for _ in range(50):
+                n_lines = len([e for e in pane.buffer._entries if isinstance(e, LogLine)])
+                if n_lines >= 50:
+                    break
+                await pilot.pause(0.05)
+            assert len([e for e in pane.buffer._entries if isinstance(e, LogLine)]) == 50
+
+            pane._trigger_page_fetch()
+            for _ in range(40):
+                if target.page_started.is_set():
+                    break
+                await pilot.pause(0.05)
+            assert target.page_started.is_set()
+
+            growth = [LogLine(host="h1", container="c1", text=f"growth {i}") for i in range(7)]
+            target.full_log.extend(growth)
+            for line in growth:
+                pane._on_line(line, gen=pane._generation)
+
+            target.page_continue.set()
+            for _ in range(40):
+                if not pane._loading_page:
+                    break
+                await pilot.pause(0.05)
+
+            texts = [e.text for e in pane.buffer._entries if isinstance(e, LogLine)]
+            # 7 live lines proved the overlap; unique history 0..99 plus growth 0..6.
+            assert texts.count("log line 50") == 1
+            assert "log line 0" in texts
+            assert "log line 99" in texts
+            assert texts[-7:] == [f"growth {i}" for i in range(7)]
+            assert len(texts) == 107
+
+    asyncio.run(_run())
+
+
+def test_log_pane_paging_post_read_growth_keeps_all_history_and_skip(monkeypatch):
+    """Lines delivered after remote read completes do not cause data loss; skip equals buffer span."""
+    import asyncio
+
+    class PostReadGrowTarget(FakeLogTarget):
+        def __init__(self, log_list: list[LogLine], **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.full_log = log_list
+            self.read_done = threading.Event()
+            self.release = threading.Event()
+
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            self.page_calls.append({"source": source, "skip": skip, "count": count})
+            total = len(self.full_log)
+            start = max(0, total - skip - count)
+            end = max(0, total - skip)
+            result = list(self.full_log[start:end])
+            self.read_done.set()
+            self.release.wait(timeout=5)
+            return result
+
+    original = [LogLine(host="h1", container="c1", text=f"log line {i}") for i in range(100)]
+    source = LogSource(host="h1", container="c1", role="head", rank=0)
+    target = PostReadGrowTarget(
+        log_list=list(original),
+        sources=[source],
+        lines=original[50:],
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            for _ in range(50):
+                n_lines = len([e for e in pane.buffer._entries if isinstance(e, LogLine)])
+                if n_lines >= 50 and pane.target is not None:
+                    break
+                await pilot.pause(0.05)
+            assert len([e for e in pane.buffer._entries if isinstance(e, LogLine)]) == 50
+            assert pane.buffer.get_skip(source) == 50
+
+            pane._trigger_page_fetch()
+            for _ in range(40):
+                if target.read_done.is_set():
+                    break
+                await pilot.pause(0.05)
+            assert target.read_done.is_set()
+
+            # 7 lines are written and delivered *after* the read completed:
+            growth = [LogLine(host="h1", container="c1", text=f"live line {i}") for i in range(100, 107)]
+            target.full_log.extend(growth)
+            for line in growth:
+                pane._on_line(line, gen=pane._generation)
+
+            target.release.set()
+            for _ in range(40):
+                if not pane._loading_page:
+                    break
+                await pilot.pause(0.05)
+
+            texts = [e.text for e in pane.buffer._entries if isinstance(e, LogLine)]
+            # All 107 lines must be present: original 0..99 and live 100..106
+            assert len(texts) == 107
+            assert texts == [f"log line {i}" for i in range(100)] + [f"live line {i}" for i in range(100, 107)]
+            # Skip must equal the buffer span
+            assert pane.buffer.get_skip(source) == 107
+            assert pane.buffer.get_skip(source) == len(texts)
+
+    asyncio.run(_run())
+
+
+def test_log_pane_paging_multi_source_drift_independence(monkeypatch):
+    """In multi-source scopes, growth during earlier source reads does not drop lines for later sources."""
+    import asyncio
+
+    s0 = LogSource(host="h1", container="c0", role="head", rank=0)
+    s1 = LogSource(host="h1", container="c1", role="worker", rank=1)
+
+    class MultiSourceTarget(FakeLogTarget):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.logs = {
+                (s0.host, s0.container): [LogLine(host="h1", container="c0", text=f"s0 line {i}") for i in range(100)],
+                (s1.host, s1.container): [LogLine(host="h1", container="c1", text=f"s1 line {i}") for i in range(100)],
+            }
+            self.s1_read_done = threading.Event()
+            self.s1_release = threading.Event()
+
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            self.page_calls.append({"source": source, "skip": skip, "count": count})
+            key = (source.host, source.container)
+            full = self.logs[key]
+            total = len(full)
+            start = max(0, total - skip - count)
+            end = max(0, total - skip)
+            result = list(full[start:end])
+            if source.container == "c1":
+                self.s1_read_done.set()
+                self.s1_release.wait(timeout=5)
+            return result
+
+    initial_lines = []
+    # 50 lines for each source
+    for i in range(50, 100):
+        initial_lines.append(LogLine(host="h1", container="c0", text=f"s0 line {i}"))
+        initial_lines.append(LogLine(host="h1", container="c1", text=f"s1 line {i}"))
+
+    target = MultiSourceTarget(
+        sources=[s0, s1],
+        lines=initial_lines,
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c0", scope=LogScope.NODE)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            for _ in range(50):
+                n_lines = len([e for e in pane.buffer._entries if isinstance(e, LogLine)])
+                if n_lines >= 100 and pane.target is not None:
+                    break
+                await pilot.pause(0.05)
+            assert pane.buffer.get_skip(s0) == 50
+            assert pane.buffer.get_skip(s1) == 50
+
+            pane._trigger_page_fetch()
+            for _ in range(40):
+                if target.s1_read_done.is_set():
+                    break
+                await pilot.pause(0.05)
+            assert target.s1_read_done.is_set()
+
+            # s1 has read lines 0..49.
+            # Now simulate live lines arriving for both s0 and s1:
+            growth_s0 = [LogLine(host="h1", container="c0", text=f"s0 live {i}") for i in range(100, 107)]
+            growth_s1 = [LogLine(host="h1", container="c1", text=f"s1 live {i}") for i in range(100, 107)]
+            target.logs[(s0.host, s0.container)].extend(growth_s0)
+            target.logs[(s1.host, s1.container)].extend(growth_s1)
+            for line in growth_s0 + growth_s1:
+                pane._on_line(line, gen=pane._generation)
+
+            target.s1_release.set()
+            for _ in range(40):
+                if not pane._loading_page:
+                    break
+                await pilot.pause(0.05)
+
+            s0_lines = [e.text for e in pane.buffer._entries if isinstance(e, LogLine) and e.container == "c0"]
+            s1_lines = [e.text for e in pane.buffer._entries if isinstance(e, LogLine) and e.container == "c1"]
+
+            assert len(s0_lines) == 107
+            assert len(s1_lines) == 107
+            assert s0_lines == [f"s0 line {i}" for i in range(100)] + [f"s0 live {i}" for i in range(100, 107)]
+            assert s1_lines == [f"s1 line {i}" for i in range(100)] + [f"s1 live {i}" for i in range(100, 107)]
+
+            assert pane.buffer.get_skip(s0) == 107
+            assert pane.buffer.get_skip(s1) == 107
+
+    asyncio.run(_run())
+
+
+def test_log_pane_no_restart_marker_from_mixed_clocks(monkeypatch):
+    """File-mode pages with ISO text / mismatched timestamps do not insert a restart marker."""
+    import asyncio
+
+    class TimestampPageTarget(FakeLogTarget):
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            # Real file-mode page reads have timestamp=None; ISO in the text is remote UTC.
+            return [
+                LogLine(
+                    host="h1",
+                    container="c1",
+                    text="2026-10-11T08:00:00.000 older line",
+                    timestamp=None,
+                )
+            ]
+
+    tail = [
+        LogLine(
+            host="h1",
+            container="c1",
+            text="followed line",
+            timestamp=2000.0,  # control-machine arrival time
+        )
+    ]
+    target = TimestampPageTarget(
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+        lines=tail,
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            pane._trigger_page_fetch()
+            await pilot.pause(0.15)
+            assert LOG_RESTARTED_MARKER not in pane.buffer._entries
+            texts = [e.text for e in pane.buffer._entries if isinstance(e, LogLine)]
+            assert "2026-10-11T08:00:00.000 older line" in texts
+            assert "followed line" in texts
+
+    asyncio.run(_run())
+
+
+def test_log_pane_search_cursor_survives_page_prepend(monkeypatch):
+    """The current match stays on the same line after an older page is prepended."""
+    import asyncio
+
+    class UnifiedTarget(FakeLogTarget):
+        def __init__(self, log_list: list[LogLine], **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.full_log = log_list
+
+        def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
+            self.page_calls.append({"source": source, "skip": skip, "count": count})
+            total = len(self.full_log)
+            start = max(0, total - skip - count)
+            end = max(0, total - skip)
+            return list(self.full_log[start:end])
+
+    # 800 lines so history is larger than one 500-line page. Matches every 50.
+    full = [LogLine(host="h1", container="c1", text=f"{'err' if i % 50 == 0 else 'ok'} {i}") for i in range(800)]
+    target = UnifiedTarget(
+        log_list=full,
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+        lines=full[-200:],
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            for _ in range(50):
+                n_lines = len([e for e in pane.buffer._entries if isinstance(e, LogLine)])
+                if n_lines >= 200:
+                    break
+                await pilot.pause(0.05)
+            assert len([e for e in pane.buffer._entries if isinstance(e, LogLine)]) >= 200
+
+            pane.buffer.search("err")
+            pane.log_view.search_pattern = pane.buffer.search_pattern
+            pane._set_current_match(len(pane.buffer.search_matches) - 1)
+            before_idx = pane._current_match_idx
+            before_entry = pane.log_view.current_match_entry
+            before_text = pane.buffer[before_entry].text
+            assert before_text.startswith("err ")
+            before_count = len(pane.buffer.search_matches)
+
+            pane._trigger_page_fetch()
+            for _ in range(40):
+                if not pane._loading_page:
+                    break
+                await pilot.pause(0.05)
+
+            after_entry = pane.log_view.current_match_entry
+            assert after_entry is not None
+            assert pane.buffer[after_entry].text == before_text
+            after_count = len(pane.buffer.search_matches)
+            assert after_count > before_count
+            assert pane._current_match_idx == before_idx + (after_count - before_count)
+            status = str(pane.query_one("#log-status", Static).content)
+            assert f"match {pane._current_match_idx + 1}/{after_count}" in status
+
+    asyncio.run(_run())
+
+
+def test_log_pane_search_cursor_survives_or_clears_on_top_eviction(monkeypatch):
+    """Top eviction shifts the current match, or clears it when that line is gone."""
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", text=f"{'err' if i in (5, 15) else 'ok'} {i}") for i in range(20)]
+    target = FakeLogTarget(lines=lines, windowing_supported=False)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        pane.CAP = 20
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            pane.buffer.search("err")
+            pane.log_view.search_pattern = pane.buffer.search_pattern
+
+            # Cursor on err 5, then live lines at the cap evict it from the top.
+            pane._set_current_match(0)
+            assert pane.buffer[pane.log_view.current_match_entry].text == "err 5"
+            pane.log_view.scroll_to_end()
+            for i in range(20, 40):
+                pane.log_view.scroll_to_end()
+                pane._on_line(LogLine(host="h1", container="c1", text=f"ok {i}"), gen=pane._generation)
+            assert pane.log_view.current_match_entry is None
+            assert pane._current_match_idx is None
+            assert pane._current_match_abs is None
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "(match " not in status
+            assert "err 5" not in [e.text for e in pane.buffer._entries if isinstance(e, LogLine)]
+
+    asyncio.run(_run())
+
+    async def _run_kept():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        pane.CAP = 20
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.1)
+            pane.buffer.search("err")
+            pane.log_view.search_pattern = pane.buffer.search_pattern
+            pane._set_current_match(1)
+            assert pane.buffer[pane.log_view.current_match_entry].text == "err 15"
+            pane.log_view.scroll_to_end()
+            for i in range(20, 28):
+                pane.log_view.scroll_to_end()
+                pane._on_line(LogLine(host="h1", container="c1", text=f"ok {i}"), gen=pane._generation)
+            after_entry = pane.log_view.current_match_entry
+            assert after_entry is not None
+            assert pane.buffer[after_entry].text == "err 15"
+            assert pane._current_match_idx == 0
+            status = str(pane.query_one("#log-status", Static).content)
+            assert "match 1/" in status
+
+    asyncio.run(_run_kept())
+
+
+# ---------------------------------------------------------------------------
+# DumpLogScreen Pilot Tests
+# ---------------------------------------------------------------------------
+
+
+class _DumpModalTestApp(App):
+    def __init__(self, screen: DumpLogScreen, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.modal = screen
+        self.result = None
+
+    def on_mount(self) -> None:
+        self.push_screen(self.modal, callback=self._on_result)
+
+    def _on_result(self, res: Any) -> None:
+        self.result = res
+
+
+def test_dump_modal_single_distinct_scope(tmp_path, monkeypatch):
+    import asyncio
+    import os
+
+    summary = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="line 1")])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    out_file = str(tmp_path / "dump.log")
+
+    async def _run():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            # Scope list is omitted when only one scope
+            assert len(screen.query("#dump-scope-list")) == 0
+            assert screen.query_one("#dump-path-input", Input).has_focus
+
+            # Enter dumps to target file
+            screen.query_one("#dump-path-input", Input).value = out_file
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert os.path.exists(out_file)
+            assert app.result == out_file
+            assert len(target.dump_calls) == 1
+            assert target.dump_calls[0]["overwrite"] is False
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_distinct_scopes_navigation_and_selection(tmp_path, monkeypatch):
+    import asyncio
+
+    summary = ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="line 1")])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            default_scope=LogScope.CONTAINER,
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            assert scope_list.has_focus
+            # Concealed highlight on default row (0)
+            assert scope_list.has_class("-concealed")
+            assert scope_list.highlighted == 0
+
+            # First down reveals highlight and moves it to row 1 (Node)
+            await pilot.press("down")
+            assert not scope_list.has_class("-concealed")
+            assert scope_list.highlighted == 1
+
+            # Enter selects Node (scope 2) and focuses path input
+            await pilot.press("enter")
+            assert screen.chosen_scope == LogScope.NODE
+            path_input = screen.query_one("#dump-path-input", Input)
+            assert path_input.has_focus
+            assert "-h1-" in path_input.value
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_scope_equivalence_drops_redundant_scope():
+    import asyncio
+
+    # 2 containers on h1, none on other hosts -> cluster scope (3) is equivalent to node (2)
+    summary = ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)
+    assert distinct_scopes(summary) == [LogScope.CONTAINER, LogScope.NODE]
+
+    async def _run():
+        # Opened in scope 3 (Cluster), canonical is scope 2 (Node)
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            default_scope=LogScope.CLUSTER,
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            # Scope 3 is omitted, 2 options remain
+            assert len(scope_list._options) == 2
+            # Default row is 1 (Node)
+            assert scope_list.highlighted == 1
+
+            # Single enter without arrow selects default row 1 (Node)
+            await pilot.press("enter")
+            assert screen.chosen_scope == LogScope.NODE
+            assert screen.query_one("#dump-path-input", Input).has_focus
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_path_regeneration_unless_edited():
+    import asyncio
+
+    summary = ScopeSummary(node_containers=2, cluster_containers=3, cluster_hosts=2)
+
+    async def _run():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            path_input = screen.query_one("#dump-path-input", Input)
+            init_val = path_input.value
+            assert "-c1-" in init_val
+
+            # Select Node (scope 2) -> path regenerates
+            await pilot.press("down")  # move to 1 (Node)
+            await pilot.press("enter")
+            assert path_input.value != init_val
+            assert "-h1-" in path_input.value and "-c1-" not in path_input.value
+
+            # User edits path
+            path_input.value = "my_custom_dump.log"
+            await pilot.pause(0.05)
+            assert screen._path_edited is True
+
+            # Escape in input goes back to scope list
+            await pilot.press("escape")
+            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            assert scope_list.has_focus
+
+            # Select Cluster (scope 3)
+            await pilot.press("down")  # move to 2 (Cluster)
+            await pilot.press("enter")
+            # Custom path is preserved, not overwritten by default
+            assert path_input.value == "my_custom_dump.log"
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_overwrite_list_cancel_and_overwrite(tmp_path, monkeypatch):
+    import asyncio
+
+    exist_file = tmp_path / "exist.log"
+    exist_file.write_text("old content\n")
+
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="new line")])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    summary = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+
+    # 1. Single enter cancels
+    async def _run_cancel():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            screen.query_one("#dump-path-input", Input).value = str(exist_file)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+
+            overwrite_list = screen.query_one("#dump-overwrite-list", SelectionList)
+            assert overwrite_list.display is True
+            assert overwrite_list.has_class("-concealed")
+            assert overwrite_list.highlighted == 1  # Cancel is default row
+            assert overwrite_list.has_focus
+
+            # Editing path after overwrite prompt hides overwrite list
+            path_input = screen.query_one("#dump-path-input", Input)
+            path_input.value = str(exist_file) + "_changed"
+            await pilot.pause(0.05)
+            assert overwrite_list.display is False
+            assert screen._pending_dump_path is None
+
+            # Reset back to existing file to test cancel
+            path_input.value = str(exist_file)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert overwrite_list.display is True
+            assert overwrite_list.has_focus
+
+            # Single enter cancels
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert app.result is None
+            assert exist_file.read_text() == "old content\n"
+
+    asyncio.run(_run_cancel())
+
+    # 2. up + enter overwrites
+    async def _run_overwrite():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            screen.query_one("#dump-path-input", Input).value = str(exist_file)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+
+            overwrite_list = screen.query_one("#dump-overwrite-list", SelectionList)
+            assert overwrite_list.display is True
+
+            # up moves from Cancel (1) to Overwrite (0)
+            await pilot.press("up")
+            assert not overwrite_list.has_class("-concealed")
+            assert overwrite_list.highlighted == 0
+
+            # enter confirms overwrite
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert app.result == str(exist_file)
+            assert exist_file.read_text() == "new line\n"
+            assert target.dump_calls[-1]["overwrite"] is True
+
+    asyncio.run(_run_overwrite())
+
+
+def test_dump_modal_directory_error_display():
+    import asyncio
+
+    summary = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+
+    async def _run():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            screen.query_one("#dump-path-input", Input).value = "/nonexistent_dir_12345/foo.log"
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+
+            err = str(screen.query_one("#dump-error", Static).content)
+            assert "Directory '/nonexistent_dir_12345' does not exist" in err
+            assert app.result is None
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_escape_during_dump_cancels_immediately(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    dump_calls = []
+
+    class _BlockingTarget:
+        def dump(self, path, overwrite=False, cancel=None):
+            dump_calls.append((path, cancel))
+            while cancel and not cancel.is_set():
+                time.sleep(0.02)
+            return 0
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _BlockingTarget())
+
+    # Multi-container summary so that scope list exists
+    summary = ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)
+
+    async def _run():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            # Advance from scope list to path input
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            inp = screen.query_one("#dump-path-input", Input)
+            assert inp.has_focus
+
+            out_file = tmp_path / "out.log"
+            inp.value = str(out_file)
+            await pilot.pause(0.05)
+
+            # Start dump
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert screen._dumping is True
+            assert len(dump_calls) == 1
+
+            # Escape during active dump cancels immediately and dismisses modal
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert screen._cancel.is_set()
+            assert app.result is None
+            assert not isinstance(app.screen, DumpLogScreen)
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_late_success_after_escape_is_ignored(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    class _Target:
+        def dump(self, path, overwrite=False, cancel=None):
+            return 1
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _Target())
+    summary = ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)
+
+    async def _run():
+        screen = DumpLogScreen(host="h1", cluster_id="cid1", container="c1", summary=summary)
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            path_input = screen.query_one("#dump-path-input", Input)
+            path_input.value = str(tmp_path / "out.log")
+
+            queued = threading.Event()
+            success_callbacks = []
+            notifications = []
+            original_call_from_thread = app.call_from_thread
+
+            def defer_success(callback, *args, **kwargs):
+                if getattr(callback, "__name__", "") == "_on_success":
+                    success_callbacks.append((callback, args, kwargs))
+                    queued.set()
+                else:
+                    original_call_from_thread(callback, *args, **kwargs)
+
+            monkeypatch.setattr(app, "call_from_thread", defer_success)
+            monkeypatch.setattr(app, "notify", lambda message, *a, **kw: notifications.append(message))
+
+            await pilot.press("enter")
+            for _ in range(50):
+                if queued.is_set():
+                    break
+                await pilot.pause(0.02)
+            assert queued.is_set()
+            assert len(success_callbacks) == 1
+
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            assert screen._cancel.is_set()
+            assert app.result is None
+            assert not isinstance(app.screen, DumpLogScreen)
+
+            callback, args, kwargs = success_callbacks[0]
+            callback(*args, **kwargs)
+            assert notifications == []
+            assert app.result is None
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_blocks_second_submit_and_scope_change_while_dumping(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    dump_calls = []
+
+    class _BlockingTarget:
+        def dump(self, path, overwrite=False, cancel=None):
+            dump_calls.append((path, cancel))
+            while cancel and not cancel.is_set():
+                time.sleep(0.02)
+            return 0
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _BlockingTarget())
+
+    summary = ScopeSummary(node_containers=2, cluster_containers=2, cluster_hosts=1)
+
+    async def _run():
+        screen = DumpLogScreen(
+            host="h1",
+            cluster_id="cid1",
+            container="c1",
+            summary=summary,
+        )
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            # Advance from scope list to path input
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            inp = screen.query_one("#dump-path-input", Input)
+
+            out_file = tmp_path / "out.log"
+            inp.value = str(out_file)
+            await pilot.pause(0.05)
+
+            # Start dump
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert screen._dumping is True
+            assert len(dump_calls) == 1
+            assert inp.disabled is True
+            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            assert scope_list.disabled is True
+
+            # Second submit while dumping is blocked
+            await pilot.press("enter")
+            screen.on_input_submitted(Input.Submitted(inp, inp.value))
+            await pilot.pause(0.05)
+            assert len(dump_calls) == 1
+
+            # Clean up dump
+            screen._cancel.set()
+            await pilot.pause(0.05)
+
+    asyncio.run(_run())

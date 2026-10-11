@@ -851,8 +851,9 @@ def cluster_monitor(ctx, hosts, hosts_file, cluster_name, dry_run, interval, sim
     Streams host_monitor.sh on each host via SSH and displays a refreshing
     table with key metrics.  By default launches an interactive Textual TUI;
     pass --simple for plain-text output, or --json for newline-delimited JSON
-    suitable for piping into external automation.  Press q (TUI) or Ctrl-C
-    to stop.
+    suitable for piping into external automation.  In the TUI, select a node
+    with Enter to view and stream workload logs; press d to dump logs.  Press
+    q (TUI) or Ctrl-C to stop.
 
     Examples:
 
@@ -926,7 +927,14 @@ def cluster_monitor(ctx, hosts, hosts_file, cluster_name, dry_run, interval, sim
                 sctx=_get_context(ctx),
             )
             try:
-                app = ClusterMonitorApp(session, host_list, interval=interval, cache_dir=str(config.cache_dir))
+                app = ClusterMonitorApp(
+                    session,
+                    host_list,
+                    interval=interval,
+                    cache_dir=str(config.cache_dir),
+                    cluster=hctx.cluster_name,
+                    sctx=_get_context(ctx),
+                )
                 app.run()
             finally:
                 session.close()

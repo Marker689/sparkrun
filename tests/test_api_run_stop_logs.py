@@ -679,6 +679,482 @@ def test_logs_precheck_exists_cmd_failure_preserves_metadata(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# open_log_target and LogTarget (Step 2)
+# --------------------------------------------------------------------------
+
+
+def test_open_log_target_exposed():
+    assert hasattr(api, "open_log_target") and callable(api.open_log_target)
+    assert hasattr(api, "LogTarget")
+
+
+def test_open_log_target_host_filtering_and_precheck(tmp_path):
+    """open_log_target(cid, host='h2') keeps only h2 sources, uses SCOPE_ALL,
+    and runs precheck on the filtered list so a dead head on h1 doesn't block."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1", "h2"], cache_dir=str(tmp_path))
+
+    # Snapshot: h1 head dead, h2 worker alive
+    snapshot = _make_status(
+        {
+            "h1": [],
+            "h2": [(cluster_id, [cluster_id + "_node_1"])],
+        }
+    )
+    with patch.object(DockerExecutor, "query_status", return_value=snapshot):
+        target = api.open_log_target(cluster_id, hosts=("h1", "h2"), host="h2", cache_dir=str(tmp_path))
+        assert isinstance(target, api.LogTarget)
+        assert len(target.sources) == 1
+        assert target.sources[0].host == "h2"
+        assert target.sources[0].container == cluster_id + "_node_1"
+        assert target.windowing_supported is True
+
+
+def test_open_log_target_container_filtering(tmp_path):
+    """open_log_target with container filter keeps only the named container."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1", "h2"], cache_dir=str(tmp_path))
+
+    snapshot = _make_status(
+        {
+            "h1": [(cluster_id, [cluster_id + "_node_0"])],
+            "h2": [(cluster_id, [cluster_id + "_node_1"])],
+        }
+    )
+    with patch.object(DockerExecutor, "query_status", return_value=snapshot):
+        target = api.open_log_target(cluster_id, hosts=("h1", "h2"), host="h2", container=cluster_id + "_node_1", cache_dir=str(tmp_path))
+        assert len(target.sources) == 1
+        assert target.sources[0].container == cluster_id + "_node_1"
+
+
+def test_open_log_target_cluster_scope_all(tmp_path):
+    """open_log_target with host=None and scope=all returns all sources."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1", "h2"], cache_dir=str(tmp_path))
+
+    snapshot = _make_status(
+        {
+            "h1": [(cluster_id, [cluster_id + "_node_0"])],
+            "h2": [(cluster_id, [cluster_id + "_node_1"])],
+        }
+    )
+    with patch.object(DockerExecutor, "query_status", return_value=snapshot):
+        target = api.open_log_target(cluster_id, hosts=("h1", "h2"), host=None, scope="all", cache_dir=str(tmp_path))
+        assert len(target.sources) == 2
+        hosts = [s.host for s in target.sources]
+        assert "h1" in hosts and "h2" in hosts
+
+
+def test_open_log_target_host_normalization(tmp_path):
+    """Host matching handles user@ prefix and case insensitivity."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path))
+
+    snapshot = _make_status({"h1": [(cluster_id, [cluster_id + "_solo"])]})
+    with patch.object(DockerExecutor, "query_status", return_value=snapshot):
+        target = api.open_log_target(cluster_id, hosts=("h1",), host="ubuntu@H1", cache_dir=str(tmp_path))
+        assert len(target.sources) == 1
+        assert target.sources[0].host == "h1"
+
+
+def test_open_log_target_unmatched_host_raises_job_not_found(tmp_path):
+    """Host filter matching no sources raises JobNotFound."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path))
+
+    with pytest.raises(api.JobNotFound, match="No log sources found"):
+        api.open_log_target(cluster_id, hosts=("h1",), host="h999", cache_dir=str(tmp_path))
+
+
+def test_open_log_target_unmatched_container_raises_job_not_found(tmp_path):
+    """Container filter matching no sources raises JobNotFound."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path))
+
+    with pytest.raises(api.JobNotFound, match="No log source found for container"):
+        api.open_log_target(cluster_id, hosts=("h1",), container="nonexistent", cache_dir=str(tmp_path))
+
+
+def test_open_log_target_windowing_unsupported():
+    """Executor without read_logs_window_cmd returns windowing_supported=False."""
+    from sparkrun.core.log_source import LogSource
+    from sparkrun.orchestration.executors._base import Executor
+
+    class BaseExec(Executor):
+        def logs_cmd(self, container_name, follow=False, tail=None):
+            return f"docker logs {container_name}"
+
+    target = api.LogTarget(
+        cluster_id="cid",
+        sources=[LogSource(host="h1", container="c0")],
+        windowing_supported=False,
+        _executor=BaseExec(),
+    )
+    assert target.windowing_supported is False
+    # page returns empty list on unsupported executor
+    assert target.page(target.sources[0], skip=0, count=100) == []
+
+
+def test_log_target_follow():
+    """target.follow() streams from read_log_sources with tail and cancel."""
+    from sparkrun.core.log_source import LogLine, LogSource
+
+    source = LogSource(host="h1", container="c0")
+    dummy_line = LogLine(host="h1", container="c0", text="hello", role="node_0", rank=0, timestamp=0.0)
+
+    target = api.LogTarget(
+        cluster_id="cid",
+        sources=[source],
+        windowing_supported=True,
+        _executor=DockerExecutor(),
+    )
+    with patch("sparkrun.orchestration.logs.read_log_sources", return_value=iter([dummy_line])) as mock_read:
+        lines = list(target.follow(tail=150))
+        assert lines == [dummy_line]
+        mock_read.assert_called_once_with(
+            target._executor,
+            target.sources,
+            follow=True,
+            tail=150,
+            ssh_kwargs=None,
+        )
+
+
+def test_log_target_page():
+    """target.page(source, skip=10, count=5) calls read_log_window."""
+    from sparkrun.core.log_source import LogLine, LogSource
+
+    source = LogSource(host="h1", container="c0")
+    lines = [LogLine(host="h1", container="c0", text="paged", role="node_0", rank=0, timestamp=0.0)]
+
+    target = api.LogTarget(
+        cluster_id="cid",
+        sources=[source],
+        windowing_supported=True,
+        _executor=DockerExecutor(),
+    )
+    with patch("sparkrun.orchestration.logs.read_log_window", return_value=lines) as mock_window:
+        result = target.page(source, skip=10, count=5)
+        assert result == lines
+        mock_window.assert_called_once_with(
+            target._executor,
+            source,
+            skip=10,
+            count=5,
+            ssh_kwargs=None,
+        )
+
+
+class _RealShellDumpExecutor(DockerExecutor):
+    def read_logs_cmd(self, source, *, follow=False, tail=None):
+        if source.role == "head":
+            return "printf 'head line 1\\nhead line 2\\n'"
+        elif source.role == "worker":
+            return "printf 'worker line 1\\nworker line 2\\n'"
+        elif source.role == "slow":
+            # Emits lines with delay so mid-stream cancellation can be tested against real processes
+            return 'for i in $(seq 1 100); do echo "slow line $i"; sleep 0.05; done'
+        return "printf 'default line\\n'"
+
+
+def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
+    """target.dump streams lines in rank order, emits correct headers, and prefixes lines appropriately."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE, SCOPE_ALL
+
+    worker_src = LogSource(host="localhost", container="c1", role="worker", rank=1, mode=MODE_FILE)
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+
+    executor = _RealShellDumpExecutor()
+
+    # 1. Cluster scope (sources given out of order: [worker, head])
+    target_cluster = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[worker_src, head_src],
+        windowing_supported=True,
+        _executor=executor,
+        _scope=SCOPE_ALL,
+    )
+    out_cluster = tmp_path / "cluster.log"
+    count = target_cluster.dump(str(out_cluster))
+    assert count == 4
+    assert out_cluster.exists()
+    assert not (tmp_path / "cluster.log.partial").exists()
+
+    content_cluster = out_cluster.read_text(encoding="utf-8").splitlines()
+    assert content_cluster[0] == "# workload: sparkrun_dump123 | scope: cluster (all) | sources: localhost/head, localhost/worker"
+    # Rank 0 (head) must come before Rank 1 (worker), with [host/role/rank] prefix
+    assert content_cluster[1] == "[localhost/head/0] head line 1"
+    assert content_cluster[2] == "[localhost/head/0] head line 2"
+    assert content_cluster[3] == "[localhost/worker/1] worker line 1"
+    assert content_cluster[4] == "[localhost/worker/1] worker line 2"
+
+    # 2. Node scope (multiple containers on same host -> [role/rank] prefix, no host)
+    target_node = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[worker_src, head_src],
+        windowing_supported=True,
+        _executor=executor,
+        _host="localhost",
+    )
+    out_node = tmp_path / "node.log"
+    count = target_node.dump(str(out_node))
+    assert count == 4
+    content_node = out_node.read_text(encoding="utf-8").splitlines()
+    assert content_node[0] == "# workload: sparkrun_dump123 | scope: node (localhost) | sources: localhost/head, localhost/worker"
+    assert content_node[1] == "[head/0] head line 1"
+    assert content_node[2] == "[head/0] head line 2"
+    assert content_node[3] == "[worker/1] worker line 1"
+    assert content_node[4] == "[worker/1] worker line 2"
+
+    # 3. Single source (no prefix attached to lines)
+    target_single = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[head_src],
+        windowing_supported=True,
+        _executor=executor,
+        _host="localhost",
+        _container="c0",
+    )
+    out_single = tmp_path / "single.log"
+    count = target_single.dump(str(out_single))
+    assert count == 2
+    content_single = out_single.read_text(encoding="utf-8").splitlines()
+    assert content_single[0] == "# workload: sparkrun_dump123 | scope: container (localhost/c0) | sources: localhost/head"
+    assert content_single[1] == "head line 1"
+    assert content_single[2] == "head line 2"
+
+
+def test_log_target_dump_real_overwrite(tmp_path):
+    """dump() respects overwrite=True and refuses overwrite=False with existing destination."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[head_src],
+        windowing_supported=True,
+        _executor=_RealShellDumpExecutor(),
+    )
+
+    out_path = tmp_path / "existing.log"
+    out_path.write_text("prior content\n")
+
+    with pytest.raises(api.SparkrunError, match="already exists"):
+        target.dump(str(out_path), overwrite=False)
+    assert out_path.read_text() == "prior content\n"
+    assert not (tmp_path / "existing.log.partial").exists()
+
+    count = target.dump(str(out_path), overwrite=True)
+    assert count == 2
+    assert "head line 1" in out_path.read_text()
+    assert not (tmp_path / "existing.log.partial").exists()
+
+
+def test_log_target_dump_real_midstream_cancellation(tmp_path):
+    """When cancelled mid-stream, dump() terminates reader, removes .partial, and returns partial count."""
+    import threading
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    slow_src = LogSource(host="localhost", container="c_slow", role="slow", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[slow_src],
+        windowing_supported=True,
+        _executor=_RealShellDumpExecutor(),
+    )
+
+    cancel = threading.Event()
+    # Trigger cancel after short delay while the loop command is actively writing
+    timer = threading.Timer(0.15, cancel.set)
+    timer.start()
+
+    out_path = tmp_path / "cancelled.log"
+    partial_path = tmp_path / "cancelled.log.partial"
+
+    try:
+        count = target.dump(str(out_path), cancel=cancel)
+        assert count > 0  # Captured partial lines before cancel
+        assert not out_path.exists()
+        assert not partial_path.exists()
+    finally:
+        timer.cancel()
+
+
+def test_log_target_dump_keyboard_interrupt_removes_partial(tmp_path):
+    """When interrupted by KeyboardInterrupt (or SIGINT/SIGTERM), .partial file is removed."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[head_src],
+        windowing_supported=True,
+        _executor=_RealShellDumpExecutor(),
+    )
+
+    out_path = tmp_path / "ki.log"
+    partial_path = tmp_path / "ki.log.partial"
+
+    with patch("sparkrun.orchestration.logs.dump_log_sources", side_effect=KeyboardInterrupt()):
+        with pytest.raises(KeyboardInterrupt):
+            target.dump(str(out_path))
+
+    assert not out_path.exists()
+    assert not partial_path.exists()
+
+
+def test_log_target_dump_concurrent_dump_exclusive_creation(tmp_path):
+    """A dump cannot collide with an in-progress dump and will not remove the other dump's partial file."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[head_src],
+        windowing_supported=True,
+        _executor=_RealShellDumpExecutor(),
+    )
+
+    out_path = tmp_path / "concurrent.log"
+    partial_path = tmp_path / "concurrent.log.partial"
+    partial_path.write_text("in-flight dump contents from another process\n")
+
+    with pytest.raises(api.SparkrunError, match="already in progress"):
+        target.dump(str(out_path), overwrite=True)
+
+    # The existing partial file created by the other process must remain intact!
+    assert partial_path.exists()
+    assert partial_path.read_text() == "in-flight dump contents from another process\n"
+    assert not out_path.exists()
+
+    partial_path.unlink()
+
+
+def test_log_target_dump_no_overwrite_race_atomic_link(tmp_path):
+    """If target file appears mid-stream when overwrite=False, finalize fails without clobbering and cleans up .partial."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[head_src],
+        windowing_supported=True,
+        _executor=_RealShellDumpExecutor(),
+    )
+
+    out_path = tmp_path / "raced.log"
+    partial_path = tmp_path / "raced.log.partial"
+
+    # Hook into dump_log_sources to simulate target file appearing mid-dump
+    from sparkrun.orchestration.logs import dump_log_sources as orig_dump
+
+    def simulate_race_dump(executor, sources, fh, **kwargs):
+        out_path.write_text("raced destination content\n")
+        return orig_dump(executor, sources, fh, **kwargs)
+
+    with patch("sparkrun.orchestration.logs.dump_log_sources", side_effect=simulate_race_dump):
+        with pytest.raises(api.SparkrunError, match="already exists"):
+            target.dump(str(out_path), overwrite=False)
+
+    assert out_path.read_text() == "raced destination content\n"
+    assert not partial_path.exists()
+
+
+def test_log_target_dump_missing_directory(tmp_path):
+    """dump() raises SparkrunError if parent directory is missing, no partial created."""
+    from sparkrun.core.log_source import LogSource
+
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[LogSource(host="h1", container="c0")],
+        windowing_supported=True,
+        _executor=DockerExecutor(),
+    )
+
+    bad_path = tmp_path / "nonexistent_dir" / "out.log"
+    with pytest.raises(api.SparkrunError, match="does not exist"):
+        target.dump(str(bad_path))
+
+    assert not (tmp_path / "nonexistent_dir" / "out.log.partial").exists()
+
+
+def test_log_target_dump_error_removes_partial(tmp_path):
+    """When dump raises, the .partial file is cleaned up."""
+    from sparkrun.core.log_source import LogSource
+
+    target = api.LogTarget(
+        cluster_id="sparkrun_dump123",
+        sources=[LogSource(host="h1", container="c0")],
+        windowing_supported=True,
+        _executor=DockerExecutor(),
+    )
+
+    out_path = tmp_path / "failed.log"
+    with patch("sparkrun.orchestration.logs.dump_log_sources", side_effect=RuntimeError("disk full")):
+        with pytest.raises(RuntimeError, match="disk full"):
+            target.dump(str(out_path))
+
+    assert not out_path.exists()
+    assert not (tmp_path / "failed.log.partial").exists()
+
+
+def test_logs_forwards_host_container_and_cancel(tmp_path):
+    """api.logs delegates to open_log_target and forwards host, container, cancel."""
+    import threading
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cluster_id, recipe, ["h1", "h2"], cache_dir=str(tmp_path))
+
+    snapshot = _make_status(
+        {
+            "h1": [(cluster_id, [cluster_id + "_node_0"])],
+            "h2": [(cluster_id, [cluster_id + "_node_1"])],
+        }
+    )
+    cancel = threading.Event()
+    with patch.object(DockerExecutor, "query_status", return_value=snapshot):
+        with patch.object(api.LogTarget, "follow", return_value=iter([])) as mock_follow:
+            api.logs(
+                cluster_id,
+                hosts=("h1", "h2"),
+                host="h2",
+                container=cluster_id + "_node_1",
+                follow=True,
+                tail=50,
+                cancel=cancel,
+                cache_dir=str(tmp_path),
+            )
+            mock_follow.assert_called_once_with(tail=50, cancel=cancel)
+
+
+# --------------------------------------------------------------------------
 # Click independence — the full API surface still must not import click
 # --------------------------------------------------------------------------
 

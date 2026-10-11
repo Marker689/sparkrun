@@ -571,6 +571,33 @@ class Executor(Plugin):
         """
         return self.logs_cmd(source.container, follow=follow, tail=tail)
 
+    def logs_window_cmd(
+        self,
+        container_name: str,
+        *,
+        skip: int,
+        count: int,
+    ) -> str | None:
+        """Generate command to read *count* lines preceding the last *skip* lines.
+
+        Returns ``None`` when windowed reads are unsupported on this substrate.
+        """
+        return None
+
+    def read_logs_window_cmd(
+        self,
+        source: "LogSource",
+        *,
+        skip: int,
+        count: int,
+    ) -> str | None:
+        """Generate command to read *count* lines preceding the last *skip* lines for *source*.
+
+        The read-path peer of :meth:`logs_window_cmd`. Returns ``None`` when
+        windowed reads are unsupported on this substrate.
+        """
+        return self.logs_window_cmd(source.container, skip=skip, count=count)
+
     def native_log_sources(self, cluster_id: str, *, metadata: dict, scope: str, cancel=None) -> list[LogSource]:
         """Resolve and validate a snapshot of sources for a native workload.
 

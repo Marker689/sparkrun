@@ -38,7 +38,7 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Generator, Iterator, Sequence
+from typing import Callable, Generator, Iterator, Sequence
 
 from sparkrun.core.log_source import LogLine, LogSource, LogSourceChanged, source_sort_key
 
@@ -72,17 +72,38 @@ def build_read_command(
     bare ``docker`` and prints its help instead of the logs. Quoting collapses
     *command* back into the single word ``bash -c`` expects.
     """
+    command = executor.read_logs_cmd(source, follow=follow, tail=tail)
+    return _dispatch_argv(source, command, ssh_kwargs)
+
+
+def _dispatch_argv(source: LogSource, command: str | list[str], ssh_kwargs: dict | None = None) -> list[str]:
     from sparkrun.orchestration.ssh import build_ssh_cmd, should_run_locally
     from sparkrun.utils.shell import quote
 
-    kwargs = dict(ssh_kwargs or {})
-    command = executor.read_logs_cmd(source, follow=follow, tail=tail)
     if isinstance(command, list):
-        return command
-
+        return list(command)
+    kwargs = dict(ssh_kwargs or {})
     if should_run_locally(source.host, kwargs.get("ssh_user")):
         return ["bash", "-c", command]
     return build_ssh_cmd(source.host, **kwargs) + ["bash", "-c", quote(command)]
+
+
+def build_read_window_command(
+    executor,
+    source: LogSource,
+    *,
+    skip: int,
+    count: int,
+    ssh_kwargs: dict | None = None,
+) -> list[str] | None:
+    """Build the argv that reads a log window for *source*, dispatching local vs SSH.
+
+    Returns ``None`` when the executor does not support windowed reads.
+    """
+    command = executor.read_logs_window_cmd(source, skip=skip, count=count)
+    if command is None:
+        return None
+    return _dispatch_argv(source, command, ssh_kwargs)
 
 
 def _spawn(cmd: list[str], *, merge_stderr: bool = True) -> subprocess.Popen:
@@ -249,6 +270,41 @@ def read_log_command(
         raise subprocess.TimeoutExpired(cmd, timeout, stderr="".join(diagnostics))
     if check and rc != 0:
         raise subprocess.CalledProcessError(rc, cmd, stderr="".join(diagnostics))
+
+
+def read_log_window(
+    executor,
+    source: LogSource,
+    *,
+    skip: int,
+    count: int,
+    ssh_kwargs: dict | None = None,
+    timeout: float = 30.0,
+) -> list[LogLine]:
+    """Read *count* lines preceding the last *skip* lines for *source*.
+
+    Returns an empty list when the executor does not support windowed reads.
+    Raises :class:`subprocess.CalledProcessError` if the reader command exits non-zero,
+    or :class:`subprocess.TimeoutExpired` if the reader does not complete within *timeout*.
+    """
+    skip = max(0, int(skip))
+    count = max(0, int(count))
+    cmd = build_read_window_command(executor, source, skip=skip, count=count, ssh_kwargs=ssh_kwargs)
+    if cmd is None:
+        return []
+
+    proc = _spawn(cmd)
+    try:
+        stdout, _ = proc.communicate(timeout=timeout)
+    finally:
+        _terminate(proc)
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout)
+
+    return [_line(source, text) for text in stdout.splitlines()]
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -480,4 +536,89 @@ def print_log_sources(
         logger.info("\nLog following stopped.")
 
 
-__all__ = ["build_read_command", "print_log_sources", "read_log_sources"]
+def dump_log_sources(
+    executor,
+    sources: Sequence[LogSource],
+    fh,
+    *,
+    ssh_kwargs: dict | None = None,
+    cancel: threading.Event | None = None,
+    prefix: bool | str | Callable[[LogLine], str] = False,
+) -> int:
+    """Stream non-follow reads of *sources* to file handle *fh*.
+
+    Sources are read in rank-grouped order (sorted by rank, host, container)
+    without buffering whole logs into memory.
+    If *cancel* is set, reading terminates promptly, reaps child processes, and
+    returns the partial count of lines written so far (callers should check
+    *cancel* if partial dumps must be discarded/cleaned up).
+    Returns the total number of lines written.
+    """
+    if not sources:
+        return 0
+
+    sorted_sources = sorted(
+        sources,
+        key=lambda s: (s.rank is None, s.rank if s.rank is not None else 0, s.host, s.container),
+    )
+    multi_host = len({s.host for s in sorted_sources}) > 1
+    count = 0
+
+    for source in sorted_sources:
+        if cancel is not None and cancel.is_set():
+            break
+        cmd = build_read_command(executor, source, follow=False, tail=None, ssh_kwargs=ssh_kwargs)
+        proc = _spawn(cmd)
+        stop_watcher = threading.Event()
+        if cancel is not None:
+
+            def _watch_cancel(active_proc=proc, active_stop=stop_watcher):
+                while not active_stop.is_set():
+                    if cancel.wait(timeout=0.05):
+                        if not active_stop.is_set():
+                            _terminate(active_proc)
+                        break
+
+            threading.Thread(target=_watch_cancel, daemon=True, name=f"sparkrun-dump-cancel-{source.label}").start()
+
+        try:
+            assert proc.stdout is not None
+            for text in proc.stdout:
+                if cancel is not None and cancel.is_set():
+                    break
+                line = _line(source, text)
+                if callable(prefix):
+                    p = prefix(line)
+                    if p:
+                        fh.write(f"{p} " if not p.endswith(" ") else p)
+                    fh.write(f"{line.text}\n")
+                elif prefix is True:
+                    tag = f"[{line.host}/{line.role}]" if multi_host else f"[{line.role}]"
+                    fh.write(f"{tag} {line.text}\n")
+                elif isinstance(prefix, str) and prefix:
+                    fh.write(f"{prefix} " if not prefix.endswith(" ") else prefix)
+                    fh.write(f"{line.text}\n")
+                else:
+                    fh.write(f"{line.text}\n")
+                count += 1
+            if cancel is not None and cancel.is_set():
+                break
+            if (rc := proc.wait()) != 0:
+                raise subprocess.CalledProcessError(rc, cmd)
+        finally:
+            stop_watcher.set()
+            _terminate(proc)
+            if proc.stdout is not None:
+                proc.stdout.close()
+
+    return count
+
+
+__all__ = [
+    "build_read_command",
+    "build_read_window_command",
+    "dump_log_sources",
+    "print_log_sources",
+    "read_log_sources",
+    "read_log_window",
+]
