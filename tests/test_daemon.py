@@ -195,6 +195,7 @@ assert not {'fastapi','starlette','uvicorn','pydantic','anyio'} & sys.modules.ke
 
 @contextmanager
 def real_server(binding, *, extra=()):
+    import psutil
     from sparkrun.daemon.client import Client
     from sparkrun.core.application_profile import child_environment
 
@@ -206,6 +207,7 @@ def real_server(binding, *, extra=()):
         stderr=log,
     )
     client = Client(binding=binding)
+    server = None
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -218,16 +220,36 @@ def real_server(binding, *, extra=()):
                 time.sleep(0.05)
         else:
             pytest.fail("Daemon did not start")
-        yield child, client
+        # Windows venv Python can be a launcher with a separate interpreter.
+        # Killing/waiting for only the launcher can leave the daemon holding its
+        # lock; crash tests must also target the actual serving process.
+        serving = psutil.Process(binding.read_state()["process"]["pid"])
+        assert serving.pid == child.pid or child.pid in {parent.pid for parent in serving.parents()}
+        server = serving
+        yield server, client
     finally:
-        if child.poll() is None:
-            child.terminate()
         try:
-            child.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
-        log.close()
+            if server is not None:
+                try:
+                    server.terminate()
+                    try:
+                        server.wait(timeout=20)
+                    except psutil.TimeoutExpired:
+                        server.kill()
+                        server.wait(timeout=10)
+                except psutil.NoSuchProcess:
+                    pass
+        finally:
+            try:
+                if child.poll() is None:
+                    child.terminate()
+                try:
+                    child.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=10)
+            finally:
+                log.close()
 
 
 def test_real_worker_and_restart_preserve_result_and_idempotency(binding):

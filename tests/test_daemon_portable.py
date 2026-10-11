@@ -66,6 +66,43 @@ def test_tcp_shutdown_rotation_and_worker_adoption(controlled_plugin):
             assert b"portable-secret" not in path.read_bytes()
 
 
+@pytest.mark.parametrize("crash", [False, True])
+def test_server_helper_controls_daemon_behind_launcher(binding, monkeypatch, crash):
+    """Exercise a Windows-style Python launcher on every test platform."""
+    import psutil
+    from sparkrun.utils.fs import file_lock
+
+    popen = subprocess.Popen
+    launchers = []
+
+    def launch(argv, **kwargs):
+        child = popen(
+            [sys.executable, "-c", "import subprocess, sys; sys.exit(subprocess.Popen(sys.argv[1:]).wait())", *argv],
+            **kwargs,
+        )
+        launchers.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    identity = None
+    try:
+        with real_server(binding, extra=TCP) as (process, _):
+            identity = binding.read_state()["process"]
+            assert process.pid == identity["pid"]
+            assert process.pid != launchers[0].pid
+            if crash:
+                process.kill()
+                process.wait(timeout=10)
+                assert not alive(identity)
+        assert not alive(identity)
+        assert launchers[0].poll() is not None
+        with file_lock(binding.directory / "server.lock", blocking=False):
+            pass
+    finally:
+        if alive(identity):
+            psutil.Process(identity["pid"]).kill()
+
+
 def test_tcp_api_crash_preserves_worker_and_cooperative_cancel(controlled_plugin):
     binding = controlled_plugin
     with real_server(binding, extra=TCP) as (process, client):
