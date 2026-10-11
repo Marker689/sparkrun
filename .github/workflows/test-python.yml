@@ -67,5 +67,5 @@ jobs:
         working-directory: .
 
       - name: Run tests
-        run: pytest -v --tb=long -x
+        run: pytest -v --tb=long
         working-directory: .

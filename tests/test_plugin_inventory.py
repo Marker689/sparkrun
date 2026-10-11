@@ -456,6 +456,7 @@ def test_bundled_compatibility_checks_core_python_api_and_dependencies(name, mon
 def test_fresh_cli_reports_bundled_metadata_without_importing_plugins(tmp_path):
     import os
     import subprocess
+    import tomllib
 
     script = """
 import json
@@ -486,7 +487,7 @@ for route in (["plugins", "list", "--json"], ["setup", "plugins", "list", "--jso
     rows = {row["name"]: row for row in json.loads(result.output)}
     for name in BUNDLED_PLUGIN_NAMES:
         row = rows[name]
-        assert row["version"] == ("0.1.3" if name == "oci_relay" else version("sparkrun")), row
+        assert row["version"] == (sys.argv[2] if name == "oci_relay" else version("sparkrun")), row
         assert row["version_source"] == ("source" if name == "oci_relay" else "distribution"), row
         assert row["compatibility"]["status"] == "compatible", row
         assert row["package"] == "sparkrun", row
@@ -501,7 +502,10 @@ print(text_result.output)
     config = tmp_path / "config.yaml"
     config.write_text("features:\n  integration.k8s: true\n  registry.lil: false\n")
     env = {key: value for key, value in os.environ.items() if not key.startswith("SPARKRUN_FEATURE_")}
-    result = subprocess.run([sys.executable, "-c", script, str(config)], capture_output=True, text=True, env=env, timeout=30)
+    # The vendor lock is the expected release, independent of the inventory's
+    # source reader. Relay upgrades must not require duplicating its version here.
+    relay_version = tomllib.loads((Path(__file__).resolve().parents[1] / "vendor/oci-relay.lock").read_text())["version"]
+    result = subprocess.run([sys.executable, "-c", script, str(config), relay_version], capture_output=True, text=True, env=env, timeout=30)
     assert result.returncode == 0, result.stderr
 
 
