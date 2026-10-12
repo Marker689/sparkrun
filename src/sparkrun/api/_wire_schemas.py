@@ -3233,3 +3233,59 @@ RESULT_SCHEMAS.update(
 
 for _action in ("add", "remove", "enable", "disable", "trust", "untrust"):
     RESULT_SCHEMAS["catalog.registries." + _action] = _REGISTRY_MUTATION_RESULT
+
+_CACHE_ENTRY = {
+    "type": "object",
+    "properties": {
+        "repo": {"type": "string"},
+        "revision": {"type": "string"},
+        "snapshot": {"type": "string"},
+        "tracked": {"type": "boolean"},
+        "present": {"type": "boolean"},
+        "last_used": {"type": ["number", "null"]},
+        "logical_bytes": {"type": "integer", "minimum": 0},
+        "reclaimable_bytes": {"type": "integer", "minimum": 0},
+        "pinned": {"type": "boolean"},
+        "claims": {"type": "object"},
+        "usage": {"type": "object"},
+        "eligible": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "action": {"type": "string"},
+    },
+    "required": [
+        "repo",
+        "revision",
+        "snapshot",
+        "tracked",
+        "present",
+        "last_used",
+        "logical_bytes",
+        "reclaimable_bytes",
+        "pinned",
+        "claims",
+        "eligible",
+        "reason",
+    ],
+    "additionalProperties": True,
+}
+_CACHE_REPORT = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string"},
+            "cache_root": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "entries": {"type": "array", "items": _CACHE_ENTRY},
+            "free_bytes": {"type": "integer", "minimum": 0},
+            "free_bytes_after": {"type": "integer", "minimum": 0},
+            "reclaimed_bytes": {"type": "integer", "minimum": 0},
+            "planned_bytes": {"type": "integer", "minimum": 0},
+            "target_met": {"type": "boolean"},
+        },
+        "required": ["host", "cache_root", "dry_run", "entries", "free_bytes", "reclaimed_bytes", "planned_bytes", "target_met"],
+        "additionalProperties": True,
+    },
+}
+for _action in ("list", "prune", "pin", "reconcile"):
+    RESULT_SCHEMAS["model_cache." + _action] = _CACHE_REPORT

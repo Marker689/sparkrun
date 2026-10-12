@@ -228,9 +228,15 @@ def stop(
         )
     else:
         try:
+            from sparkrun.models.usage import release_claims
+            from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+            release_claims((meta or {}).get("model_cache_claims", []), hosts=target_hosts, ssh_kwargs=build_ssh_kwargs(sctx.config))
             remove_job_metadata(cluster_id, cache_dir=cache_dir)
         except Exception:
-            logger.debug("Failed to remove job metadata for %s", cluster_id, exc_info=True)
+            logger.warning(
+                "Could not release model cache claims or remove job metadata for %s; retry stop to reconcile", cluster_id, exc_info=True
+            )
 
     return StopResult(
         cluster_id=cluster_id,

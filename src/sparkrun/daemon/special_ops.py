@@ -33,6 +33,18 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
     if name.startswith("model_cache."):
         from sparkrun.models.artifacts import ModelArtifactRequest
 
+        management = {
+            "model_cache.list": api.model_cache.inventory_cache,
+            "model_cache.prune": api.model_cache.prune_cache,
+            "model_cache.pin": api.model_cache.pin_revision,
+            "model_cache.reconcile": api.model_cache.reconcile_claim,
+        }
+        if name in management:
+            data["ssh_kwargs"] = ssh
+            if name in {"model_cache.pin", "model_cache.reconcile"}:
+                request = ModelArtifactRequest(data.pop("model"), data.pop("revision"))
+                return to_wire(management[name](request, **data))
+            return to_wire(management[name](**data))
         request = ModelArtifactRequest(**{k: data.pop(k) for k in ("model", "revision", "projector", "file_selection") if k in data})
         fn = {
             "model_cache.inspect": api.model_cache.inspect_model,
@@ -144,6 +156,15 @@ def register_special_ops():
             "model manifest cache_dir",
         ),
         ("model_cache.resolve", "read", "model revision projector file_selection cache_dir", "model"),
+        ("model_cache.list", "read", "cache_dir hosts", "cache_dir"),
+        ("model_cache.prune", "admin", "cache_dir hosts dry_run min_age_days max_bytes min_free_bytes", "cache_dir"),
+        ("model_cache.pin", "operate", "cache_dir hosts model revision pinned", "cache_dir model revision"),
+        (
+            "model_cache.reconcile",
+            "admin",
+            "cache_dir hosts model revision claim confirm_inactive",
+            "cache_dir model revision claim confirm_inactive",
+        ),
     ]
     for name, scope, names, required in specs:
         properties = fields(names)
@@ -155,6 +176,14 @@ def register_special_ops():
             properties["file_selection"] = {"type": "string", "enum": ["auto", "all", "safetensors"]}
         if "ask_sudo" in properties:
             properties["ask_sudo"] = B
+        for key in ("pinned", "dry_run"):
+            if key in properties and name in {"model_cache.prune", "model_cache.pin"}:
+                properties[key] = B
+        for key in ("min_age_days", "max_bytes", "min_free_bytes"):
+            if key in properties:
+                properties[key] = {"type": "number" if key == "min_age_days" else "integer", "minimum": 0}
+        if "confirm_inactive" in properties:
+            properties["confirm_inactive"] = {"type": "boolean", "enum": [True]}
         register_daemon_op(
             DaemonOp(
                 name,

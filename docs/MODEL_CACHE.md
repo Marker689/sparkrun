@@ -134,6 +134,114 @@ directory. For a pre-placed GGUF file, use
 including under the default policy; missing inventories produce an explicit unverified
 migration warning. Core does not acquire or repair pre-placed paths automatically.
 
+## Usage, retention and LRU cleanup
+
+Model preparation records usage beside each cache in
+`HF_HOME/.sparkrun-model-artifacts/usage/`. These mutable records are separate
+from the immutable file manifests. They track preparation, acquisition,
+distribution-source use, launch attempts and confirmed workload release, keyed
+by repository and immutable revision. Inspection and manifest import do not
+refresh usage or enroll unknown files in cleanup. Preparation needs a writable
+Sparkrun metadata directory, including for a warm cache.
+
+The records belong to the cache host, not the controller's daemon database.
+Delegated downloads and fan-out therefore record usage on the head and workers
+without storing model weights on the controller. Shared cache mounts share the
+same usage records and claims; each host's inventory report is a view of that
+cache, not an additional copy to add to a cluster-wide byte total.
+
+```sh
+# Read-only JSON inventory, including untracked snapshots and protection reasons.
+sparkrun model-cache list --host node1 --host node2 --cache-dir /models/hf
+
+# Preview LRU cleanup (the default); a byte budget applies per cache.
+sparkrun model-cache prune --host node1 --cache-dir /models/hf \
+  --min-age-days 7 --max-bytes 536870912000
+
+# Explicitly apply the same policy. Nothing deletes automatically by default.
+sparkrun model-cache prune --host node1 --cache-dir /models/hf \
+  --min-age-days 7 --max-bytes 536870912000 --apply
+
+# Keep an immutable revision; use --remove to remove its retention pin.
+sparkrun model-cache pin org/model --revision FULL_COMMIT \
+  --host node1 --cache-dir /models/hf
+```
+
+`prune` defaults to a dry run and a seven-day minimum age. Without a byte
+target it selects all eligible revisions older than that age. `--max-bytes`
+budgets private allocations in tracked snapshots, excluding canonical/shared
+HF blobs and untracked data. `--min-free-bytes` instead targets actual free
+space on the cache filesystem. With both targets, cleanup continues until
+both are met or no eligible revision remains. The CLI exits nonzero if a
+target cannot be met; it never overrides protections to reach a target.
+
+Reports separate logical file sizes, reclaimable snapshot allocations, planned
+removals and filesystem free space. Snapshot allocation counts exclude symbolic
+links and multiply linked files. They are estimates of disk reclamation, not a
+promise about filesystem compression, reflinks or concurrent disk activity;
+`free_bytes_after` is measured again when applying cleanup. Dry-run free-space
+projections use the allocation estimates. Shared HF blobs are **never deleted**.
+Removing a symlink-based snapshot may therefore reclaim no weight bytes.
+
+Only tracked revisions with a known file inventory are eligible. Unknown
+snapshots, unexpected files, pinned revisions, busy publication locks, invalid
+metadata and active workload claims are protected. Arbitrary pre-placed model
+directories are outside the cleanup scope. To enroll an existing HF snapshot,
+prepare/repair it successfully; importing a manifest alone does not grant
+cleanup ownership. Select `--file-selection all` if all repository files need
+to be included in that preparation.
+
+Claims are written before preparation releases its repository locks and remain
+after the launching CLI exits. All prepared models, including draft models and
+projectors in their selected inventory, are covered. A manifest-less legacy
+launch conservatively protects every previously tracked revision of its model.
+Confirmed `stop`/`stop-all` releases the corresponding claims and restarts the
+retention age. A failed or interrupted activation retains its claims; neither
+age nor a dead controller proves that remote workloads stopped.
+
+Retry a normal stop to reconcile a known workload. If job metadata is missing,
+inspect **every host listed in the outstanding claim**, stop the workload and
+any in-flight launch, then explicitly release the exact claim shown by `list`:
+
+```sh
+sparkrun model-cache reconcile org/model --revision FULL_COMMIT \
+  --claim CLAIM_ID --host node1 --cache-dir /models/hf --confirm-inactive
+```
+
+Reconciliation removes a protection record, not model files, and refreshes its
+retention age. The confirmation is an operator assertion; this command does
+not infer process inactivity. External applications and older Sparkrun
+processes do not participate in these claims/locks: pin revisions they use,
+or leave automatic cleanup disabled on their shared caches.
+
+Optional automatic cleanup runs before manifest-based model preparation:
+
+```yaml
+model_cache_prune:
+  enabled: false                  # opt in explicitly
+  min_age_days: 7
+  min_free_bytes: 107374182400     # 100 GiB free-space target per cache
+  # max_bytes: 536870912000       # optional 500 GiB private snapshot budget
+```
+
+Enabling it requires at least one byte target. It reuses the explicit prune
+implementation, excludes the repository being prepared, and retains pins and
+workload claims. It warns if protected content prevents meeting the target;
+this is not a guarantee that a subsequent download will fit. It does not run
+on dry-run launches, and no background daemon is required. Cluster-seed
+retention can currently be implemented by pinning the revision on the desired
+head host; there is no automatic cluster-wide replica placement policy.
+
+Inventory and cleanup use Python 3 and standard filesystem tools on Linux cache
+hosts, through the existing SSH/host session. They never contact the model
+origin or install tools. Existing metadata inspection remains independent of
+this Python helper. CLI and daemon callers use the same Python API:
+`inventory_cache`, `prune_cache`, `pin_revision`, and `reconcile_claim`.
+The daemon exposes `model_cache.list`, `model_cache.prune`, `model_cache.pin`
+and `model_cache.reconcile` (and matching `/v1/model_cache/...` routes).
+Prune and reconciliation require admin scope; prune defaults to dry-run over
+the API as well.
+
 ## Parallel model copies
 
 The builtin manifest transport copies to multiple destinations concurrently.

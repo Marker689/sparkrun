@@ -556,6 +556,7 @@ def save_job_metadata(
     executor: "Executor | None" = None,
     native_resource: dict | None = None,
     placement=None,
+    model_cache_claims: list[dict] | None = None,
     sctx: "SparkrunContext | None" = None,
 ) -> None:
     """Persist job metadata so ``cluster status`` can display recipe info.
@@ -662,6 +663,8 @@ def save_job_metadata(
         "started_at": time.time(),
         "placement_token": placement_token_meta,
     }
+    if model_cache_claims:
+        meta["model_cache_claims"] = model_cache_claims
     if placement is not None:
         from sparkrun.core.allocations import allocations_for_host
         from dataclasses import asdict

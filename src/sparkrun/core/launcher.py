@@ -1320,6 +1320,10 @@ def launch_inference(
     # can find the running job.  The identity is declarative (what was asked
     # for); the *actual* bound port is factual and travels in job metadata.
     cluster_id = cluster_id_override or derive_cluster_id(recipe, host_list, overrides=overrides)
+    if not dry_run:
+        from sparkrun.models.usage import begin_workload
+
+        begin_workload(cluster_id, ssh_kwargs)
 
     # -- Port resolution --
     from sparkrun.utils.data import integer_setting
@@ -1771,6 +1775,9 @@ def launch_inference(
 
     def record_launch_metadata(runtime_info=None):
         if not dry_run:
+            from sparkrun.models.usage import activate_workload, workload_claims
+
+            activate_workload()
             save_job_metadata(
                 cluster_id,
                 recipe,
@@ -1792,6 +1799,7 @@ def launch_inference(
                 ssh_user=job_ssh_user,
                 executor=executor,
                 placement=placement,
+                model_cache_claims=workload_claims(),
                 sctx=sctx,
             )
 

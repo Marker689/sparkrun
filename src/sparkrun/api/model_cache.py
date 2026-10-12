@@ -105,3 +105,77 @@ def repair_model(
         session=session,
         manifest=manifest,
     )
+
+
+def inventory_cache(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None):
+    """Read host-local inventory, usage, pins and outstanding workload claims."""
+    from sparkrun.models.cache import cache_operation
+
+    return cache_operation(cache_dir=cache_dir, hosts=hosts, ssh_kwargs=ssh_kwargs, session=session)
+
+
+def prune_cache(
+    *, cache_dir, hosts=("localhost",), dry_run=True, min_age_days=7, max_bytes=None, min_free_bytes=None, ssh_kwargs=None, session=None
+):
+    """Evict eligible revisions in LRU order; preview by default.
+
+    max_bytes budgets private managed snapshot allocations, excluding shared
+    blobs and untracked data. min_free_bytes measures actual filesystem space.
+    Without a space target, remove every eligible revision older than min_age_days.
+    """
+    from sparkrun.models.cache import cache_operation, age_seconds
+
+    return cache_operation(
+        cache_dir=cache_dir,
+        hosts=hosts,
+        ssh_kwargs=ssh_kwargs,
+        session=session,
+        action="prune",
+        dry_run=dry_run,
+        min_age_seconds=age_seconds(min_age_days),
+        max_bytes=max_bytes,
+        min_free_bytes=min_free_bytes,
+    )
+
+
+def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_kwargs=None, session=None):
+    """Pin/unpin an already tracked immutable revision on selected cache hosts."""
+    from sparkrun.models.cache import cache_operation
+    from sparkrun.models.usage import usage_path
+
+    usage_path("/", request.repo, request.revision)  # Require a full immutable commit.
+    return cache_operation(
+        cache_dir=cache_dir,
+        hosts=hosts,
+        ssh_kwargs=ssh_kwargs,
+        session=session,
+        action="pin",
+        dry_run=False,
+        repo=request.repo,
+        revision=request.revision,
+        pinned=pinned,
+    )
+
+
+def reconcile_claim(request, *, cache_dir, claim, confirm_inactive=False, hosts=("localhost",), ssh_kwargs=None, session=None):
+    """Release an interrupted workload claim after explicit operator inspection.
+
+    Normal stop releases exact claims automatically. Never infer inactivity from
+    age, a dead controller, an unavailable host, or missing local job metadata.
+    """
+    from sparkrun.models.cache import cache_operation
+    from sparkrun.models.usage import usage_path
+
+    usage_path("/", request.repo, request.revision)
+    return cache_operation(
+        cache_dir=cache_dir,
+        hosts=hosts,
+        ssh_kwargs=ssh_kwargs,
+        session=session,
+        action="reconcile",
+        dry_run=False,
+        repo=request.repo,
+        revision=request.revision,
+        claim=claim,
+        confirm_inactive=confirm_inactive,
+    )

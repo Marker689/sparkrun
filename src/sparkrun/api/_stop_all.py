@@ -158,13 +158,13 @@ def stop_all(
     for cid, group in result.groups.items():
         if any(member_host in failed_hosts for member_host, _role, _status, _image in group.members):
             continue
-        _forget_job(cid, cache_dir)
+        _forget_job(cid, cache_dir, hosts=[m[0] for m in group.members], ssh_kwargs=ssh_kwargs)
         jobs_stopped += 1
     for entry in result.solo_entries:
         if entry.host in failed_hosts:
             continue
         solo_cid = entry.name.removesuffix("_solo") if entry.name.endswith("_solo") else entry.name
-        _forget_job(solo_cid, cache_dir)
+        _forget_job(solo_cid, cache_dir, hosts=[entry.host], ssh_kwargs=ssh_kwargs)
         jobs_stopped += 1
 
     return _outcome(
@@ -329,11 +329,19 @@ def _resolve_teardown_executor(
         return None
 
 
-def _forget_job(cluster_id: str, cache_dir: str | None) -> None:
+def _forget_job(cluster_id: str, cache_dir: str | None, *, hosts=None, ssh_kwargs=None) -> None:
     """Remove job metadata, tolerating an already-absent record."""
-    from sparkrun.orchestration.job_metadata import remove_job_metadata
+    from sparkrun.orchestration.job_metadata import load_job_metadata, remove_job_metadata
+    from sparkrun.models.usage import release_claims
 
     try:
+        meta = load_job_metadata(cluster_id, cache_dir=cache_dir) or {}
+        connection = dict(ssh_kwargs or {})
+        if meta.get("ssh_user"):
+            connection["ssh_user"] = meta["ssh_user"]
+        release_claims(meta.get("model_cache_claims", []), hosts=hosts, ssh_kwargs=connection)
         remove_job_metadata(cluster_id, cache_dir=cache_dir)
     except Exception:
-        logger.debug("Failed to remove job metadata for %s", cluster_id, exc_info=True)
+        logger.warning(
+            "Could not release model cache claims or remove job metadata for %s; retry stop to reconcile", cluster_id, exc_info=True
+        )

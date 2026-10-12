@@ -102,6 +102,9 @@ def _acquire(
     verified = io.observe(host, manifest, root, checksums=checksums)
     if not verified.complete:
         raise ModelArtifactError("model source still invalid after one repair: " + _report_error(verified))
+    from sparkrun.models.usage import record_use
+
+    record_use(io, host, root, manifest, event="acquired", acquired=True)
 
 
 def prepare_model(
@@ -187,6 +190,15 @@ def prepare_model(
                 logger.warning(
                     "Cannot refresh inventory for %s; validating saved revision %s (legacy compatibility)", model, manifest.revision
                 )
+        from sparkrun.models.cache import auto_prune
+        from sparkrun.models.usage import record_use
+
+        locations = dict.fromkeys([(source_host, source_root), *roots.items()])
+        auto_prune(io, locations, config=config, exclude_repos=(request.repo,))
+        # Readers also participate: a warm launch/transfer source must not race
+        # eviction. Hold leases until durable workload claims are published.
+        for host, root in sorted(locations, key=lambda item: (item[0] or "", item[1])):
+            io.lock(host, root, request.repo)
         # Expected inventory is useful even if repair or transfer later fails.
         # Persist before observing payloads so a subsequent offline legacy run
         # cannot forget known requirements and fall back to presence heuristics.
@@ -279,6 +291,7 @@ def prepare_model(
                     source_check = io.observe(source_host, manifest, source_root, checksums=checksums)
                     if not source_check.complete:
                         raise ModelArtifactError("model source changed before fan-out: " + _report_error(source_check))
+                    record_use(io, source_host, source_root, manifest, event="distributed")
                     copy = ModelCopyRequest(
                         manifest, source_host, source_root, tuple(needed), operation, offline=offline, config=config, session=io.session
                     )
@@ -319,6 +332,7 @@ def prepare_model(
             if not report.complete:
                 raise ModelArtifactError("model cache not ready for launch: " + _report_error(report))
             binding = ValidatedModelBinding(model, host, roots[host], manifest, report)
+            record_use(io, host, roots[host], manifest, acquired=host in bad)
             bindings.append(binding)
             try:
                 ref = request.revision or "main"
@@ -361,6 +375,9 @@ def validate_preplaced(model: str, hosts, *, model_path=None, ssh_kwargs=None, c
             path = io.root(host, model_path or model)
             directory = io.execute(host, "test -d " + quote(path)).returncode == 0
             snapshot = path if directory else str(PurePosixPath(path).parent)
+            from sparkrun.models.usage import protect_preplaced
+
+            protect_preplaced(snapshot, host, ssh_kwargs=ssh_kwargs)
             metadata = path + "/.sparkrun-model-manifest.json" if directory else path + ".sparkrun-model-manifest.json"
             text = io.read(host, metadata)
             if text is None:

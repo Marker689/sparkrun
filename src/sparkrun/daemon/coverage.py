@@ -33,6 +33,10 @@ API_OPERATIONS.update(
         "model_cache.resolve_manifest": "model_cache.resolve",
         "model_cache.repair_model": "model_cache.repair",
         "model_cache.import_manifest": "model_cache.import",
+        "model_cache.inventory_cache": "model_cache.list",
+        "model_cache.prune_cache": "model_cache.prune",
+        "model_cache.pin_revision": "model_cache.pin",
+        "model_cache.reconcile_claim": "model_cache.reconcile",
     }
 )
 EXCLUSIONS = {

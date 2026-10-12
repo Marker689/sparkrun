@@ -1,0 +1,309 @@
+"""Real host-agent filesystem/locking tests; no downloads or remote workloads."""
+
+from dataclasses import replace
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+pytest.importorskip("fcntl")
+
+from sparkrun.api import model_cache
+from sparkrun.models import _cache_agent as agent
+from sparkrun.models.artifacts import ModelArtifactRequest, ModelArtifactError
+from sparkrun.models.host_io import ModelHostIO
+from sparkrun.models.preparation import prepare_model
+from sparkrun.models.usage import (
+    activate_workload,
+    begin_workload,
+    record_use,
+    release_claims,
+    usage_operation,
+    usage_path,
+    workload_claims,
+)
+from test_model_artifacts import artifact, cache, SHA
+
+
+def tracked(root, *, revision=SHA, shared=False, last_used=1, repo="org/model"):
+    manifest = replace(artifact(), revision=revision, repo=repo)
+    snapshot = cache(root, manifest, shared=shared)
+    with ModelHostIO() as io:
+        record_use(io, "localhost", str(root), manifest)
+    path = Path(usage_path(root, manifest.repo, revision))
+    record = json.loads(path.read_text())
+    record["last_used"] = last_used
+    path.write_text(json.dumps(record))
+    return manifest, snapshot, path
+
+
+def test_inventory_and_preview_are_read_only(tmp_path):
+    _, snapshot, path = tracked(tmp_path)
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
+    listing = model_cache.inventory_cache(cache_dir=str(tmp_path))[0]
+    assert listing["entries"][0]["eligible"]
+    assert listing["entries"][0]["last_used"] == 1
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0)[0]
+    assert report["dry_run"] and report["reclaimed_bytes"] == 0
+    assert report["entries"][0]["action"] == "would_remove"
+    assert report["planned_bytes"] > 0
+    assert snapshot.exists() and path.exists()
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
+
+
+def test_lru_budget_and_retained_inventory(tmp_path):
+    _, old, old_record = tracked(tmp_path, last_used=1)
+    _, recent, _ = tracked(tmp_path, revision="b" * 40, last_used=2)
+    size = agent.run(str(tmp_path))["entries"][0]["reclaimable_bytes"]
+    result = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, max_bytes=size, dry_run=False)[0]
+    assert result["target_met"]
+    assert result["reclaimed_bytes"] == size
+    assert not old.exists() and recent.exists()
+    assert "last_evicted" in json.loads(old_record.read_text())
+    assert Path(tmp_path / ".sparkrun-model-artifacts/org--model.lock").exists()
+
+
+def test_unknown_snapshots_and_unknown_files_are_protected(tmp_path):
+    _, snapshot, _ = tracked(tmp_path)
+    (snapshot / "operator-notes").write_text("keep")
+    unknown = cache(tmp_path, replace(artifact(), revision="c" * 40))
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, dry_run=False)[0]
+    assert {e["reason"] for e in report["entries"]} == {"untracked", "untracked files"}
+    assert snapshot.exists() and unknown.exists()
+
+
+def test_shared_blobs_and_other_revision_survive(tmp_path):
+    _, snapshot, _ = tracked(tmp_path, shared=True)
+    blobs = [p.resolve() for p in snapshot.iterdir()]
+    untracked = cache(tmp_path, replace(artifact(), revision="b" * 40))
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, dry_run=False)[0]
+    assert not snapshot.exists() and untracked.exists()
+    assert all(p.exists() for p in blobs)
+    assert report["reclaimed_bytes"] == 0
+
+
+def test_hardlinks_are_not_counted_as_freed_bytes(tmp_path):
+    import os
+
+    _, snapshot, _ = tracked(tmp_path)
+    keep = tmp_path / "keep"
+    keep.mkdir()
+    for p in snapshot.iterdir():
+        os.link(p, keep / p.name)
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, dry_run=False)[0]
+    assert report["reclaimed_bytes"] == 0
+    assert all(p.read_bytes() for p in keep.iterdir())
+
+
+def test_pin_and_age_prevent_deletion_and_unmet_target_is_reported(tmp_path):
+    _, snapshot, _ = tracked(tmp_path)
+    request = ModelArtifactRequest("org/model", SHA)
+    model_cache.pin_revision(request, cache_dir=str(tmp_path))
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), max_bytes=0, min_age_days=0, dry_run=False)[0]
+    assert not report["target_met"] and report["entries"][0]["reason"] == "pinned"
+    model_cache.pin_revision(request, cache_dir=str(tmp_path), pinned=False)
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=10**6, dry_run=False)[0]
+    assert report["entries"][0]["reason"] == "retention age" and snapshot.exists()
+
+
+def test_publication_lock_protects_transfer_and_warm_reader(tmp_path):
+    _, snapshot, _ = tracked(tmp_path)
+    with ModelHostIO() as io:
+        io.lock("localhost", str(tmp_path), "org/model")
+        report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, dry_run=False)[0]
+        assert report["entries"][0]["reason"] == "cache busy"
+    assert snapshot.exists()
+
+
+@pytest.mark.parametrize("activated", [False, True])
+def test_launch_claim_lifetime_survives_controller_scope(tmp_path, activated):
+    manifest, snapshot, _ = tracked(tmp_path)
+    with pytest.raises(RuntimeError), usage_operation():
+        begin_workload("test-workload", {})
+        prepare_model("org/model", ["localhost"], cache_dir=str(tmp_path), manifest=manifest)
+        claims = workload_claims()
+        assert claims
+        if activated:
+            activate_workload()
+        raise RuntimeError("interrupted launch")
+    result = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, dry_run=False)[0]
+    assert snapshot.exists() == activated
+    if activated:
+        assert result["entries"][0]["reason"] == "workload claim"
+        assert "last_launched" in result["entries"][0]["usage"]
+        release_claims(claims)
+        report = model_cache.inventory_cache(cache_dir=str(tmp_path))[0]
+        assert report["entries"][0]["claims"] == {}
+        assert report["entries"][0]["reason"] == "retention age"
+
+
+def test_shared_cache_claim_is_only_released_after_all_hosts_stop(tmp_path, monkeypatch):
+    manifest, _, path = tracked(tmp_path)
+
+    class SharedHosts(ModelHostIO):
+        def execute(self, host, script, **kwargs):
+            return super().execute(None, script, **kwargs)
+
+        def lock(self, host, root, repo):
+            return super().lock(None, root, repo)
+
+    monkeypatch.setattr("sparkrun.models.host_io.ModelHostIO", SharedHosts)
+    with usage_operation():
+        begin_workload("shared-workload", {})
+        with SharedHosts() as io:
+            record_use(io, "host-a", str(tmp_path), manifest)
+            record_use(io, "host-b", str(tmp_path), manifest)
+        claims = workload_claims()
+        activate_workload()
+    release_claims(claims, hosts=["host-a"])
+    record = json.loads(path.read_text())
+    assert next(iter(record["claims"].values()))["hosts"] == ["host-b"]
+    release_claims(claims, hosts=["host-b"])
+    assert not json.loads(path.read_text())["claims"]
+
+
+def test_reconciliation_requires_explicit_acknowledgement(tmp_path):
+    manifest, _, _ = tracked(tmp_path)
+    with usage_operation():
+        begin_workload("interrupted-workload", {})
+        with ModelHostIO() as io:
+            record_use(io, "localhost", str(tmp_path), manifest)
+        claim = workload_claims()[0]["claim"]
+        activate_workload()
+    request = ModelArtifactRequest("org/model", SHA)
+    with pytest.raises(ModelArtifactError, match="explicit confirmation"):
+        model_cache.reconcile_claim(request, cache_dir=str(tmp_path), claim=claim)
+    model_cache.reconcile_claim(request, cache_dir=str(tmp_path), claim=claim, confirm_inactive=True)
+    assert model_cache.inventory_cache(cache_dir=str(tmp_path))[0]["entries"][0]["claims"] == {}
+
+
+@pytest.mark.parametrize("attack", ["snapshot_symlink", "usage_symlink", "invalid_record", "lock_symlink"])
+def test_unverifiable_paths_fail_closed(tmp_path, attack):
+    _, snapshot, path = tracked(tmp_path)
+    other = tmp_path / "outside"
+    other.mkdir()
+    (other / "keep").write_text("safe")
+    if attack == "snapshot_symlink":
+        import shutil
+
+        shutil.rmtree(snapshot)
+        snapshot.symlink_to(other, target_is_directory=True)
+    elif attack == "usage_symlink":
+        path.unlink()
+        path.symlink_to(other / "keep")
+    elif attack == "invalid_record":
+        path.write_text("{}")
+    else:
+        lock = tmp_path / ".sparkrun-model-artifacts/org--model.lock"
+        lock.unlink()
+        lock.symlink_to(other / "keep")
+    report = model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0, dry_run=False)[0]
+    assert not any(e.get("action") == "removed" for e in report["entries"])
+    assert (other / "keep").read_text() == "safe"
+
+
+def test_auto_prune_is_opt_in_and_excludes_the_requested_repository(tmp_path):
+    old_manifest, old, _ = tracked(tmp_path, repo="other/old")
+    manifest, current, _ = tracked(tmp_path)
+    prepare_model("org/model", ["localhost"], cache_dir=str(tmp_path), manifest=manifest)
+    assert old.exists()
+    config = {"model_cache_prune": {"enabled": True, "max_bytes": 0, "min_age_days": 0}}
+    prepare_model("org/model", ["localhost"], cache_dir=str(tmp_path), manifest=manifest, config=config)
+    assert current.exists() and not old.exists()
+
+
+def test_cli_preview_default_and_daemon_wire_report(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from sparkrun.cli import _model_cache as cli
+    from sparkrun.api._wire import validate
+    from sparkrun.api._wire_schemas import RESULT_SCHEMAS
+    from sparkrun.daemon.special_ops import execute
+
+    _, snapshot, _ = tracked(tmp_path)
+    context = SimpleNamespace(config=SimpleNamespace(ssh_user=None, ssh_key=None, ssh_options=None))
+    monkeypatch.setattr(cli, "_get_context", lambda ctx: context)
+    result = CliRunner().invoke(cli.model_cache, ["prune", "--cache-dir", str(tmp_path), "--min-age-days", "0"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["dry_run"] and snapshot.exists()
+    report = execute("model_cache.list", {"cache_dir": str(tmp_path)}, context)
+    validate(report, RESULT_SCHEMAS["model_cache.list"])
+    prune = Mock(return_value=[])
+    monkeypatch.setattr(model_cache, "prune_cache", prune)
+    execute("model_cache.prune", {"cache_dir": str(tmp_path)}, context)
+    assert "dry_run" not in prune.call_args.kwargs  # API default remains preview.
+
+
+def test_empty_inventory_does_not_create_a_cache(tmp_path):
+    missing = tmp_path / "not-created"
+    assert model_cache.inventory_cache(cache_dir=str(missing))[0]["entries"] == []
+    assert not missing.exists()
+
+
+def test_legacy_and_absolute_path_launches_protect_tracked_revisions(tmp_path):
+    from sparkrun.models.usage import protect_unverified
+    from sparkrun.models.preparation import validate_preplaced
+
+    _, snapshot, _ = tracked(tmp_path)
+    for prepare in (
+        lambda: protect_unverified("org/model", ["localhost"], str(tmp_path)),
+        lambda: validate_preplaced(str(snapshot), ["localhost"]),
+    ):
+        with usage_operation():
+            begin_workload("legacy", {})
+            prepare()
+            assert workload_claims()
+            activate_workload()
+        assert model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=0)[0]["entries"][0]["reason"] == "workload claim"
+
+
+def test_claims_for_distinct_launches_do_not_release_each_other(tmp_path):
+    manifest, _, path = tracked(tmp_path)
+    claims = []
+    for workload in ("one", "two"):
+        with usage_operation():
+            begin_workload(workload, {})
+            with ModelHostIO() as io:
+                record_use(io, "localhost", str(tmp_path), manifest)
+            claims.append(workload_claims())
+            activate_workload()
+    release_claims(claims[0])
+    remaining = json.loads(path.read_text())["claims"]
+    assert len(remaining) == 1 and next(iter(remaining.values()))["workload"] == "two"
+
+
+def test_recent_use_between_scan_and_lock_is_preserved(tmp_path, monkeypatch):
+    _, snapshot, path = tracked(tmp_path)
+    original = agent.inventory
+
+    def changed(root, **policy):
+        rows = original(root, **policy)
+        record = json.loads(path.read_text())
+        record["last_used"] = 100
+        path.write_text(json.dumps(record))
+        return rows
+
+    monkeypatch.setattr(agent, "inventory", changed)
+    result = agent.run(str(tmp_path), action="prune", min_age_seconds=0, dry_run=False)
+    assert result["entries"][0]["reason"] == "usage changed during cleanup"
+    assert snapshot.exists()
+
+
+def test_daemon_prune_and_reconcile_require_admin_scope():
+    from sparkrun.daemon.ops import register_core_ops, check_request
+    from sparkrun.core.daemon_registry import get_daemon_op
+
+    register_core_ops()
+    assert get_daemon_op("model_cache.list").scope == "read"
+    assert get_daemon_op("model_cache.prune").scope == "admin"
+    op = get_daemon_op("model_cache.reconcile")
+    assert op.scope == "admin"
+    with pytest.raises(ValueError):
+        check_request(op, {"cache_dir": "/hf", "model": "org/model", "revision": SHA, "claim": "x", "confirm_inactive": False})
+
+
+@pytest.mark.parametrize("days", [-1, float("inf"), float("nan"), True, "7"])
+def test_invalid_retention_cannot_mutate_cache(tmp_path, days):
+    with pytest.raises(ValueError):
+        model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=days, dry_run=False)

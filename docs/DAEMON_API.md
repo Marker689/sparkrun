@@ -104,7 +104,7 @@ listed and revoked through local CLI tooling, not an HTTP token-administration A
 Raw recipe-trust and credentials are not accepted as arbitrary request fields;
 trust and secret prompts retain their separate server policies.
 
-This snapshot contains **92 operations: 81 core, 8 K8s and 3 SparkRoute**.
+This snapshot contains **96 operations: 85 core, 8 K8s and 3 SparkRoute**.
 
 ## Domain vocabulary
 
@@ -191,6 +191,10 @@ own namespaces and routing-policy fields.
 | --- | --- | --- | --- | --- |
 | `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]/null`, `checksums: boolean/null` |
 | `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]/null`, `checksums: boolean/null` |
+| `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]/null` |
+| `model_cache.pin` | `/v1/model_cache/pin` | job / operate | auto | `cache_dir!: string`, `hosts: string[]/null`, `model!: string`, `revision!: string`, `pinned: boolean` |
+| `model_cache.prune` | `/v1/model_cache/prune` | job / admin | auto | `cache_dir!: string`, `hosts: string[]/null`, `dry_run: boolean`, `min_age_days: number`, `max_bytes: integer`, `min_free_bytes: integer` |
+| `model_cache.reconcile` | `/v1/model_cache/reconcile` | job / admin | auto | `cache_dir!: string`, `hosts: string[]/null`, `model!: string`, `revision!: string`, `claim!: string`, `confirm_inactive!: boolean` |
 | `model_cache.repair` | `/v1/model_cache/repair` | job / operate | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]/null`, `local_cache_dir: string/null`, `transfer_mode: string/null`, `checksums: boolean/null`, `offline: boolean/null`, `dry_run: boolean/null` |
 | `model_cache.resolve` | `/v1/model_cache/resolve` | job / read | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `cache_dir: string/null` |
 

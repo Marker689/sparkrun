@@ -138,6 +138,28 @@ def test_stop_with_discovery_reports_actual_removed_count(observed_job):
     assert result.hosts_failed == () and result.errors == ()
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_stop_releases_cache_claims_only_after_confirmed_teardown(observed_job, monkeypatch, failed):
+    from unittest.mock import Mock
+
+    job = observed_job(fail=failed)
+    from sparkrun.orchestration.job_metadata import load_job_metadata
+
+    claims = [{"claim": "exact-generation"}]
+    load_job_metadata(PRIOR)["model_cache_claims"] = claims
+    release = Mock()
+    monkeypatch.setattr("sparkrun.models.usage.release_claims", release)
+    api.stop(cluster_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=job.snapshot)
+    if failed:
+        release.assert_not_called()
+        assert not job.forgotten
+    else:
+        assert release.call_args.args == (claims,)
+        assert release.call_args.kwargs["hosts"] == ["h1"]
+        assert release.call_args.kwargs["ssh_kwargs"]["ssh_user"] == "alice"
+        assert job.forgotten == [PRIOR]
+
+
 @pytest.mark.parametrize("mismatch", ["executor", "destination", "user", "missing_names"])
 def test_unusable_observation_never_forgets_job(observed_job, mismatch):
     job = observed_job("local")

@@ -121,7 +121,10 @@ def model_distribution_operation(function: Callable) -> Callable:
         token = _CONFIG.set(config)
         bindings_token = _BINDINGS.set({}) if _BINDINGS.get() is None else None
         try:
-            return function(*args, **kwargs)
+            from sparkrun.models.usage import usage_operation
+
+            with usage_operation():
+                return function(*args, **kwargs)
         finally:
             _CONFIG.reset(token)
             if bindings_token is not None:

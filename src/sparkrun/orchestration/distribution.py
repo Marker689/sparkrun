@@ -1447,6 +1447,9 @@ def _prepare_manifest_model(
         )
     except ModelInventoryUnavailable as exc:
         if policy == "legacy":
+            from sparkrun.models.usage import protect_unverified
+
+            protect_unverified(model, targets, cache_dir, ssh_kwargs=ssh_kwargs)
             logger.warning("Model %s is unverified: %s; using existing cache/download checks (legacy compatibility)", model, exc)
             return None
         return [TransferFailure(host, "model inventory unavailable", str(exc)) for host in targets]

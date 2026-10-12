@@ -14,7 +14,7 @@ from ._common import HIDE_ADVANCED_OPTIONS, _get_context
 
 @click.group("model-cache", hidden=HIDE_ADVANCED_OPTIONS)
 def model_cache():
-    """Inspect, import and repair manifest-based model caches."""
+    """Inspect, repair, retain and prune model caches on selected hosts."""
 
 
 def options(function):
@@ -98,3 +98,91 @@ def repair(request, **kwargs):
         click.echo("Dry run: no model metadata acquired or caches changed.")
         return None
     return tuple(binding.report for binding in prepared.bindings)
+
+
+def cache_options(function):
+    @wraps(function)
+    def wrapped(ctx, cache_dir, hosts, **kwargs):
+        from sparkrun.core.config import resolve_hf_cache_home
+        from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+        sctx = _get_context(ctx)
+        try:
+            reports = function(
+                cache_dir=resolve_hf_cache_home(cache_dir),
+                hosts=hosts or ("localhost",),
+                ssh_kwargs=build_ssh_kwargs(sctx.config),
+                **kwargs,
+            )
+        except (ValueError, OSError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(json.dumps(reports, indent=2))
+        if any(not r.get("target_met", True) for r in reports):
+            ctx.exit(1)
+
+    return click.pass_context(
+        click.option("--host", "hosts", multiple=True, help="Cache host; repeat for multiple hosts (default localhost).")(
+            click.option("--cache-dir", help="HF_HOME on the target hosts, not its hub subdirectory.")(wrapped)
+        )
+    )
+
+
+@model_cache.command("list")
+@cache_options
+def list_cache(**kwargs):
+    """List cached revisions, usage, pins and workload claims without changing files.
+
+    Untracked snapshots are reported but never eligible for pruning. Requires
+    Python 3 on cache hosts; no model-origin requests or tool installation.
+    """
+    return api.inventory_cache(**kwargs)
+
+
+@model_cache.command("prune")
+@click.option("--dry-run/--apply", default=True, show_default=True, help="Preview removals, or explicitly apply the cleanup.")
+@click.option(
+    "--min-age-days",
+    type=click.FloatRange(min=0),
+    default=7,
+    show_default=True,
+    help="Minimum time since preparation, distribution or release.",
+)
+@click.option("--max-bytes", type=click.IntRange(min=0), help="Target budget for private managed snapshot bytes; excludes shared blobs.")
+@click.option("--min-free-bytes", type=click.IntRange(min=0), help="Target free space on the cache filesystem in bytes.")
+@cache_options
+def prune_cache(**kwargs):
+    """Remove eligible revisions in least-recently-used order.
+
+    Defaults to a read-only preview. With no space target, selects all eligible
+    revisions older than --min-age-days. Pins, workload claims, busy caches and
+    unknown content are protected. Shared HF blobs are never deleted.
+    """
+    return api.prune_cache(**kwargs)
+
+
+@model_cache.command("pin")
+@click.argument("model")
+@click.option("--revision", required=True, help="Full immutable model commit ID.")
+@click.option("--remove", is_flag=True, help="Remove the retention pin instead of setting it.")
+@cache_options
+def pin_cache(model, revision, remove, **kwargs):
+    """Keep a tracked revision out of cleanup on each selected cache host."""
+    return api.pin_revision(ModelArtifactRequest(model, revision), pinned=not remove, **kwargs)
+
+
+@model_cache.command("reconcile")
+@click.argument("model")
+@click.option("--revision", required=True, help="Full immutable model commit ID.")
+@click.option("--claim", required=True, help="Exact outstanding claim ID shown by model-cache list.")
+@click.option("--confirm-inactive", is_flag=True, help="Confirm all workloads/launches sharing this claim have stopped.")
+@cache_options
+def reconcile_cache(model, revision, claim, confirm_inactive, **kwargs):
+    """Release an interrupted workload's claim after inspecting its hosts.
+
+    Normal stop releases claims automatically. A dead controller or an old
+    timestamp does not prove inactivity. Shared-cache claims may cover several
+    hosts; inspect all of them before confirming. Does not delete model files.
+    """
+    if not confirm_inactive:
+        raise click.ClickException("Inspect every host in the claim, stop its workloads, then pass --confirm-inactive")
+    return api.reconcile_claim(ModelArtifactRequest(model, revision), claim=claim, confirm_inactive=True, **kwargs)
