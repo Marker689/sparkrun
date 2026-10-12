@@ -394,8 +394,7 @@ FEATURE_REGISTRY_LIL = register_feature(
 FEATURE_GATEWAY_SPARKROUTE = register_feature(
     FeatureFlag(
         name="gateway.sparkroute",
-        description="SparkRoute gateway and workload bridge (requires the separately installed plugin; enabled on alpha)",
-        channel_defaults={CHANNEL_ALPHA: True},
+        description="SparkRoute gateway and workload bridge (requires the separately installed plugin; opt-in on all channels)",
         default=False,
     )
 )

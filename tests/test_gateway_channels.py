@@ -37,10 +37,12 @@ import sparkrun.core.registry as registry
 registry.BOOTSTRAP_REGISTRY_URLS = []
 from sparkrun.core.bootstrap import init_sparkrun
 from sparkrun.core.cli_registry import registered_cli_commands
+from sparkrun.core.features import is_feature_enabled
 from sparkrun.proxy.gateway import list_gateways, resolve_gateway
 init_sparkrun()
 print(json.dumps({
     "available": list_gateways(), "selected": resolve_gateway(),
+    "sparkroute_enabled": is_feature_enabled("gateway.sparkroute", config=config.SparkrunConfig(Path(sys.argv[1]) / "config.yaml")),
     "plugin_loaded": "sparkrun.plugins.sparkroute" in sys.modules,
     "bridge_registered": any(spec.name == "gateway-bridge" for spec in registered_cli_commands()),
 }))
@@ -67,6 +69,7 @@ print(json.dumps({
     assert observed == {
         "available": [expected],
         "selected": expected,
+        "sparkroute_enabled": overrides.get("gateway.sparkroute", False),
         "plugin_loaded": False,
         "bridge_registered": False,
     }

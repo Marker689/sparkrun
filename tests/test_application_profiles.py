@@ -555,7 +555,7 @@ def test_application_feature_channels_are_independent(application_channel, core_
     )
     assert is_feature_enabled("executor.docker", config=config, env={}) == (application_channel != "next")
     # Unspecified flags retain upstream maturity behavior, even under `next`.
-    assert is_feature_enabled("gateway.sparkroute", config=config, env={}) == (core_channel == "alpha")
+    assert is_feature_enabled("integration.k8s", config=config, env={}) == (core_channel == "alpha")
     # The explicit channel argument continues to mean core maturity only.
     assert is_feature_enabled("cli.tune", config=config, channel="alpha", env={}) == (application_channel == "next")
 

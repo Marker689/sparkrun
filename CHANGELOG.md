@@ -207,10 +207,10 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Added
 
-- Bundled the SparkRoute gateway integration, pinned to the verified 0.1.1
-  snapshot. Alpha defaults to SparkRoute; stable/beta retain LiteLLM. An explicit
-  enabled gateway pin takes precedence. The integration includes an admin
-  console, managed credentials, recipe catalogs, and durable on-demand activation.
+- Distribute SparkRoute and ColdSnap as separately installed plugins. Their
+  feature flags default off on every channel; installation with `--enable` or an
+  explicit feature override opts in. LiteLLM remains the default gateway on all
+  channels; selecting SparkRoute also requires an explicit gateway setting.
 - Added cached recipe catalogs, registry/capacity operations, and richer proxy
   endpoint metadata for controller clients, including named clusters, recipe
   revisions, and native runtime APIs. Recipe plugins can register passive items.

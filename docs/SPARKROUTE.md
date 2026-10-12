@@ -21,10 +21,13 @@ sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin --ena
 sparkrun proxy start --gateway sparkroute --host 127.0.0.1
 ```
 
-Enabling a feature flag does not install a plugin. The SparkRoute flag defaults
-on for alpha when the plugin is available; selecting it still requires an
-explicit `--gateway sparkroute` or `proxy.gateway` setting in `proxy.yaml`.
-ColdSnap's `plugins.coldsnap` flag remains disabled by default.
+Enabling a feature flag does not install a plugin. Both `gateway.sparkroute`
+and `plugins.coldsnap` default off on stable, beta, and alpha. The `--enable`
+installation option above opts in to SparkRoute; an existing installation can
+use `sparkrun setup features enable gateway.sparkroute`. Selecting it still
+requires an explicit `--gateway sparkroute` or `proxy.gateway` setting in
+`proxy.yaml`. Explicit config, environment, and application-profile overrides
+continue to apply.
 
 `--gateway` persists the choice. An existing SparkRoute pin is not silently
 replaced when its plugin is absent. To select the bundled gateway instead:
