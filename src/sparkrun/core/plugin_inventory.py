@@ -86,6 +86,33 @@ class PluginInfo:
     management: dict = field(default_factory=dict)
 
     @property
+    def plugin_id(self) -> str | None:
+        """Canonical namespace identity; distinct from the loader's display name."""
+        from sparkrun.core.plugin_identity import discovered_identity, normalize_plugin_id, registered_plugin_identity
+        from sparkrun.core.managed_plugins import physical_origin
+        from importlib.machinery import PathFinder
+
+        try:
+            if self.managed:
+                return normalize_plugin_id(self.name)
+            if self.loaded and (identity := registered_plugin_identity(self.module)) is not None:
+                return identity.plugin_id
+            if self.path is not None:
+                spec = PathFinder.find_spec(self.module, [str(self.path)])
+                origin = spec.origin if spec else None
+            else:
+                origin = physical_origin(self.module.split(":")[0])
+            return discovered_identity(
+                self.name,
+                self.module.split(":")[0],
+                (self.source, self.module, self.package),
+                origin=origin,
+                match_name=self.source == SOURCE_INSTALLED,
+            ).plugin_id
+        except (ValueError, OSError):
+            return None
+
+    @property
     def version_display(self) -> str:
         """Version for display, distinguishing *unknown* from *not declared*."""
         if self.version:
@@ -103,6 +130,7 @@ class PluginInfo:
         """
         result = {
             "name": self.name,
+            "plugin_id": self.plugin_id,
             "package": self.package,
             "selected": self.enabled,
             "selection_source": self.selection_source,

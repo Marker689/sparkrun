@@ -61,7 +61,7 @@ EXCLUSIONS = {
     "setup.build_install_keys_script": "Script generation helper; mesh operation owns execution.",
 }
 K8S_OPERATIONS = {
-    name: "k8s." + name
+    name: "plugins.k8s." + name
     for name in (
         "ensure_kubectl",
         "cluster_info",

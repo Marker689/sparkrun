@@ -259,7 +259,13 @@ def test_required_integration_failures_keep_diagnostics_and_block_launch(monkeyp
     config = SparkrunConfig()
     if failure == "disabled":
         config.set("integrations.example", False)
-    plugins.load_installed_plugins(Variables(), config=config)
+    if failure == "duplicate":
+        with pytest.raises(plugins.PluginConflictError, match="identity.*example"):
+            plugins.load_installed_plugins(Variables(), config=config)
+        for entry in entries:
+            entry.load.assert_not_called()
+    else:
+        plugins.load_installed_plugins(Variables(), config=config)
     assert any(p.failure for p in plugins.installed_plugin_inventory())
     with pytest.raises(plugins.RequiredIntegrationError, match="example"):
         plugins.require_integrations()

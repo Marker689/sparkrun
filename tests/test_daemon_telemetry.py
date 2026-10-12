@@ -227,19 +227,19 @@ original_register = register
 def register(v):
     original_register(v)
     from sparkrun.core.daemon_registry import DaemonOp, register_daemon_op
-    register_daemon_op(DaemonOp("fixture.query", query_loader,
+    register_daemon_op(DaemonOp("query", query_loader,
         {"type": "object", "properties": {}, "additionalProperties": False}, kind="query", scope="read"))
 """
     plugin.write_text(content)
     with real_server(binding, extra=("--no-unix", "--tcp", "127.0.0.1:0")) as (_, client):
         assert collector.get(timeout=10)["event_type"] == "daemon_serve"
-        job = client.call("fixture.wait", key="once")["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", key="once")["job_id"]
         try:
             event = collector.get(timeout=10)
             assert event["event_type"] == "fixture_worker" and event["via_daemon"] is True
             wait_state(client, job, {"waiting_input"})
-            assert client.call("fixture.wait", key="once")["job_id"] == job
-            assert client.call("fixture.query") == {"ok": True}
+            assert client.call("plugins.daemon-fixture.wait", key="once")["job_id"] == job
+            assert client.call("plugins.daemon-fixture.query") == {"ok": True}
             event = collector.get(timeout=10)
             assert event["event_type"] == "fixture_query" and event["via_daemon"] is True
             with pytest.raises(Empty):

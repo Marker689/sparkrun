@@ -502,9 +502,11 @@ These checks use the same evaluator as external plugins and `sparkrun update`.
 Incompatible or unknown results are explained after the complete table in a
 plugin diagnostics section, grouped by plugin with one reason per line.
 
-Duplicate top-level module names in different configured plugin directories are
-rejected before those modules are imported. Unambiguous plugins still load. A
-module already imported from outside its configured directory is also rejected;
+Duplicate canonical plugin IDs across selected sources stop bootstrap before
+plugin imports; both origins are reported. This includes duplicate top-level
+module names in different configured plugin directories when they resolve to the
+same ID. Distinct IDs still cannot share the same directory-import module name.
+A module already imported from outside its configured directory is also rejected;
 use distinct module names or separate application processes. Inventory attributes
 loaded status and version to the actual source path and retains each rejected
 source's diagnostic. Listing itself does not import plugins.
@@ -514,7 +516,8 @@ appears as `enabled (load failed)` with its diagnostic after the table. A disabl
 plugin may still have been loaded earlier in the process. JSON reports `loaded`
 separately; metadata compatibility does not execute a runtime load test.
 
-`--json` emits the same rows as an array, where an unknown version is `null`
+`--json` emits the same rows as an array and includes the canonical `plugin_id`
+used by daemon operations. An unknown version is `null`
 rather than the string `"unknown"` — the latter is a display rendering, and
 would be indistinguishable from a plugin that declared it.
 
@@ -819,6 +822,30 @@ Python callers now select Arena with
 `result.integration_results['arena']['submission_id']` and `uploaded`, replacing
 the Arena-specific top-level `submission_id` field. Telemetry records integration
 names only, never their settings, saved data, or outcome details.
+
+## Daemon operations and adapters
+
+Plugins can expose operations through the optional daemon using the public
+`DaemonOp`, `register_plugin_daemon_op`, `DaemonRoute`, and
+`register_plugin_daemon_route` exports. Declare local names during plugin import
+or `register(v)`; the loader supplies the stable namespace. For plugin `example`,
+`status` becomes `plugins.example.status`, with HTTP endpoint
+`POST /v1/plugins/example/ops/status`. A relative adapter path such as
+`compat/status` becomes `/v1/plugins/example/routes/compat/status`.
+
+Each loader resolves its ID before executing the plugin. Existing `plugin.toml`
+and discovery metadata supply the ID, normalized to lowercase hyphens; no new
+manifest file is needed. `owner=` cannot claim a different plugin or core.
+Embedded applications use `application_daemon_registration()` for an explicit
+`app-<profile-id>` namespace. Duplicate selected IDs are rejected across all
+plugin sources before imports, while ordinary failures in optional plugin hooks
+remain contained and diagnosable.
+
+All URLs dispatch through the same operation policies and job machinery, including
+permissions, prompts, feedback, and idempotency. Only metadata and lazy handlers
+belong in plugin registration; keep server frameworks out of scanned modules.
+See [extending the daemon API](DAEMON.md#extending-the-api) for complete operation
+and adapter examples, ID rules, and Kubernetes legacy-call compatibility.
 
 ## Kubernetes plugin and executor-owned launches
 

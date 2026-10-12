@@ -49,7 +49,7 @@ def register():
         properties = {key: (boolean if key in bools else text) for key in names.split()}
         register_daemon_op(
             DaemonOp(
-                "k8s." + name,
+                name,
                 partial(loader, name),
                 {"type": "object", "properties": properties, "required": required.split(), "additionalProperties": False},
                 result_schema=RESULT_SCHEMAS["k8s." + name],

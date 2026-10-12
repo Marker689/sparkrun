@@ -25,7 +25,7 @@ import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from sparkrun.api._wire import error_body
-from sparkrun.core.daemon_registry import get_daemon_op, registered_daemon_ops
+from sparkrun.core.daemon_registry import get_daemon_op, registered_daemon_ops, legacy_operation_names, resolve_route_operation
 from sparkrun.core.operation import OperationState, operation_scope
 from sparkrun.daemon.auth import Principal, TokenStore
 from sparkrun.daemon.jobs import Conflict, JobStore, ReplayGap, TERMINAL
@@ -282,6 +282,9 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
         return [
             {
                 "name": op.name,
+                "owner": op.owner,
+                "local_name": op.local_name,
+                "legacy_names": legacy_operation_names(op),
                 "version": op.version,
                 "kind": op.kind,
                 "scope": op.scope,
@@ -391,9 +394,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                 raise PermissionError("Route feature is disabled")
             envelope = validate(await read_json(request), route.request_schema)
             name, arguments = route.decode_loader()(envelope)
-            if name not in route.operations:
-                raise PermissionError("Adapter selected an undeclared operation")
-            return await dispatch(name, arguments, request)
+            return await dispatch(resolve_route_operation(route, name), arguments, request)
 
         return adapt
 

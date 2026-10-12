@@ -231,11 +231,11 @@ def _register_plugins(v: Variables, *, config=None) -> None:
         except (ValueError, TypeError) as e:
             logger.debug("Skipping transport %s: %s", transport_cls.__name__, e)
 
-    # External (out-of-tree) plugins from user-configured ``plugins.paths``.
-    # No-op unless configured; never allowed to break startup.
-    # First-party cross-cutting integrations shipped in the wheel, then any
-    # out-of-tree plugins.  In-tree first so an external plugin can override or
-    # extend what one of them registered.
+    # Establish all selected identities before any cross-cutting plugin imports.
+    # Ambiguous providers cannot be resolved by import order.
+    from sparkrun.core.plugin_identity import preflight_plugin_sources
+
+    preflight_plugin_sources(v, config=config)
     from sparkrun.core.in_tree_plugins import load_in_tree_plugins
 
     try:

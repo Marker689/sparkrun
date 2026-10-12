@@ -81,6 +81,24 @@ __all__ = [
     "register_recipe_item",
 ]
 
-from sparkrun.core.daemon_registry import DaemonOp, DaemonRoute, register_daemon_op, register_daemon_route, registered_daemon_ops
+from sparkrun.core.daemon_registry import (
+    DaemonOp,
+    DaemonRoute,
+    register_daemon_op,
+    register_daemon_route,
+    registered_daemon_ops,
+    register_plugin_daemon_op,
+    register_plugin_daemon_route,
+)
+from sparkrun.core.plugin_identity import application_daemon_registration
 
-__all__ += ["DaemonOp", "DaemonRoute", "register_daemon_op", "register_daemon_route", "registered_daemon_ops"]
+__all__ += [
+    "DaemonOp",
+    "DaemonRoute",
+    "register_daemon_op",
+    "register_daemon_route",
+    "registered_daemon_ops",
+    "register_plugin_daemon_op",
+    "register_plugin_daemon_route",
+    "application_daemon_registration",
+]

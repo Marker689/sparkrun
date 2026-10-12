@@ -155,6 +155,9 @@ def clear_loaded_plugin_modules() -> None:
     """Forget every recorded plugin module (test isolation)."""
     from sparkrun.core.registration import clear_plugin_load_failures
 
+    from sparkrun.core.plugin_identity import clear_plugin_identities
+
+    clear_plugin_identities()
     clear_plugin_load_failures()
     _LOADED_PLUGIN_MODULES.clear()
     _REGISTERED_MODULES.clear()
@@ -222,7 +225,16 @@ def load_plugin_module(module, v: "Variables", *, tier: "DeclarationTier | None"
     from sparkrun.core.installed_plugins import PluginConflictError
 
     try:
-        load_and_register_plugin(lambda: module, v, tier=tier)
+        from sparkrun.core.plugin_identity import discovered_identity, registered_plugin_identity
+
+        identity = registered_plugin_identity(module.__name__) if loaded_plugin_module(module.__name__) is module else None
+        identity = identity or discovered_identity(
+            module.__name__.split(".")[-1],
+            module.__name__,
+            ("module", module.__name__, getattr(module, "__file__", None)),
+            origin=getattr(module, "__file__", None),
+        )
+        load_and_register_plugin(lambda: module, v, tier=tier, identity=identity)
     except Exception as exc:
         if strict or isinstance(exc, PluginConflictError):
             raise
@@ -282,6 +294,66 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
         The top-level module names that were loaded — ``[]`` when nothing is
         configured.
     """
+    paths = configured_plugin_paths(v, paths)
+    identities = directory_plugin_identities(paths)
+    from sparkrun.core.plugin_identity import preflight_identities
+
+    preflight_identities(identities.values())
+    # Inspect all candidates before imports so duplicate module names cannot
+    # silently select one directory through sys.modules or sys.path precedence.
+    paths = list(dict.fromkeys(path.resolve() for path in paths))
+    candidates = {path: iter_plugin_module_names(path) for path in paths}
+    origins: dict[str, list[Path]] = {}
+    for path, names in candidates.items():
+        for name in names:
+            origins.setdefault(name, []).append(path)
+
+    loaded: list[str] = []
+    for path in paths:
+        if not path.is_dir():
+            logger.warning("Skipping external plugin path (not a directory): %s", path)
+            continue
+        path_str = str(path)
+        if path_str in sys.path:
+            sys.path.remove(path_str)
+        sys.path.insert(0, path_str)
+        for name in candidates[path]:
+            try:
+                identity = identities.get((path, name))
+                if identity is None:
+                    continue
+                load_and_register_plugin(
+                    partial(_import_directory_plugin, name, path, origins[name]), v, source=("external", name, str(path)), identity=identity
+                )
+            except PluginCompatibilityError as error:
+                logger.warning("Skipping plugin %s", error)
+                logger.debug("Plugin compatibility failure in %s from %s", name, path, exc_info=True)
+                continue
+            except Exception:
+                logger.exception("Failed to load external plugin module %r from %s", name, path)
+                continue
+            loaded.append(name)
+    return loaded
+
+
+def directory_plugin_identities(paths):
+    from sparkrun.core.plugin_identity import discovered_identity
+    from sparkrun.core.registration import record_plugin_load_failure
+
+    identities = {}
+    for path in dict.fromkeys(path.resolve() for path in paths):
+        for name in iter_plugin_module_names(path):
+            source = ("external", name, str(path))
+            try:
+                spec = PathFinder.find_spec(name, [str(path)])
+                identities[path, name] = discovered_identity(name, name, source, origin=spec.origin if spec else None)
+            except (ValueError, OSError) as exc:
+                record_plugin_load_failure(source, exc)
+                logger.warning("Skipping plugin %s: %s", name, exc)
+    return identities
+
+
+def configured_plugin_paths(v, paths=None):
     if paths is None:
         # Hard test/CI override first, then the product feature flag (off by
         # default on every channel). Either short-circuits before reading
@@ -305,38 +377,4 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
             return []
         paths = config.external_plugin_paths
 
-    # Inspect all candidates before imports so duplicate module names cannot
-    # silently select one directory through sys.modules or sys.path precedence.
-    paths = list(dict.fromkeys(path.resolve() for path in paths))
-    candidates = {path: iter_plugin_module_names(path) for path in paths}
-    origins: dict[str, list[Path]] = {}
-    for path, names in candidates.items():
-        for name in names:
-            origins.setdefault(name, []).append(path)
-
-    loaded: list[str] = []
-    for path in paths:
-        if not path.is_dir():
-            logger.warning("Skipping external plugin path (not a directory): %s", path)
-            continue
-        path_str = str(path)
-        if path_str in sys.path:
-            sys.path.remove(path_str)
-        sys.path.insert(0, path_str)
-        for name in candidates[path]:
-            try:
-                load_and_register_plugin(
-                    partial(_import_directory_plugin, name, path, origins[name]), v, source=("external", name, str(path))
-                )
-            except PluginCompatibilityError as error:
-                logger.warning("Skipping plugin %s", error)
-                logger.debug("Plugin compatibility failure in %s from %s", name, path, exc_info=True)
-                continue
-            except Exception:  # one broken plugin must not prevent independent loading
-                logger.exception("Failed to load external plugin module %r from %s", name, path)
-                continue
-            loaded.append(name)
-
-    if loaded:
-        logger.debug("Loaded external plugin modules from %d path(s): %s", len(paths), loaded)
-    return loaded
+    return list(paths)

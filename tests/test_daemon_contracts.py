@@ -34,8 +34,11 @@ def test_public_api_coverage_and_closed_schemas(binding):
     )
     assert functions == API_OPERATIONS.keys() | EXCLUSIONS.keys()
     assert {n for n in k8s.__all__ if inspect.isfunction(getattr(k8s, n, None))} == K8S_OPERATIONS.keys() | K8S_EXCLUSIONS.keys()
+    from sparkrun.core.plugin_identity import plugin_registration, discovered_identity
+
     register_core_ops()
-    register()
+    with plugin_registration(discovered_identity("k8s", "sparkrun.plugins.k8s", ("in-tree", "sparkrun.plugins.k8s", None))):
+        register()
     names = {op.name for op in registered_daemon_ops()}
     for endpoint in [*API_OPERATIONS.values(), *K8S_OPERATIONS.values()]:
         assert endpoint.startswith("/v1/streams/") or endpoint in names
@@ -59,20 +62,22 @@ def test_plugin_route_uses_selected_operation_authorization(binding, monkeypatch
     from sparkrun.daemon.server import create_app
 
     monkeypatch.setattr(registry, "_ROUTES", {})
-    register_daemon_op(DaemonOp("fixture.mutate", lambda: None, owner="fixture"))
-    route = DaemonRoute(
-        "/v1/fixture",
-        lambda: lambda args: ("fixture.mutate", {}),
-        ("fixture.mutate",),
-        {"type": "object", "properties": {}, "additionalProperties": False},
-        "fixture",
-    )
-    register_daemon_route(route)
-    register_daemon_route(route)
-    with pytest.raises(ValueError):
-        register_daemon_route(replace(route, owner="other"))
-    with pytest.raises(ValueError):
-        replace(route, path="/v1/jobs")
+    from sparkrun.plugins import application_daemon_registration
+
+    with application_daemon_registration():
+        register_daemon_op(DaemonOp("mutate", lambda: None))
+        declaration = DaemonRoute(
+            "fixture",
+            lambda: lambda args: ("mutate", {}),
+            ("mutate",),
+            {"type": "object", "properties": {}, "additionalProperties": False},
+        )
+        route = register_daemon_route(declaration)
+        register_daemon_route(declaration)
+        with pytest.raises(ValueError):
+            register_daemon_route(replace(declaration, owner="other"))
+        with pytest.raises(ValueError):
+            replace(declaration, path="/v1/jobs")
     tokens = TokenStore(binding)
     _, read = tokens.create("read", scope="read")
     _, operate = tokens.create("operate", scope="operate")
@@ -222,7 +227,7 @@ def test_secret_permission_and_revoke_affect_existing_principals(controlled_plug
     connection = binding.directory / "tcp.json"
     with real_server(binding, extra=("--tcp", "127.0.0.1:0", "--conn-file", str(connection))) as (_, local):
         remote = Client(url=json.loads(connection.read_text())["url"], token=token)
-        job = local.call("fixture.wait")["job_id"]
+        job = local.call("plugins.daemon-fixture.wait")["job_id"]
         row = wait_state(local, job, {"waiting_input"})
         with pytest.raises(DaemonError) as caught:
             remote.request("POST", f"/v1/jobs/{job}/input", {"prompt_id": row["prompt"]["prompt_id"], "value": "not-authorized"})

@@ -152,6 +152,10 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
         The plugin module names that loaded, in discovery order.
     """
     package = package or IN_TREE_PLUGIN_PACKAGE
+    from sparkrun.core.plugin_identity import preflight_identities
+
+    identities = in_tree_plugin_identities(v, package)
+    preflight_identities(identities.values())
     loaded: list[str] = []
     for name in iter_in_tree_plugin_names(package):
         flag = plugin_feature_flag(name)
@@ -177,9 +181,15 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
             continue
 
         dotted = "%s.%s" % (package, name)
+        if name not in identities:
+            continue  # Preserve the identity discovery diagnostic.
         try:
             load_and_register_plugin(
-                partial(importlib.import_module, dotted), v, tier=DeclarationTier.IN_TREE, source=("in-tree", dotted, None)
+                partial(importlib.import_module, dotted),
+                v,
+                tier=DeclarationTier.IN_TREE,
+                source=("in-tree", dotted, None),
+                identity=identities[name],
             )
         except Exception:
             logger.exception("Failed to load in-tree plugin %r", dotted)
@@ -189,6 +199,27 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
     if loaded:
         logger.debug("Loaded in-tree plugins: %s", loaded)
     return loaded
+
+
+def in_tree_plugin_identities(v, package=None):
+    from sparkrun.core.plugin_identity import discovered_identity
+    from sparkrun.core.managed_plugins import physical_origin
+    from sparkrun.core.registration import record_plugin_load_failure
+
+    package = package or IN_TREE_PLUGIN_PACKAGE
+    identities = {}
+    for name in iter_in_tree_plugin_names(package):
+        flag = plugin_feature_flag(name)
+        if not flag or not get_feature(flag) or not feature_gate_enabled(flag, v) or plugin_application_profile_failure(name):
+            continue
+        dotted = package + "." + name
+        source = ("in-tree", dotted, None)
+        try:
+            identities[name] = discovered_identity(name, dotted, source, origin=physical_origin(dotted))
+        except (ValueError, OSError) as exc:
+            record_plugin_load_failure(source, exc)
+            logger.warning("Skipping plugin %s: %s", dotted, exc)
+    return identities
 
 
 __all__ = [

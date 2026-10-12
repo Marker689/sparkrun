@@ -310,6 +310,7 @@ def test_json_output_is_a_bare_array_of_plugin_objects(runner, tmp_path, fake_in
     assert compatibility["host"]["core_version"]
     assert row == {
         "name": "cli_json",
+        "plugin_id": "cli-json",
         "source": SOURCE_IN_TREE,
         "module": "inv_plugins.cli_json",
         "selected": True,

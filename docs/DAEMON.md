@@ -137,7 +137,8 @@ local commands and reject client connection options.
 ## Operations, jobs, and prompts
 
 Authenticated `GET /v1/ops` publishes operation names, permissions, execution
-classes, HTTP alias paths (`http_path`), and closed request/result schemas.
+classes, ownership (`owner`, `local_name`), legacy names, HTTP alias paths
+(`http_path`), and closed request/result schemas.
 `/openapi.json` and `/docs` describe the wire API. `/v1/health` reveals only
 health/protocol; `/v1/info` requires auth.
 
@@ -160,9 +161,10 @@ same request; different arguments with the same principal/key return 409.
 Inspect the existing job after an uncertain response. Clients must not fall back
 to local execution or submit a new mutation merely because a connection failed.
 
-Every registered query or job also has a literal `POST /v1/<operation>` alias,
-with dots replaced by slashes. Aliases use the same JSON body and dispatcher as
-`/v1/ops/{name}` on both TCP and Unix sockets:
+Every core query or job also has a literal `POST /v1/<operation>` alias,
+with dots replaced by slashes. Plugin operations use
+`POST /v1/plugins/<plugin-id>/ops/<local-operation-path>`. Aliases use the same
+JSON body and dispatcher as `/v1/ops/{name}` on both TCP and Unix sockets:
 
 | HTTP alias | Operation | Response |
 | --- | --- | --- |
@@ -171,6 +173,7 @@ with dots replaced by slashes. Aliases use the same JSON body and dispatcher as
 | `POST /v1/cluster/delete` | `cluster.delete` | 202, job acknowledgement |
 | `POST /v1/catalog/clusters` | `catalog.clusters` | 200, cluster listing |
 | `POST /v1/run` | `run` | 202, job acknowledgement |
+| `POST /v1/plugins/k8s/ops/list_nodes` | `plugins.k8s.list_nodes` | 202, job acknowledgement |
 
 For example, with a daemon URL and admin token in your environment:
 
@@ -423,25 +426,123 @@ the initial reuse without retaining plugin state between independent jobs.
 
 ## Extending the API
 
-Plugins register framework-free `DaemonOp` metadata through `sparkrun.plugins`:
-closed request schema, explicit result schema, permission, feature flag, resource
-policy, and lazy handler loader. Handlers receive decoded JSON, an operation-local
-context, and a prompt callback. Do not import FastAPI/Pydantic/uvicorn from scanned
-plugin modules. The in-tree k8s plugin provides an example.
+Plugins register framework-free `DaemonOp` metadata through `sparkrun.plugins`.
+Each plugin declares local operation names. The loader assigns ownership before
+importing the module, covering both module-level declarations and `register(v)`.
+For a plugin identified as `example`, this registers `plugins.example.status`
+and mounts `POST /v1/plugins/example/ops/status`:
 
-Query and job operations receive HTTP aliases automatically during daemon startup;
-stream operations retain dedicated endpoints and have `http_path: null`. Operation
-names must have nonempty dot-separated segments. The first segment must not use
-one of the reserved API namespaces: `health`, `info`, `ops`, `jobs`, `events`,
-`streams`, `maintenance`, `shutdown`, `snapshots`, or `reservations`.
+```python
+from sparkrun.plugins import DaemonOp, register_plugin_daemon_op
 
-`DaemonRoute` registers a bounded JSON envelope decoder at an unreserved literal
-`/v1/...` path. Its decoder selects only declared operations; normal validation,
-auth, trust, and job dispatch still apply. It cannot install arbitrary ASGI routes
-or bypass those controls. An adapter must use a path distinct from every generated
-operation alias and built-in endpoint. Collisions fail daemon startup explicitly;
-registration order cannot override another route. Changing the installed operation
-or adapter set requires restarting the daemon.
+SPARKRUN_PLUGIN_API_VERSION = 1
+
+
+def load_status():
+    from .handlers import status
+    return status
+
+
+def register(v):
+    register_plugin_daemon_op(DaemonOp(
+        name="status",
+        handler_loader=load_status,
+        kind="query",
+        scope="read",
+        request_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        result_schema={"type": "object", "properties": {"ready": {"type": "boolean"}},
+                       "required": ["ready"], "additionalProperties": False},
+        description="Report readiness without changing state.",
+    ))
+```
+
+Handlers receive decoded JSON, an operation-local context, and a prompt callback.
+Declare the appropriate execution kind, permission, feature flag, resource policy,
+and result schema. Do not import FastAPI/Pydantic/uvicorn from scanned plugin
+modules. The in-tree k8s plugin provides a job example.
+
+A local name uses lowercase identifier segments separated by dots, such as
+`workloads.activate`. The canonical operation becomes
+`plugins.<plugin-id>.workloads.activate`; the HTTP suffix is `workloads/activate`.
+Two plugins can each declare `status`, `cluster.create`, or `jobs.list` without
+colliding with each other or with core. `plugins` is reserved as a local root.
+Stream operations keep dedicated endpoints and have `http_path: null`.
+
+The ID comes from existing metadata: the managed manifest name, installed
+entry-point name, or bundled/directory discovery name. A nearby `plugin.toml`
+that names the exact module can supply its logical name; for an installed entry
+point it must agree with that entry point. ASCII case and runs of `_`, `.`, and
+`-` normalize to lowercase hyphens, so `oci_relay` becomes `oci-relay`. IDs start
+with a letter, end with a letter/digit, and contain at most 100 input characters.
+Paths, traversal-like names, `core`, and `plugins` are rejected. Versions and
+installation generations are excluded from IDs. `sparkrun plugins list --json`
+includes `plugin_id`; existing store paths and config keys retain their names.
+Duplicate selected IDs across sources fail before plugin imports, with both
+origins in the error.
+
+`owner` is optional in declarations; an explicit value must match the loader's
+ID. The existing `register_daemon_op` function enforces the same binding rules.
+Registration outside a loader context fails. Embedded applications can use the
+public `application_daemon_registration()` context manager, which assigns
+`app-<application-profile-id>`. Core operations use a separate internal context.
+Equivalent declarations from the same provider can be repeated; conflicting
+handlers or metadata are rejected. Failed plugin imports/hooks roll back daemon
+registries alongside the other plugin registries. These are contribution
+ownership rules for trusted Python extensions, not a sandbox for plugin code.
+
+### Plugin JSON adapters
+
+`DaemonRoute` supplies a bounded JSON envelope decoder. Register a relative path
+through `register_plugin_daemon_route`; `example` declaring `compat/status`
+receives `POST /v1/plugins/example/routes/compat/status`:
+
+```python
+from sparkrun.plugins import DaemonRoute, register_plugin_daemon_route
+
+
+def load_decoder():
+    return lambda envelope: ("status", {})
+
+
+def register_adapter():  # Call from register(v).
+    register_plugin_daemon_route(DaemonRoute(
+        path="compat/status",
+        decode_loader=load_decoder,
+        operations=("status",),
+        request_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    ))
+```
+
+The decoder must return one of the declared target spellings plus its arguments.
+Local targets resolve within the plugin. Use `core:cluster.create` for an explicit
+core target, or `plugins.other.status` for a cross-plugin target. The selected
+operation's validation, permissions, feature gates, secret/trust policy, and job
+dispatch still apply. The adapter namespace grants no extra authority.
+
+Only literal relative paths are accepted: no absolute paths, traversal, encoded
+separators, parameters, wildcards, queries, or fragments. Adapters cannot install
+arbitrary ASGI handlers. Their separate `routes` branch prevents them from
+shadowing generated `ops` aliases. All targets must exist when the daemon starts;
+path collisions fail startup. Changing plugins or their declarations requires a
+daemon restart. Discovery and OpenAPI use canonical operation names and separate
+schema components/tags for each owner; clients should use the advertised
+`http_path` rather than constructing it themselves.
+
+### Existing Kubernetes clients and jobs
+
+The bundled Kubernetes operations now have canonical names such as
+`plugins.k8s.list_nodes`. Existing generic calls to `k8s.list_nodes` continue to
+resolve through an explicit compatibility mapping; `/v1/ops` advertises these
+as `legacy_names`. New jobs persist canonical names. The newly introduced HTTP
+aliases use `/v1/plugins/k8s/ops/...`; no `/v1/k8s/...` alias is mounted.
+
+Retained jobs keep their original operation names and results. A matching retry
+through a legacy or canonical name returns the same job when the principal,
+arguments, and operation version agree. Expired idempotency records still reject
+resubmission. Existing runtime/generation checks remain in effect for queued and
+running jobs; namespace migration does not upgrade their runtime or rerun them.
+The explicit `k8s.*` compatibility mappings remain supported in daemon protocol
+v1; removing them requires a separately announced migration.
 
 `daemon/coverage.py` accounts for public callable API entry points. Exclusions
 include live Python/session helpers, TTY `ssh-copy-id`, arbitrary low-level k8s

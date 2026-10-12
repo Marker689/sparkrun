@@ -42,12 +42,13 @@ def test_duplicate_directory_names_rejected_before_import(tmp_path, clean_sys, p
     name, paths, config = _sources(tmp_path, package=package)
     v = get_variables()
     (paths[0] / "origin_independent.py").write_text("SPARKRUN_PLUGIN_API_VERSION = 1\ndef register(v): v.set('ORIGIN_INDEPENDENT', True)\n")
-    assert load_external_plugins(v, paths=paths) == ["origin_independent"]
+    with pytest.raises(RuntimeError, match="Plugin identity.*claimed"):
+        load_external_plugins(v, paths=paths)
     assert name not in sys.modules and v.get("ORIGIN_EXECUTED") is None
-    assert v.get("ORIGIN_INDEPENDENT") is True
+    assert v.get("ORIGIN_INDEPENDENT") is None
     rows = [r for r in list_plugins(config, v) if r.name == name]
     assert len(rows) == 2
-    assert all(not r.loaded and "multiple directories" in r.failure for r in rows)
+    assert all(not r.loaded and "claimed" in r.failure for r in rows)
     assert {str(r.path): r.version for r in rows} == {str(path): str(i) for i, path in enumerate(paths, 1)}
 
 
@@ -56,10 +57,11 @@ def test_loaded_origin_and_version_never_attributed_to_second_directory(tmp_path
     name, paths, config = _sources(tmp_path, package=package)
     v = get_variables()
     assert load_external_plugins(v, paths=[paths[0]]) == [name]
-    assert load_external_plugins(v, paths=[paths[1]]) == []
+    with pytest.raises(RuntimeError, match="Plugin identity.*claimed"):
+        load_external_plugins(v, paths=[paths[1]])
     first, second = sorted((r for r in list_plugins(config, v) if r.name == name), key=lambda r: str(r.path))
-    assert first.loaded and first.version == "1" and first.failure is None
-    assert not second.loaded and second.version == "2" and "already imported from outside" in second.failure
+    assert first.loaded and first.version == "1" and "claimed" in first.failure
+    assert not second.loaded and second.version == "2" and "claimed" in second.failure
     assert v.get("ORIGIN_EXECUTED") == str(paths[0])
     assert load_external_plugins(v, paths=[paths[0]]) == [name]
 

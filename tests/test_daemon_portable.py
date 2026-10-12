@@ -35,7 +35,7 @@ def test_tcp_shutdown_rotation_and_worker_adoption(controlled_plugin):
             Client(url=connection["url"], token=read_token).request("POST", "/v1/shutdown", {})
         token_store.revoke(identifier)
         assert client.info()["protocol"] == 1
-        job = client.call("fixture.wait", key="portable-once")["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", key="portable-once")["job_id"]
         row = wait_state(client, job, {"waiting_input"})
         worker = JobStore(binding.directory).get(job)["worker"]
         assert worker["endpoint"]["transport"] == "tcp"
@@ -49,7 +49,7 @@ def test_tcp_shutdown_rotation_and_worker_adoption(controlled_plugin):
         assert not binding.connection.exists()
     with real_server(binding, extra=TCP) as (_, replacement):
         assert read_connection(binding.connection)["token"] != connection["token"]
-        assert client.call("fixture.wait", key="portable-once")["job_id"] == job
+        assert client.call("plugins.daemon-fixture.wait", key="portable-once")["job_id"] == job
         assert replacement.request("GET", "/v1/jobs/" + job)["prompt"] == row["prompt"]
         replacement.request("POST", f"/v1/jobs/{job}/input", {"prompt_id": row["prompt"]["prompt_id"], "value": "portable-secret"})
         deadline = time.monotonic() + 15
@@ -106,7 +106,7 @@ def test_server_helper_controls_daemon_behind_launcher(binding, monkeypatch, cra
 def test_tcp_api_crash_preserves_worker_and_cooperative_cancel(controlled_plugin):
     binding = controlled_plugin
     with real_server(binding, extra=TCP) as (process, client):
-        job = client.call("fixture.wait")["job_id"]
+        job = client.call("plugins.daemon-fixture.wait")["job_id"]
         wait_state(client, job, {"waiting_input"})
         worker = JobStore(binding.directory).get(job)["worker"]
         process.kill()
@@ -129,7 +129,7 @@ def test_tcp_forced_cancel_contains_descendants(controlled_plugin):
     with binding.config_path.open("a") as stream:
         stream.write("daemon:\n  cancel_grace: 1\n")
     with real_server(binding, extra=TCP) as (_, client):
-        job = client.call("fixture.wait", {"mode": "tree"})["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", {"mode": "tree"})["job_id"]
         deadline = time.monotonic() + 20
         children = []
         while not children and time.monotonic() < deadline:
@@ -242,7 +242,7 @@ def test_windows_worker_crash_kills_contained_child(controlled_plugin):
 
     binding = controlled_plugin
     with real_server(binding, extra=TCP) as (_, client):
-        job = client.call("fixture.wait", {"mode": "tree"})["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", {"mode": "tree"})["job_id"]
         store = JobStore(binding.directory)
         deadline = time.monotonic() + 20
         children = []
@@ -266,7 +266,7 @@ def test_parent_watchdog_stops_api_only(controlled_plugin):
     parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"])
     try:
         with real_server(binding, extra=(*TCP, "--parent-pid", str(parent.pid))) as (process, client):
-            job = client.call("fixture.wait")["job_id"]
+            job = client.call("plugins.daemon-fixture.wait")["job_id"]
             wait_state(client, job, {"waiting_input"})
             worker = JobStore(binding.directory).get(job)["worker"]["process"]
             parent.kill()

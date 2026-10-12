@@ -24,6 +24,8 @@ def binding(daemon_test_directory, monkeypatch):
     from sparkrun.core import daemon_registry
 
     monkeypatch.setattr(daemon_registry, "_OPERATIONS", {})
+    monkeypatch.setattr(daemon_registry, "_ALIASES", {})
+    monkeypatch.setattr(daemon_registry, "_ROUTES", {})
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     config = tmp_path / "config.yaml"
     config.write_text("features:\n  daemon: true\n")
@@ -364,9 +366,9 @@ def controlled_plugin(binding, monkeypatch):
         def loader(): return execute
         def register(v):
             from sparkrun.core.daemon_registry import DaemonOp, register_daemon_op
-            register_daemon_op(DaemonOp("fixture.wait", loader,
+            register_daemon_op(DaemonOp("wait", loader,
                 {"type":"object", "properties":{"mode":{"type":"string"}}, "additionalProperties":False},
-                owner="daemon_fixture"))
+                owner="daemon-fixture"))
     """)
     )
     binding.config_path.write_text(
@@ -391,7 +393,7 @@ def wait_state(client, job, states, timeout=20):
 def test_worker_survives_api_crash_with_secret_prompt_and_single_execution(controlled_plugin):
     binding = controlled_plugin
     with real_server(binding) as (process, client):
-        job = client.call("fixture.wait", {}, key="once")["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", {}, key="once")["job_id"]
         row = wait_state(client, job, {"waiting_input"})
         original_prompt = row["prompt"]
         process.kill()
@@ -414,7 +416,7 @@ def test_worker_survives_api_crash_with_secret_prompt_and_single_execution(contr
             client.request("POST", f"/v1/jobs/{job}/input", {**answer, "value": "different"})
         client.request("POST", f"/v1/jobs/{job}/input", {"prompt_id": row["prompt"]["prompt_id"], "value": True})
         assert client.wait(job, timeout=10) == {"accepted": True, "echo": "[redacted]"}
-        assert client.call("fixture.wait", {}, key="once")["job_id"] == job
+        assert client.call("plugins.daemon-fixture.wait", {}, key="once")["job_id"] == job
         assert (binding.config_path.parent / "executions.txt").read_text().splitlines() == [job]
     for path in binding.directory.iterdir():
         if path.is_file():
@@ -426,7 +428,7 @@ def test_cancel_prompt_and_reconcile_dead_resource_claim(controlled_plugin):
 
     binding = controlled_plugin
     with real_server(binding) as (_, client):
-        job = client.call("fixture.wait")["job_id"]
+        job = client.call("plugins.daemon-fixture.wait")["job_id"]
         wait_state(client, job, {"waiting_input"})
         claims = reservations(binding.config_path.parent)
         with pytest.raises(ResourceBusy):
@@ -442,7 +444,7 @@ def test_forced_cancel_reaps_child_in_separate_session(controlled_plugin):
 
     binding = controlled_plugin
     with real_server(binding) as (_, client):
-        job = client.call("fixture.wait", {"mode": "tree"})["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", {"mode": "tree"})["job_id"]
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             children = [e for e in JobStore(binding.directory).events(job) if e["type"] == "child"]
@@ -510,7 +512,7 @@ def test_actual_systemd_api_restart_preserves_independent_worker(controlled_plug
                 break
             except (OSError, ValueError):
                 time.sleep(0.1)
-        job = client.call("fixture.wait")["job_id"]
+        job = client.call("plugins.daemon-fixture.wait")["job_id"]
         row = wait_state(client, job, {"waiting_input"})
         worker = JobStore(binding.directory).get(job)["worker"]["process"]
         subprocess.run(["systemctl", "--user", "restart", unit], check=True, capture_output=True, timeout=20)
@@ -536,7 +538,7 @@ def test_actual_systemd_api_restart_preserves_independent_worker(controlled_plug
 def test_real_plugin_feedback_is_replayable_redacted_and_not_duplicated(controlled_plugin):
     binding = controlled_plugin
     with real_server(binding) as (_, client):
-        job = client.call("fixture.wait", {"mode": "feedback"})["job_id"]
+        job = client.call("plugins.daemon-fixture.wait", {"mode": "feedback"})["job_id"]
         assert client.wait(job, timeout=15, prompt=lambda _: "private-feedback-token") == {"accepted": True}
         events = list(client.events(job))
         feedback = [event for event in events if event["type"] in {"feedback", "log"}]

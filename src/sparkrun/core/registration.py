@@ -146,6 +146,7 @@ def load_and_register_plugin(
     *,
     tier: DeclarationTier | None = None,
     source: tuple[str, str, str | None] | None = None,
+    identity=None,
 ) -> ModuleType:
     """Import, validate and register one module in a single transaction.
 
@@ -158,13 +159,20 @@ def load_and_register_plugin(
         with registry_transaction(v):
             from sparkrun.core.external_plugins import _register_plugin_module
 
-            module = loader()
-            if not isinstance(module, ModuleType):
-                raise TypeError("Plugin loaders must return a module")
-            api_version = getattr(module, "SPARKRUN_PLUGIN_API_VERSION", None)
-            if type(api_version) is not int or api_version != PLUGIN_API_VERSION:
-                raise PluginCompatibilityError(module.__name__, api_version)
-            _register_plugin_module(module, v, tier=tier)
+            from sparkrun.core.plugin_identity import plugin_registration
+
+            if identity is None:
+                raise ValueError("Plugin loading requires a discovery identity before import")
+            with plugin_registration(identity):
+                module = loader()
+                if not isinstance(module, ModuleType):
+                    raise TypeError("Plugin loaders must return a module")
+                if module.__name__ != identity.module:
+                    raise ValueError("Plugin loader returned %r; expected %r" % (module.__name__, identity.module))
+                api_version = getattr(module, "SPARKRUN_PLUGIN_API_VERSION", None)
+                if type(api_version) is not int or api_version != PLUGIN_API_VERSION:
+                    raise PluginCompatibilityError(module.__name__, api_version)
+                _register_plugin_module(module, v, tier=tier)
             from sparkrun.core.setup_steps import validate_setup_plans
 
             validate_setup_plans()  # Validate forward references after the whole module registered.

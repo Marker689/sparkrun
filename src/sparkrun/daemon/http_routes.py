@@ -1,6 +1,12 @@
 """HTTP aliases and OpenAPI descriptions derived from daemon operations."""
 
-from sparkrun.core.daemon_registry import operation_http_path, registered_daemon_ops, registered_daemon_routes
+from sparkrun.core.daemon_registry import (
+    operation_http_path,
+    registered_daemon_ops,
+    registered_daemon_routes,
+    get_daemon_op,
+    legacy_operation_names,
+)
 
 
 JOB_ACCEPTED = {
@@ -56,6 +62,9 @@ def _extra(op):
         "security": [{"BearerAuth": []}],
         "x-sparkrun-operation": {
             "name": op.name,
+            "owner": op.owner,
+            "local_name": op.local_name,
+            "legacy_names": legacy_operation_names(op),
             "kind": op.kind,
             "scope": op.scope,
             "version": op.version,
@@ -92,6 +101,9 @@ def mount_operation_routes(app, operation_handler, envelope_handler):
     """
     ops = [(op, path) for op in registered_daemon_ops() if (path := operation_http_path(op)) is not None]
     adapters = registered_daemon_routes()
+    for route in adapters:
+        for name in route.operations:
+            get_daemon_op(name)  # Resolve forward references before mounting any routes.
     previous = getattr(app.state, "operation_routes", ())
     existing = [route for route in app.router.routes if route not in previous]
     claimed = {}
@@ -114,13 +126,30 @@ def mount_operation_routes(app, operation_handler, envelope_handler):
             operation_id="sparkrun." + op.name,
             summary=op.name,
             description=f"{op.description}\n\n{behavior} Requires {op.scope} permission. Alias of POST /v1/ops/{op.name}.",
-            tags=[op.name.split(".")[0] if "." in op.name else "operations"],
+            tags=["plugin: " + op.owner] if op.owner != "core" else [op.name.split(".")[0] if "." in op.name else "operations"],
             status_code=202 if op.kind == "job" else 200,
             responses=_responses(op),
             openapi_extra=_extra(op),
         )
     for route in adapters:
-        app.add_api_route(route.path, envelope_handler(route), methods=["POST"])
+        app.add_api_route(
+            route.path,
+            envelope_handler(route),
+            methods=["POST"],
+            # Keep path separators verbatim; FastAPI's default sanitizer would
+            # give a-b, a_b and a/b the same generated operation ID.
+            operation_id="sparkrun:route:" + route.path,
+            tags=["plugin: " + route.owner] if route.owner != "core" else ["adapters"],
+            openapi_extra={
+                "requestBody": {"required": True, "content": _content(route.request_schema)},
+                "security": [{"BearerAuth": []}],
+                "x-sparkrun-adapter": {
+                    "owner": route.owner,
+                    "local_path": route.local_path,
+                    "operations": list(route.operations),
+                },
+            },
+        )
     app.state.operation_routes = app.router.routes[len(existing) :]
     app.state.operation_paths = {op.name: path for op, path in ops}
     app.openapi_schema = None
@@ -150,6 +179,9 @@ def add_operation_schemas(schema, paths):
             "version": op.version,
             "result": _ref(op.name + "Result"),
             "http_path": paths.get(op.name),
+            "owner": op.owner,
+            "local_name": op.local_name,
+            "legacy_names": legacy_operation_names(op),
         }
         for op in operations
     }

@@ -52,7 +52,7 @@ def test_tcp_cli_operations_jobs_prompts_events_and_cancel(controlled_plugin, no
         monkeypatch.setenv("SPARKRUN_DAEMON_TOKEN", connection["token"])
         assert json.loads(invoke(*endpoint, "status"))["protocol"] == 1
 
-        job = json.loads(invoke(*credentials, "call", "fixture.wait", "--idempotency-key", "remote-cli"))["job_id"]
+        job = json.loads(invoke(*credentials, "call", "plugins.daemon-fixture.wait", "--idempotency-key", "remote-cli"))["job_id"]
         wait_state(client, job, {"waiting_input"})
         assert any(row["id"] == job for row in json.loads(invoke(*credentials, "jobs", "list")))
         assert json.loads(invoke(*credentials, "jobs", "show", job))["prompt"]["kind"] == "secret"
@@ -74,10 +74,10 @@ def test_tcp_cli_operations_jobs_prompts_events_and_cancel(controlled_plugin, no
         resumed = [json.loads(line) for line in invoke(*credentials, "jobs", "events", job, "--after", str(after)).splitlines()]
         assert resumed == events[-1:]
         assert secret not in json.dumps(events)
-        assert json.loads(invoke(*credentials, "call", "fixture.wait", "--idempotency-key", "remote-cli"))["job_id"] == job
-        output = invoke(*credentials, "call", "fixture.wait", "--wait", input=secret + "\ny\n")
+        assert json.loads(invoke(*credentials, "call", "plugins.daemon-fixture.wait", "--idempotency-key", "remote-cli"))["job_id"] == job
+        output = invoke(*credentials, "call", "plugins.daemon-fixture.wait", "--wait", input=secret + "\ny\n")
         assert '"accepted": true' in output and secret not in output
-        cancelled = json.loads(invoke(*credentials, "call", "fixture.wait"))["job_id"]
+        cancelled = json.loads(invoke(*credentials, "call", "plugins.daemon-fixture.wait"))["job_id"]
         wait_state(client, cancelled, {"waiting_input"})
         invoke(*credentials, "jobs", "cancel", cancelled)
         wait_state(client, cancelled, {"cancelled"})

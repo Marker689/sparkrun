@@ -149,26 +149,60 @@ def discover_installed_plugins(config=None) -> list[InstalledIntegration]:
 
 
 def installed_plugin_inventory(config=None) -> list[InstalledIntegration]:
-    return list(_inventory) if _inventory else discover_installed_plugins(config)
+    from sparkrun.core.registration import plugin_load_failure
+
+    rows = list(_inventory) if _inventory else discover_installed_plugins(config)
+    return [replace(row, failure=row.failure or plugin_load_failure(("installed", row.name, row.package))) for row in rows]
 
 
 def load_installed_plugins(v, *, config=None) -> None:
     if id(v) in _attempted:
         return
     rows, providers = _discover_installed_plugins(config)
+    from sparkrun.core.plugin_identity import preflight_identities
+
     _inventory[:] = rows
+    identities = installed_plugin_identities(rows)
+    preflight_identities(identities.values())
     _attempted.add(id(v))
 
     for index, row in enumerate(_inventory):
         if row.failure or not row.selected:
             continue
+        if index not in identities:
+            from sparkrun.core.registration import plugin_load_failure
+
+            failure = plugin_load_failure(("installed", row.name, row.package)) or "Invalid plugin identity"
+            _inventory[index] = replace(row, failure=failure)
+            logger.warning("Integration %s from %s failed: %s", row.name, row.package, failure)
+            continue
         try:
-            load_and_register_plugin(providers[index].load, v, source=("installed", row.name, row.package))
+            load_and_register_plugin(providers[index].load, v, source=("installed", row.name, row.package), identity=identities[index])
             _inventory[index] = replace(row, loaded=True)
         except Exception as exc:
             failure = format_plugin_failure(exc)
             _inventory[index] = replace(row, failure=failure)
             logger.warning("Integration %s from %s failed: %s", row.name, row.package, failure)
+
+
+def installed_plugin_identities(rows):
+    from sparkrun.core.plugin_identity import discovered_identity
+    from sparkrun.core.managed_plugins import physical_origin
+    from sparkrun.core.registration import record_plugin_load_failure
+
+    identities = {}
+    for index, row in enumerate(rows):
+        # Discovery already diagnoses exact entry-point duplicates. Include
+        # their claims too so they fail before any selected provider imports.
+        if not row.selected or not row.module:
+            continue
+        source = ("installed", row.name, row.package)
+        module = row.module.split(":")[0]
+        try:
+            identities[index] = discovered_identity(row.name, module, source, origin=physical_origin(module), match_name=True)
+        except (ValueError, OSError) as exc:
+            record_plugin_load_failure(source, exc)
+    return identities
 
 
 def require_integrations() -> None:

@@ -8,6 +8,7 @@ from typing import Any
 
 from sparkrun.api._wire import object_schema, to_wire, validate
 from sparkrun.core.daemon_registry import DaemonOp, register_daemon_op
+from sparkrun.core.plugin_identity import core_registration
 from sparkrun.api._wire_schemas import RESULT_SCHEMAS
 
 S = {"type": "string", "maxLength": 4096}
@@ -196,6 +197,7 @@ def _options_loader(target, model):
     return partial(invoke_options, target, model)
 
 
+@core_registration()
 def register_core_ops():
     for name, target, kind, scope, names, required in SPECS:
         properties = fields(names)

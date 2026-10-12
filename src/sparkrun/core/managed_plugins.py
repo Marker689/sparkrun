@@ -79,6 +79,8 @@ def _import_package(module: str, package: Path):
 
 
 def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_path: Path):
+    from sparkrun.core.plugin_identity import PluginIdentity, normalize_plugin_id
+
     prefix = metadata.module + "."
     before = {name: value for name, value in sys.modules.items() if name == metadata.module or name.startswith(prefix)}
     parent_name, _, child = metadata.module.rpartition(".")
@@ -90,6 +92,7 @@ def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_p
             v,
             tier=DeclarationTier.OUT_OF_TREE,
             source=("external", metadata.module, str(source_path)),
+            identity=PluginIdentity(normalize_plugin_id(metadata.name), metadata.module, ("external", metadata.module, str(source_path))),
         )
     except BaseException:
         for name in list(sys.modules):
@@ -136,6 +139,9 @@ def load_managed_plugins(v, *, config=None):
     if _validation_candidate:
         candidate, _path = _validation_candidate
         records[candidate["metadata"]["name"]] = candidate
+    from sparkrun.core.plugin_identity import preflight_identities
+
+    preflight_identities(managed_plugin_identities(config, records).values())
     loaded = []
     # Preflight the entire managed set before importing any managed provider.
     rejected = {}
@@ -182,3 +188,41 @@ def load_managed_plugins(v, *, config=None):
             record_plugin_load_failure(("external", record["metadata"]["module"], str(source)), exc)
             logger.warning("Cannot load managed plugin %s: %s", name, exc)
     return loaded
+
+
+def managed_plugin_identities(config, records=None):
+    from sparkrun.core.external_plugins import _external_plugins_disabled
+    from sparkrun.core.features import is_feature_enabled
+    from sparkrun.core.plugin_identity import PluginIdentity, normalize_plugin_id
+    from sparkrun.core.plugin_store import PluginStore
+
+    if _validation_candidate is None and (_external_plugins_disabled() or not is_feature_enabled("core.external_plugins", config=config)):
+        return {}
+    store = PluginStore(config)
+    if records is None:
+        try:
+            config, records = store.snapshot()
+        except PluginError:
+            if _validation_candidate:
+                raise
+            return {}
+    records = dict(records)
+    if _validation_candidate:
+        candidate, _ = _validation_candidate
+        records[candidate["metadata"]["name"]] = candidate
+    identities = {}
+    for name, record in records.items():
+        validating = _validation_candidate is not None and record is _validation_candidate[0]
+        if not validating and not managed_enabled(record, config):
+            continue
+        source = (
+            _validation_candidate[1] if validating and _validation_candidate else store.generation_path(name, record["active_generation"])
+        )
+        module = record["metadata"]["module"]
+        try:
+            identities[name] = PluginIdentity(normalize_plugin_id(name), module, ("external", module, str(source)))
+        except ValueError as exc:
+            from sparkrun.core.registration import record_plugin_load_failure
+
+            record_plugin_load_failure(("external", module, str(source)), exc)
+    return identities
