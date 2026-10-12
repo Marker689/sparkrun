@@ -61,6 +61,21 @@ def get_daemon_op(name):
         raise LookupError(f"Unknown operation: {name}") from None
 
 
+_RESERVED_ROUTE_ROOTS = frozenset(
+    {"health", "info", "ops", "jobs", "events", "streams", "maintenance", "shutdown", "snapshots", "reservations"}
+)
+
+
+def operation_http_path(op: DaemonOp) -> str | None:
+    """Literal POST alias for a query/job; streams retain dedicated endpoints."""
+    if op.kind == "stream":
+        return None
+    parts = op.name.split(".")
+    if not all(parts) or parts[0] in _RESERVED_ROUTE_ROOTS:
+        raise ValueError(f"Daemon operation {op.name!r} cannot use a malformed or reserved HTTP alias")
+    return "/v1/" + "/".join(parts)
+
+
 @dataclass(frozen=True)
 class DaemonRoute:
     """JSON envelope adapter. Dispatch always uses the selected operation's policy.
@@ -77,8 +92,7 @@ class DaemonRoute:
     feature_flag: str | None = None
 
     def __post_init__(self):
-        reserved = {"health", "info", "ops", "jobs", "events", "streams", "maintenance", "shutdown", "snapshots", "reservations"}
-        if not re.fullmatch(r"/v1/[a-z][a-z0-9_/-]*", self.path) or self.path.split("/")[2] in reserved:
+        if not re.fullmatch(r"/v1/[a-z][a-z0-9_/-]*", self.path) or self.path.split("/")[2] in _RESERVED_ROUTE_ROOTS:
             raise ValueError("Route must use an unreserved literal /v1 path")
         if not self.operations or not self.owner or self.request_schema.get("additionalProperties") is not False:
             raise ValueError("Routes must declare allowed operations, owner, and a closed JSON request")

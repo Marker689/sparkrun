@@ -137,8 +137,9 @@ local commands and reject client connection options.
 ## Operations, jobs, and prompts
 
 Authenticated `GET /v1/ops` publishes operation names, permissions, execution
-classes, and closed request/result schemas. `/openapi.json` and `/docs` describe
-the wire API. `/v1/health` reveals only health/protocol; `/v1/info` requires auth.
+classes, HTTP alias paths (`http_path`), and closed request/result schemas.
+`/openapi.json` and `/docs` describe the wire API. `/v1/health` reveals only
+health/protocol; `/v1/info` requires auth.
 
 ```bash
 sparkrun daemon call cluster.create \
@@ -158,6 +159,43 @@ with `job_id` and `events_url` for jobs. Use `Idempotency-Key` for retries of th
 same request; different arguments with the same principal/key return 409.
 Inspect the existing job after an uncertain response. Clients must not fall back
 to local execution or submit a new mutation merely because a connection failed.
+
+Every registered query or job also has a literal `POST /v1/<operation>` alias,
+with dots replaced by slashes. Aliases use the same JSON body and dispatcher as
+`/v1/ops/{name}` on both TCP and Unix sockets:
+
+| HTTP alias | Operation | Response |
+| --- | --- | --- |
+| `POST /v1/cluster/create` | `cluster.create` | 202, job acknowledgement |
+| `POST /v1/cluster/update` | `cluster.update` | 202, job acknowledgement |
+| `POST /v1/cluster/delete` | `cluster.delete` | 202, job acknowledgement |
+| `POST /v1/catalog/clusters` | `catalog.clusters` | 200, cluster listing |
+| `POST /v1/run` | `run` | 202, job acknowledgement |
+
+For example, with a daemon URL and admin token in your environment:
+
+```bash
+curl --fail-with-body "$SPARKRUN_DAEMON_URL/v1/cluster/create" \
+  -H "Authorization: Bearer $SPARKRUN_DAEMON_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: create-lab-001' \
+  --data '{"name":"lab","hosts":["spark-a","spark-b"]}'
+```
+
+Retrying through either URL with the same principal, arguments, and idempotency
+key returns the same job. Job inspection, cancellation, prompts, event streams,
+log tails, and monitoring keep their existing endpoints. Queries also use POST
+and accept a JSON object (`{}` for no arguments). The generic operation endpoint
+and `sparkrun daemon call` remain supported.
+
+Each alias has a stable OpenAPI operation ID, request schema, permission metadata,
+and response schema. A job's HTTP response describes its acknowledgement;
+`x-sparkrun-operation.result` references its final result schema, available after
+completion through the job endpoint. Queries return their declared result directly.
+Bearer authentication is described for API tooling, including the Swagger UI's
+Authorize control. `/v1/ops` filters discovery by permissions and feature flags;
+OpenAPI describes all registered operations, whose permissions and flags are still
+enforced when called.
 
 A run preview is display-only. An approved run executes the same resolved Python
 plan, not a reconstruction of its JSON preview. Jobs requiring input enter
@@ -391,10 +429,19 @@ policy, and lazy handler loader. Handlers receive decoded JSON, an operation-loc
 context, and a prompt callback. Do not import FastAPI/Pydantic/uvicorn from scanned
 plugin modules. The in-tree k8s plugin provides an example.
 
+Query and job operations receive HTTP aliases automatically during daemon startup;
+stream operations retain dedicated endpoints and have `http_path: null`. Operation
+names must have nonempty dot-separated segments. The first segment must not use
+one of the reserved API namespaces: `health`, `info`, `ops`, `jobs`, `events`,
+`streams`, `maintenance`, `shutdown`, `snapshots`, or `reservations`.
+
 `DaemonRoute` registers a bounded JSON envelope decoder at an unreserved literal
 `/v1/...` path. Its decoder selects only declared operations; normal validation,
 auth, trust, and job dispatch still apply. It cannot install arbitrary ASGI routes
-or bypass those controls.
+or bypass those controls. An adapter must use a path distinct from every generated
+operation alias and built-in endpoint. Collisions fail daemon startup explicitly;
+registration order cannot override another route. Changing the installed operation
+or adapter set requires restarting the daemon.
 
 `daemon/coverage.py` accounts for public callable API entry points. Exclusions
 include live Python/session helpers, TTY `ssh-copy-id`, arbitrary low-level k8s

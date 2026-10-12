@@ -25,7 +25,7 @@ import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from sparkrun.api._wire import error_body
-from sparkrun.core.daemon_registry import get_daemon_op, registered_daemon_ops, registered_daemon_routes
+from sparkrun.core.daemon_registry import get_daemon_op, registered_daemon_ops
 from sparkrun.core.operation import OperationState, operation_scope
 from sparkrun.daemon.auth import Principal, TokenStore
 from sparkrun.daemon.jobs import Conflict, JobStore, ReplayGap, TERMINAL
@@ -181,8 +181,9 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             initialize(config_path=binding.config_path)
             register_core_ops()
             app.state.runtime = runtime
-            for route in registered_daemon_routes():
-                app.add_api_route(route.path, envelope_handler(route), methods=["POST"])
+            from sparkrun.daemon.http_routes import mount_operation_routes
+
+            mount_operation_routes(app, operation_handler, envelope_handler)
 
             async def reconcile():
                 last_prune = 0
@@ -224,6 +225,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     app = FastAPI(title="Sparkrun daemon", version="1", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store, app.state.coordinator, app.state.binding = store, coordinator, binding
     app.state.stop = stop
+    app.state.operation_paths = {}
     app.add_middleware(Boundary, tokens=tokens, body_limit=int(config.get("daemon.max_body_bytes", 1024 * 1024)))
 
     @app.exception_handler(Exception)
@@ -285,6 +287,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                 "scope": op.scope,
                 "description": op.description,
                 "resources": op.resources,
+                "http_path": app.state.operation_paths.get(op.name),
                 "request_schema": op.request_schema,
                 "result_schema": op.result_schema,
             }
@@ -302,6 +305,12 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     @app.post("/v1/ops/{name}")
     async def operation(name: str, request: Request):
         return await dispatch(name, await read_json(request), request)
+
+    def operation_handler(name):
+        async def alias(request: Request):
+            return await dispatch(name, await read_json(request), request)
+
+        return alias
 
     async def dispatch(name, arguments, request):
         nonlocal query_admitted
@@ -599,21 +608,9 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     original_openapi = app.openapi
 
     def openapi():
-        schema = original_openapi()
-        schema.setdefault("components", {}).setdefault("schemas", {})
-        for op in registered_daemon_ops():
-            schema["components"]["schemas"][op.name + "Request"] = op.request_schema
-            schema["components"]["schemas"][op.name + "Result"] = op.result_schema
-        schema["x-sparkrun-operations"] = {
-            op.name: {
-                "request": {"$ref": "#/components/schemas/" + op.name + "Request"},
-                "kind": op.kind,
-                "version": op.version,
-                "result": {"$ref": "#/components/schemas/" + op.name + "Result"},
-            }
-            for op in registered_daemon_ops()
-        }
-        return schema
+        from sparkrun.daemon.http_routes import add_operation_schemas
+
+        return add_operation_schemas(original_openapi(), app.state.operation_paths)
 
     app.openapi = openapi
     return app

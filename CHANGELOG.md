@@ -12,6 +12,11 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Add named daemon HTTP aliases such as `POST /v1/cluster/create` for registered
+  operations, sharing permissions, validation, idempotency, and job dispatch with
+  `/v1/ops/{name}`. Publish operation-specific OpenAPI request/response schemas,
+  authentication and permission metadata, and reject conflicting route paths.
+
 - Parallelize builtin manifest-based model copies across hosts and file batches,
   with configurable per-host and total stream limits (defaults: 2 and 16).
   Deduplicate shared-cache destinations, supervise cancellation and deadlines,
