@@ -36,6 +36,7 @@ from textual.widgets.option_list import Option
 
 from sparkrun.api._errors import SparkrunError
 from sparkrun.api._logs import SCOPE_ALL, LogTarget, open_log_target
+from sparkrun.cli._monitor_colorize import colorize_log_spans, unclaimed_ranges
 from sparkrun.core.monitoring import HostActivity, MonitorFrame
 from sparkrun.orchestration.job_metadata import load_job_metadata
 from sparkrun.orchestration.logs import LogLine, LogSource
@@ -192,7 +193,15 @@ def render_text(
     multi_source: bool = False,
     prefix: str | None = None,
     is_current_match: bool = False,
+    runtime: str | None = None,
 ) -> Text:
+    """Render one log entry to ``Text``.
+
+    ``color=True`` keeps native ANSI styling, stacks the colorizer's spans on top
+    (``_monitor_colorize``), and dims the unclaimed text so the colored data
+    carries the signal; ``color=False`` renders plain text. ``runtime`` names the
+    workload's runtime when known, which selects its colorizer class outright.
+    """
     if isinstance(line, LogLine):
         raw_text = line.text
         if prefix is None:
@@ -204,6 +213,8 @@ def render_text(
 
     if color:
         body = Text.from_ansi(raw_text)
+        for start, end, style in colorize_log_spans(body.plain, runtime=runtime):
+            body.stylize(style, start, end)
     else:
         body = Text(entry_plain_text(line) if isinstance(line, LogLine) else Text.from_ansi(raw_text).plain)
 
@@ -214,6 +225,12 @@ def render_text(
             body.highlight_regex(regex, style=hl_style)
         except re.error:
             pass
+
+    if color:
+        # Dim the baseline last: every span so far (native ANSI, colorizer, search
+        # highlight) is claimed, so dimming only the gaps can never wash one out.
+        for start, end in unclaimed_ranges(len(body.plain), ((span.start, span.end) for span in body.spans)):
+            body.stylize("dim", start, end)
 
     if prefix:
         p_str = prefix.strip()
@@ -798,6 +815,7 @@ class LogView(ScrollView):
         search_pattern: re.Pattern | str | None = None,
         multi_host: bool = False,
         multi_source: bool = False,
+        runtime: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -812,6 +830,9 @@ class LogView(ScrollView):
         self.search_pattern: re.Pattern | str | None = search_pattern
         self.multi_host: bool = multi_host
         self.multi_source: bool = multi_source
+        #: The workload's runtime name when known, which selects its colorizer class;
+        #: None falls back to content sniffing (out-of-tree engines).
+        self.runtime: str | None = runtime
         self.current_match_entry: int | None = None
 
         self._wrap_map: list[tuple[int, int]] = []
@@ -992,6 +1013,7 @@ class LogView(ScrollView):
                         pattern=pattern,
                         multi_host=self.multi_host,
                         multi_source=self.multi_source,
+                        runtime=self.runtime,
                     )
                     segs = list(console.render(text, opts))
                     split = list(Segment.split_lines(segs))
@@ -1026,6 +1048,7 @@ class LogView(ScrollView):
                         pattern=(self.search_pattern if self.highlight else None),
                         multi_host=self.multi_host,
                         multi_source=self.multi_source,
+                        runtime=self.runtime,
                     )
                     segs = list(console.render(text, opts))
                     split = list(Segment.split_lines(segs))
@@ -1173,6 +1196,7 @@ class LogView(ScrollView):
                 pattern=(self.search_pattern if self.highlight else None),
                 multi_host=self.multi_host,
                 multi_source=self.multi_source,
+                runtime=self.runtime,
                 is_current_match=is_curr,
             )
             console = self.app.console
@@ -1195,6 +1219,7 @@ class LogView(ScrollView):
                 pattern=(self.search_pattern if self.highlight else None),
                 multi_host=self.multi_host,
                 multi_source=self.multi_source,
+                runtime=self.runtime,
                 is_current_match=is_curr,
             )
             console = self.app.console
@@ -1572,6 +1597,7 @@ class LogPane(Vertical):
         multi_source = len(target.sources) > 1
         self.log_view.multi_host = multi_host
         self.log_view.multi_source = multi_source
+        self.log_view.runtime = target.runtime or None
 
     def _on_line(self, line: LogLine, gen: int, from_follow: bool = False) -> None:
         self._on_lines([line], gen, from_follow=from_follow)
@@ -1908,6 +1934,7 @@ class LogPane(Vertical):
         self.target = None
         self.log_view.multi_host = False
         self.log_view.multi_source = False
+        self.log_view.runtime = None
 
         old_pattern = self.buffer.search_pattern
         self.buffer = LogBuffer()

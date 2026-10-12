@@ -290,6 +290,128 @@ def test_render_text_search_highlights():
     assert t_ansi.plain[rev_ansi[0].start : rev_ansi[0].end] == "INFO 10"
 
 
+@pytest.mark.parametrize(
+    ("text", "token", "style"),
+    [
+        ("INFO 10-11 08:12:34 [core] init", "INFO", "cyan"),  # vLLM
+        ("(EngineCore pid=9527) INFO 10-11 08:12:34 [core.py:130] Worker ready", "INFO", "cyan"),  # vLLM engine core
+        ("[2026-10-11 08:12:34 TP0] INFO backend ready", "INFO", "cyan"),  # SGLang
+        ("0.00.035.064 I llama_model_load: vocab only - skipping tensors", "I", "cyan"),  # llama.cpp
+        ("0.00.000.000 E llama_model_load_from_file_impl: failed to load model", "E", "red"),  # llama.cpp
+        ("0.12.345.678 D llama_server: verbose", "D", "dim"),  # llama.cpp debug
+        ("[10/11/2026-08:12:34 UTC] [E] rank 1 exited", "[E]", "red"),  # TRT-LLM (span covers the bracket token)
+        ("E1011 08:12:34.123  9527 trt_ffi.cc:42] bad tensor", "E", "red"),  # glog
+        ("dgx01:28971 [0] NCCL INFO Ring ALGO", "INFO", "cyan"),  # NCCL
+        ("[2026-10-11T08:12:34Z WARN atlas::serve] oom", "WARN", "yellow"),  # Atlas env_logger
+        ("2026-10-11T08:12:34.123Z  INFO atlas::serve: GET /v1/chat", "INFO", "cyan"),  # Atlas tracing
+        ("INFO:engine.core:Started engine", "INFO", "cyan"),  # Python logging
+    ],
+)
+def test_render_text_colorizes_runtime_levels(text, token, style):
+    line = LogLine(host="h", container="c", text=text, role="worker", rank=0)
+    t = render_text(line, color=True)
+    # Slice-aware: the dim baseline and rank colors share styles with level spans.
+    assert any(s.style == style and t.plain[s.start : s.end] == token for s in t.spans), (text, t.spans)
+    assert render_text(line, color=False).spans == []
+
+
+def test_render_text_colorizes_tensorfold_lines():
+    """TensorFold shapes from ashhart/TensorFold zig/src/server/log.zig + serve.zig."""
+    prefix = "[tensorfold] "
+    cases = [
+        # (message after the prefix, spans that must be present, styles that must not appear)
+        (
+            "serving nemotron at http://127.0.0.1:8080/v1 (sampling: greedy; drafts: on; context: 262144; loaded in 1.2s)",
+            [("http://127.0.0.1:8080/v1", "underline blue"), ("1.2s", "yellow")],
+            ("red", "green"),
+        ),
+        ("done req-8f3a2c1e prompt=100 tokens=200 tok/s=100.0 ttft=0.10s", [("done", "green"), ("req-8f3a2c1e", "magenta")], ("red",)),
+        ("warning: non-loopback server has no API key; requests are open", [("warning:", "yellow")], ("red", "green")),
+        ("refused cmpl-1: model not found", [("refused", "red")], ("green",)),
+        ("ended chatcmpl-1 reason=client-left prompt=12 tokens=3 after=0.50s", [("chatcmpl-1", "magenta")], ("red", "green")),
+        ("ended chatcmpl-1 reason=error (OutOfMemory) prompt=12 tokens=0 after=1.25s", [("reason=error", "red")], ("green",)),
+        ('10.0.0.5 "GET /v1/models HTTP/1.1" 200 -', [("200", "green")], ("red",)),
+        ('10.0.0.5 "POST /v1/chat/completions HTTP/1.1" 404 - key=cli-1', [("404", "yellow")], ("red", "green")),
+        ('10.0.0.5 "POST /v1/chat/completions HTTP/1.1" 503 -', [("503", "red")], ("green",)),
+    ]
+    for msg, required, forbidden in cases:
+        line = LogLine(host="h", container="c", text=prefix + msg, role="worker", rank=0)
+        t = render_text(line, color=True)
+        got = [(t.plain[s.start : s.end], s.style) for s in t.spans]
+        assert any(s.style == "dim" and s.start == 0 and s.end >= len(prefix) for s in t.spans)  # prefix is dimmed
+        for pair in required:
+            assert pair in got, (msg, pair, got)
+        for style in forbidden:
+            assert not any(s.style == style for s in t.spans), (msg, style, got)
+        assert render_text(line, color=False).spans == []
+
+
+def test_render_text_colorizes_tensorfold_fatal_line():
+    fatal = "tensorfold: cannot listen on 127.0.0.1:8080 (AddressInUse)"
+    line = LogLine(host="h", container="c", text=fatal, role="worker", rank=0)
+    t = render_text(line, color=True)
+    assert any(s.style == "red" and s.start == 0 and s.end == len(fatal) for s in t.spans)
+    assert render_text(line, color=False).spans == []
+
+
+def test_render_text_colorizes_traceback_whole_line():
+    text = "Traceback (most recent call last):"
+    line = LogLine(host="h", container="c", text=text, role="worker", rank=0)
+    t = render_text(line, color=True)
+    assert any(s.style == "bold red" and s.start == 0 and s.end == len(text) for s in t.spans)
+
+
+def test_render_text_dims_plain_prose():
+    line = LogLine(host="h", container="c", text="serving requests on 0.0.0.0", role="worker", rank=0)
+    t = render_text(line, color=True)
+    assert t.spans  # the baseline is dimmed, not left plain
+    assert all(s.style == "dim" for s in t.spans)
+
+
+def test_render_text_dim_baseline_spares_level_and_ansi():
+    line = LogLine(host="h", container="c", text="INFO 10-11 worker ready", role="worker", rank=0)
+    t = render_text(line, color=True)
+    got = {(t.plain[s.start : s.end], s.style) for s in t.spans}
+    assert ("INFO", "cyan") in got  # the level token keeps its color...
+    assert (" 10-11 worker ready", "dim") in got  # ...and only the remainder dims
+
+    ansi = LogLine(host="h", container="c", text="\x1b[32mSuccess\x1b[0m: details", role="worker", rank=0)
+    t_ansi = render_text(ansi, color=True)
+    assert any(s.style == "reverse" or str(s.style) == "color(2)" for s in t_ansi.spans)
+    assert not any(s.start == 0 and s.end == 7 and s.style == "dim" for s in t_ansi.spans)
+    assert any(t_ansi.plain[s.start : s.end] == ": details" and s.style == "dim" for s in t_ansi.spans)
+
+
+def test_render_text_search_highlight_is_never_dimmed():
+    line = LogLine(host="h", container="c", text="INFO a trailing match tail", role="worker", rank=0)
+    t = render_text(line, color=True, pattern="match")
+    hl = [s for s in t.spans if s.style in ("reverse", "bold reverse underline")]
+    assert len(hl) == 1
+    assert t.plain[hl[0].start : hl[0].end] == "match"
+    assert not any(s.style == "dim" and s.start < hl[0].end and s.end > hl[0].start for s in t.spans)
+
+
+def test_rendered_segments_keep_data_bright_under_dim_baseline():
+    """Effective styles, not span lists: the dim baseline must never wash a highlight."""
+    import io
+
+    from rich.console import Console
+
+    console = Console(file=io.StringIO(), width=100, force_terminal=True, color_system="standard")
+    line = LogLine(host="h", container="c", text="INFO worker failed to bind", role="worker", rank=0)
+    rendered = render_text(line, color=True, pattern="worker")
+    segments = [seg for seg in console.render(rendered, console.options) if seg.text.strip()]
+
+    def style_of(predicate):
+        return next(seg.style for seg in segments if predicate(seg.text))
+
+    assert style_of(lambda t: t == "INFO").dim is not True  # level keeps its color
+    highlight = style_of(lambda t: t == "worker")
+    assert highlight.reverse is True and highlight.dim is not True
+    assert style_of(lambda t: "failed" in t).dim is not True  # severity keeps red
+    assert style_of(lambda t: "bind" in t).dim is True  # ...and the baseline really is dim
+
+
 def test_render_text_with_prefix():
     line = LogLine(host="h1", container="c1", text="hello", role="worker", rank=0)
     t = render_text(line, multi_host=True, multi_source=True)
@@ -1315,11 +1437,13 @@ class FakeLogTarget:
         error_on_follow: Exception | None = None,
         error_on_page: Exception | None = None,
         error_on_dump: Exception | None = None,
+        runtime: str | None = None,
     ) -> None:
         self.sources = tuple(sources or [LogSource(host="h1", container="c1", role="head", rank=0)])
         self._lines = list(lines or [])
         self._history = history or {}
         self.windowing_supported = windowing_supported
+        self.runtime: str | None = runtime
         self.error_on_follow = error_on_follow
         self.error_on_page = error_on_page
         self.error_on_dump = error_on_dump

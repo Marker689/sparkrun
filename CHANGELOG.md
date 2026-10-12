@@ -118,6 +118,30 @@ first tagged release containing them, regardless of their original commit date.
   `/v1/ops/{name}`. Publish operation-specific OpenAPI request/response schemas,
   authentication and permission metadata, and reject conflicting route paths.
 
+- `cluster monitor`'s `c` toggle now color-codes the data in log lines and dims
+  the baseline text around it, so levels, numbers, and failures are what the eye
+  lands on. Levels are recognized by shape: `INFO`, `WARN`, `WARNING`, `ERROR`,
+  `CRITICAL`, `FATAL`, `TRACE`, and `DEBUG`, the `[E]` bracket and glog `E1011`
+  forms, and llama.cpp's `0.00.035.064 I` prefix. So is the rest of a line's
+  data: HTTP methods and paths, status classes, `key=value` numbers and
+  durations, request ids and UUIDs, rank tags (`TP0`, `rank=1`, NCCL's `[0]`),
+  and process or module tags such as `EngineCore`, `atlas::serve`, and
+  `llama_model_load`. Failure and warning words in prose color too, word-bounded
+  so `error_code` stays plain. The colorizers are per-runtime classes
+  (`cli/_monitor_colorize.py`): the pane passes the workload's runtime, and an
+  engine whose name sparkrun does not know is recognized by line shape instead.
+  TensorFold, an out-of-tree Zig engine whose lines carry no level token at all,
+  gets `warning:` yellow, `refused` and `reason=error` red, `done` green, and
+  its access lines' 4xx and 5xx codes colored, while a `tensorfold:` startup
+  fatal and a Python traceback render red end to end. The engines' own stats
+  read at a glance: a per-second rate (`429.5 tokens/s`, or a `tok/s=` key)
+  prints bold yellow, counts, utilization percentages, and cache sizes yellow,
+  and the prompt-processing and token-generation phase words — `Prefill`,
+  `Avg prompt throughput`, and llama.cpp's `prompt eval time` cyan; `Decode`,
+  `Avg generation throughput`, and `eval time` green — so a stream of
+  interleaved prefill and decode lines scans by color. Native ANSI colors and
+  search highlights are never dimmed, and `c` off still renders plain text.
+
 - Parallelize builtin manifest-based model copies across hosts and file batches,
   with configurable per-host and total stream limits (defaults: 2 and 16).
   Deduplicate shared-cache destinations, supervise cancellation and deadlines,
