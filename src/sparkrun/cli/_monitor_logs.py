@@ -366,7 +366,7 @@ class LogBuffer:
     def reload_tail(self, lines: Sequence[LogLine]) -> list[Marker]:
         """Replace the whole buffer with a freshly read tail.
 
-        Resets offsets, exhaustion, eviction counters and the search index
+        Resets offsets, exhaustion, eviction counters, and the search index
         (re-running the active search), then re-appends the pending terminal
         markers in chronological order after the fresh lines. Returns them.
         """
@@ -1300,9 +1300,9 @@ class LogPane(Vertical):
         Binding("1", "scope_container", "Container", priority=True),
         Binding("2", "scope_node", "Node", priority=True),
         Binding("3", "scope_cluster", "Cluster", priority=True),
+        Binding("l", "toggle_wrap", "Wrap", priority=True),
         Binding("c", "toggle_color", "Color", priority=True),
         Binding("h", "toggle_highlight", "Highlight", priority=True),
-        Binding("l", "toggle_wrap", "Wrap", priority=True),
         Binding("slash", "open_search", "Search", key_display="/", priority=True),
         Binding("n", "search_next", "Next match", priority=True),
         Binding("b", "search_prev", "Prev match", priority=True),
@@ -1411,7 +1411,7 @@ class LogPane(Vertical):
         hl_str = f"highlight {'on' if self.log_view.highlight else 'off'}"
         wrap_str = f"wrap {'on' if self.log_view.wrap else 'off'}"
 
-        parts = [state_str, scope_str, color_str, hl_str, wrap_str]
+        parts = [state_str, scope_str, wrap_str, color_str, hl_str]
         if self.buffer.search_pattern is not None:
             count = len(self.buffer.search_matches)
             if count > 0 and self._current_match_idx is not None and 0 <= self._current_match_idx < count:
