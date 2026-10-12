@@ -14,6 +14,8 @@ in `config.yaml`:
 model_cache_validation: legacy        # legacy (default) | metadata | checksum
 model_file_selection: auto            # auto | all | safetensors
 model_distribution_provider: auto     # auto | builtin | registered provider name
+model_transfer_streams_per_host: 2     # concurrent rsync processes per destination
+model_transfer_max_streams: 16         # total rsync processes per copy operation
 # model_distribution_fallback: true   # optional override of provider policy
 ```
 
@@ -52,6 +54,8 @@ distribution:
     validation: metadata
     file_selection: auto
     provider: builtin
+    streams_per_host: 2
+    max_streams: 16
     # fallback: false
 ```
 
@@ -129,6 +133,40 @@ directory. For a pre-placed GGUF file, use
 `weight_path` to that filename. These inventories are checked before launch,
 including under the default policy; missing inventories produce an explicit unverified
 migration warning. Core does not acquire or repair pre-placed paths automatically.
+
+## Parallel model copies
+
+The builtin manifest transport copies to multiple destinations concurrently.
+Each destination can use two rsync processes by default, with sixteen processes
+in total per copy operation (one source). Set `model_transfer_streams_per_host`
+and `model_transfer_max_streams` in global configuration, or `streams_per_host`
+and `max_streams` under a cluster's `distribution.model`. Values must be positive
+integers. Set both to `1` for serial transfers. These limits apply to the builtin
+manifest copy path; plugins and legacy inventory-unavailable fallback retain
+their own transfer behavior. Separate operations have separate limits.
+
+Only files that fail the selected validation policy enter the queue. Files at
+least 64 MiB run as individual jobs; smaller files are grouped into batches up
+to 64 MiB. Admission rotates across destinations, with larger files first.
+Multiple streams use independent SSH connections over the selected transfer
+addresses, retaining SSH authentication and host-key verification. Rsync
+compression is off; bulk SSH connections disable multiplexing and default
+to no compression.
+
+Shared-cache aliases identified by the held publication leases receive one
+copy. Jobs use disjoint file lists, retain rsync partial files for retries, and
+replace snapshot files atomically. Cancellation and deadlines stop owned copy
+processes without closing a borrowed session or releasing publication leases
+before workers finish. Core revalidates every target before publishing runtime
+bindings, including aliases. A single large file stays a single transfer;
+this scheduler does not split GGUF files into byte ranges.
+
+CLI and API feedback report aggregate/per-host logical bytes processed,
+active stream counts, and logical bytes per second. Counters include data
+reused by rsync and remain monotonic across retries; they do not measure bytes
+sent on the network. Completion of a copy is followed by core validation.
+Tune stream counts against actual disk and network throughput; additional
+streams cannot exceed the source NIC or storage bandwidth.
 
 ## Hugging Face transports
 

@@ -288,6 +288,8 @@ class SparkrunConfig:
                 ("file_selection", "model_file_selection"),
                 ("provider", "model_distribution_provider"),
                 ("fallback", "model_distribution_fallback"),
+                ("streams_per_host", "model_transfer_streams_per_host"),
+                ("max_streams", "model_transfer_max_streams"),
             ):
                 value = getattr(prefs, field, None)
                 if value is not None:

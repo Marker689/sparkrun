@@ -21,7 +21,7 @@ class ModelHostIO:
         self.owns_session = session is None
         self._stack = ExitStack()
         self._operation = uuid.uuid4().hex
-        self._locks: set[tuple[str | None, str]] = set()
+        self._locks: dict[tuple[str | None, str], str] = {}
 
     def __enter__(self):
         return self
@@ -32,9 +32,13 @@ class ModelHostIO:
         if self.owns_session:
             self.session.close()
 
-    def execute(self, host: str | None, script: str, *, timeout: float = 30) -> HostCommandResult:
+    def execute(self, host: str | None, script: str, *, timeout: float = 30, cancelled=None, stdout=None) -> HostCommandResult:
         session = self.local if host is None else self.session
         try:
+            if cancelled is not None:
+                from sparkrun.models._stream import execute_stream
+
+                return execute_stream(session, host or "localhost", script, timeout=timeout, cancelled=cancelled, stdout=stdout)
             return session.execute(host or "localhost", ["bash", "-s"], input_data=script.encode(), timeout=timeout)
         except (HostSessionError, OSError) as exc:
             raise ModelArtifactError("model host session unavailable on " + (host or "control")) from exc
@@ -56,11 +60,14 @@ class ModelHostIO:
             raise ModelArtifactError("host returned an invalid model cache path")
         return path
 
-    def observe(self, host: str | None, manifest: ModelArtifactManifest, cache: str, *, checksums: bool = False):
+    def observe(
+        self, host: str | None, manifest: ModelArtifactManifest, cache: str, *, checksums: bool = False, timeout=None, cancelled=None
+    ):
         result = self.execute(
             host,
             observation_script(manifest, str(PurePosixPath(cache) / manifest.relative_snapshot), checksums=checksums),
-            timeout=1800 if checksums else 60,
+            timeout=timeout if timeout is not None else (1800 if checksums else 60),
+            **({"cancelled": cancelled} if cancelled is not None else {}),
         )
         return parse_observations(
             host or "control", manifest, result.stdout.decode(errors="replace"), returncode=result.returncode, checksums=checksums
@@ -86,7 +93,7 @@ class ModelHostIO:
             'mv -f -- "$tmp" "$p"\n',
         )
 
-    def lock(self, host: str | None, cache: str, repo: str) -> None:
+    def lock(self, host: str | None, cache: str, repo: str) -> str:
         """One lease per shared repo write domain, held across provider callbacks.
 
         The nonce in the flock file detects a lease we already hold through
@@ -96,15 +103,16 @@ class ModelHostIO:
         path = str(PurePosixPath(cache) / STATE_DIRECTORY / (repo.replace("/", "--") + ".lock"))
         key = host, path
         if key in self._locks:
-            return
+            return self._locks[key]
         existing = self.read(host, path)
-        if existing == self._operation:
-            self._locks.add(key)
-            return
+        if existing is not None and existing in self._locks.values():
+            self._locks[key] = existing
+            return existing
         session = self.local if host is None else self.session
         if not isinstance(session, StreamingHostSession):
             raise ModelArtifactError("model publication requires a host session with supervised streaming leases")
-        inner = f'printf %s {quote(self._operation)} > {quote(path)}; printf "LOCKED\\n"; cat >/dev/null'
+        lease = self._operation + ":" + uuid.uuid4().hex
+        inner = f'printf %s {quote(lease)} > {quote(path)}; printf "LOCKED\\n"; cat >/dev/null'
         script = "set -eu\nmkdir -p -- %s\nexec flock -w 30 %s bash -c %s\n" % (
             quote(str(PurePosixPath(path).parent)),
             quote(path),
@@ -114,4 +122,5 @@ class ModelHostIO:
         self._stack.callback(process.close)
         if process.stdout.readline() != b"LOCKED\n":
             raise ModelArtifactError("could not acquire model cache publication lease on " + (host or "control"))
-        self._locks.add(key)
+        self._locks[key] = lease
+        return lease

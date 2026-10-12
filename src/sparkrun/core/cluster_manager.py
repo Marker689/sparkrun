@@ -116,6 +116,8 @@ class ResourceDistributionPrefs:
     file_selection: str | None = None
     provider: str | None = None
     fallback: bool | None = None
+    streams_per_host: int | None = None
+    max_streams: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ResourceDistributionPrefs":
@@ -129,6 +131,8 @@ class ResourceDistributionPrefs:
             file_selection=data.get("file_selection"),
             provider=data.get("provider"),
             fallback=data.get("fallback"),
+            streams_per_host=data.get("streams_per_host"),
+            max_streams=data.get("max_streams"),
         )
 
     def is_default(self) -> bool:
@@ -136,7 +140,10 @@ class ResourceDistributionPrefs:
             self.enabled
             and self.preserve_perms
             and not self.skip_fan_out
-            and all(value is None for value in (self.validation, self.file_selection, self.provider, self.fallback))
+            and all(
+                value is None
+                for value in (self.validation, self.file_selection, self.provider, self.fallback, self.streams_per_host, self.max_streams)
+            )
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,7 +154,7 @@ class ResourceDistributionPrefs:
             out["skip_fan_out"] = True
         if not self.enabled:
             out["enabled"] = False
-        for name in ("validation", "file_selection", "provider", "fallback"):
+        for name in ("validation", "file_selection", "provider", "fallback", "streams_per_host", "max_streams"):
             value = getattr(self, name)
             if value is not None:
                 out[name] = value

@@ -342,6 +342,8 @@ DTO_FIELDS = {
         "file_selection",
         "provider",
         "fallback",
+        "streams_per_host",
+        "max_streams",
     ],
     "sparkrun.core.cluster_manager.ClusterDistributionConfig": ["model", "tuning"],
     "sparkrun.core.cluster_manager.ClusterDefinition": [

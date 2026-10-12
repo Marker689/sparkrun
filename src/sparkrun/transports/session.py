@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from threading import Lock
 from typing import Protocol, runtime_checkable
@@ -320,9 +321,9 @@ class SshHostSession:
 
     @staticmethod
     def _terminate(process: subprocess.Popen) -> None:
-        if process.poll() is not None:
-            return
         if os.name == "nt":
+            if process.poll() is not None:
+                return
             # Kill the owned tree (ssh and its local children), never unrelated
             # sessions by executable name. Windows has no POSIX process groups.
             try:
@@ -340,9 +341,21 @@ class SshHostSession:
             process.wait(timeout=5)
             return
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=2)
+            if process.poll() is None:
+                deadline = time.monotonic() + 2
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+                # Let rsync children save their partial files even when the
+                # shell exits promptly. Escalate after the same grace period.
+                while time.monotonic() < deadline:
+                    os.killpg(process.pid, 0)
+                    time.sleep(0.05)
         except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            # The owned leader may exit before its children (or a child may
+            # ignore TERM). Always finish the group so pipe readers and bulk
+            # transfers cannot outlive cancellation of their handle.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except OSError:

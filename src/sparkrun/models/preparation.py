@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import logging
 import os
+from pathlib import PurePosixPath
 import re
 import uuid
 
@@ -27,6 +28,7 @@ from sparkrun.models.artifacts import (
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
 from sparkrun.models.transport import builtin_copy
+from sparkrun.utils.shell import quote
 
 logger = logging.getLogger(__name__)
 _REPAIRABLE = {"missing", "wrong_size", "checksum_mismatch"}
@@ -257,10 +259,21 @@ def prepare_model(
 
                 def copy_to(selected: list[str], addresses: list[str]):
                     needed = []
+                    domains = {}
                     for host, address in zip(selected, addresses, strict=True):
                         report = io.observe(host, manifest, roots[host], checksums=checksums)
                         if not report.complete:
-                            needed.append(ModelTarget(host, roots[host], address, _repair_files(report)))
+                            # Shared mounts/host aliases reuse the same held lease.
+                            # One writer per file even when several hostnames see it.
+                            domain = io.lock(host, roots[host], request.repo)
+                            files = _repair_files(report)
+                            if domain in domains:
+                                index = domains[domain]
+                                target = needed[index]
+                                needed[index] = replace(target, required_files=tuple(sorted(set(target.required_files) | set(files))))
+                            else:
+                                domains[domain] = len(needed)
+                                needed.append(ModelTarget(host, roots[host], address, files))
                     if not needed:
                         return
                     source_check = io.observe(source_host, manifest, source_root, checksums=checksums)
@@ -271,6 +284,18 @@ def prepare_model(
                     )
                     outcome = try_model_transfer(copy)
                     if outcome is None:
+                        # Concurrent rsync --mkpath receivers can race on mkdir,
+                        # including implied parent directories. Prepare them once
+                        # under the held lease before any payload workers start.
+                        for target in needed:
+                            snapshot = PurePosixPath(target.cache_root) / manifest.relative_snapshot
+                            parents = sorted({str((snapshot / path).parent) for path in target.required_files})
+                            io.checked(
+                                target.host,
+                                "set -euo pipefail\nprintf '%s\\0' "
+                                + " ".join(quote(path) for path in parents)
+                                + " | xargs -0 -r mkdir -p --\n",
+                            )
                         outcome = builtin_copy(copy, io, ssh)
                     if any(state == "failed" for state in outcome.outcomes.values()):
                         raise ModelArtifactError(

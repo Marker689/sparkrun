@@ -12,6 +12,11 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Parallelize builtin manifest-based model copies across hosts and file batches,
+  with configurable per-host and total stream limits (defaults: 2 and 16).
+  Deduplicate shared-cache destinations, supervise cancellation and deadlines,
+  retain resumable partial files, and emit structured aggregate/per-host progress.
+
 - Upgrade Hugging Face Hub to 2.2.0 and Click to 8.4.2. Use Hub's active HTTP
   transport for bounded clients and controller/remote inventory errors, preserve
   Xet-first weight downloads and offline cache reuse, and support the modern `hf`
