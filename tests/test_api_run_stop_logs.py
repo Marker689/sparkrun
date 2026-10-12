@@ -442,12 +442,8 @@ def test_logs_stopped_container_preserves_metadata(tmp_path):
     assert load_job_metadata(cluster_id, cache_dir=str(tmp_path)) is not None
 
 
-def test_logs_removed_container_cleans_metadata(tmp_path):
-    """Container fully gone (auto-removed) → JobNotFound + metadata removed.
-
-    When the executor confirms nothing remains, the metadata is stale and is
-    removed so ``logs <TAB>`` stops suggesting the dead workload.
-    """
+def test_logs_removed_container_preserves_metadata(tmp_path):
+    """An absent container may be a pending launch; log inspection is read-only."""
     from sparkrun.core.recipe import Recipe
     from sparkrun.orchestration.job_metadata import save_job_metadata, load_job_metadata
 
@@ -469,13 +465,47 @@ def test_logs_removed_container_cleans_metadata(tmp_path):
     msg = str(exc.value)
     assert "nothing remains to read" in msg
     assert cluster_id in msg
-    assert "stale job metadata has been removed" in msg
+    assert "job metadata has been preserved" in msg
+    assert "sparkrun stop " + cluster_id in msg
     # auto_remove defaults on, so absence is `--rm` doing its job rather than a
     # workload that never ran — say which, and how to keep it next time.
     assert "auto-removed on exit" in msg
     assert "auto_remove=false" in msg
-    # Metadata was cleaned up.
-    assert load_job_metadata(cluster_id, cache_dir=str(tmp_path)) is None
+    assert load_job_metadata(cluster_id, cache_dir=str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize("relaunch", [False, True])
+def test_log_inspection_preserves_pending_launch_claims(tmp_path, relaunch):
+    """Reading before container creation, including an ID reuse, cannot finalize."""
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata, load_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm-distributed", "model": "test/m"})
+    cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    claims = [{"host": "h1", "cache_root": "/fixture/hf", "repo": "test/m", "revision": "a" * 40, "claim": "pending-launch"}]
+
+    def record_launch():
+        save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path), model_cache_claims=claims)
+
+    record_launch()
+
+    def observe(*args, **kwargs):
+        if relaunch:
+            # Model another launch replacing the metadata after logs resolved it.
+            claims[0]["claim"] = "new-launch"
+            record_launch()
+        return _make_status({"h1": []})
+
+    gone = [RemoteResult(host="h1", returncode=0, stdout="", stderr="")]
+    with (
+        patch.object(DockerExecutor, "query_status", side_effect=observe),
+        patch("sparkrun.orchestration.ssh.run_remote_scripts_parallel", return_value=gone),
+        patch("sparkrun.models.usage.release_claims") as release,
+    ):
+        with pytest.raises(api.JobNotFound, match="job metadata has been preserved"):
+            api.logs(cluster_id, hosts=("h1",), cache_dir=str(tmp_path))
+        release.assert_not_called()
+    assert load_job_metadata(cluster_id, cache_dir=str(tmp_path))["model_cache_claims"] == claims
 
 
 def test_logs_precheck_worker_alive_when_head_dead(tmp_path):

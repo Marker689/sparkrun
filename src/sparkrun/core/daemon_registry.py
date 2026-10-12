@@ -8,6 +8,7 @@ import re
 from typing import Callable
 
 from sparkrun.core.registration import enlist_registry_state
+from sparkrun.core.daemon_schema import validate_schema
 from sparkrun.core.plugin_identity import PluginIdentity, current_registration_owner, normalize_plugin_id
 
 _LOCAL_NAME = r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*"
@@ -36,6 +37,8 @@ class DaemonOp:
     cacheable: bool = False
 
     def __post_init__(self):
+        validate_schema(self.request_schema, path=f"{self.name}.request_schema")
+        validate_schema(self.result_schema, path=f"{self.name}.result_schema")
         if not re.fullmatch(rf"(?:{_LOCAL_NAME}|plugins\.{_PLUGIN_ID}\.{_LOCAL_NAME})", self.name) or self.kind not in {
             "query",
             "job",
@@ -153,6 +156,7 @@ class DaemonRoute:
     operation_map: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
+        validate_schema(self.request_schema, path=f"{self.path}.request_schema")
         if self.path.startswith("/"):
             valid = re.fullmatch(r"/v1/[a-z][a-z0-9_-]*(?:/[a-z0-9_][a-z0-9_-]*)*", self.path)
             if not valid or (self.local_path is None and self.path.split("/")[2] in _RESERVED_ROUTE_ROOTS):

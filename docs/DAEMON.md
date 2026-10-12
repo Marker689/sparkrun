@@ -548,6 +548,23 @@ launcher specifications, and credential-bearing proxy UI/token helpers. Readines
 and hooks are exposed as steps of `run`, not serializable live handles. Explicit
 DTO allowlists/schemas live in `api/_wire*.py`; unsupported objects fail closed.
 
+Operation request/result schemas and route request schemas are checked when their
+declarations are created. The shared validator supports `type` (including a list
+of types), `properties`, `required`, `additionalProperties` (boolean or schema),
+`items` (schema), `anyOf`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength`,
+`minItems`, `maxItems`, and `pattern` (Python regular-expression syntax).
+Constraints alongside `anyOf` still apply. Documentation annotations `title`,
+`description`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`, and
+`$comment` are accepted without changing validation or filling in defaults.
+Unsupported keywords, including `$ref`, `const`, `oneOf`, `allOf`, and `format`,
+are rejected rather than published as unenforced constraints. Use inline schemas
+and single-value `enum` declarations where appropriate. Requests also have implicit
+size/depth bounds; results use their declared limits and the serialization depth bound.
+
+Log inspection is read-only even when no container exists: a launch can have
+persisted metadata before creating its containers. Logs preserve workload metadata
+and model-cache claims; explicit stop/reconciliation owns cleanup.
+
 ## Plugin feedback
 
 Job event streams include versioned `type: "feedback"` events from the public

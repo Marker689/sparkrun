@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from sparkrun.api._wire_fields import DTO_FIELDS
+from sparkrun.core.daemon_schema import validate as validate
 
 
 class WireEncodingError(TypeError, ValueError):
@@ -38,74 +39,6 @@ _SECRET = re.compile(r"(^|_)(password|passwd|secret|token|api_key|private_key|au
 
 def object_schema(properties=None, required=()) -> dict[str, Any]:
     return {"type": "object", "properties": properties or {}, "required": list(required), "additionalProperties": False}
-
-
-def validate(value, schema, *, path="request", depth=0, request_limits=True):
-    """Check declared constraints; implicit request limits do not constrain results."""
-    if depth > (20 if request_limits else 25):
-        raise ValueError(f"{path}: maximum nesting depth exceeded")
-    if "anyOf" in schema:
-        for choice in schema["anyOf"]:
-            try:
-                return validate(value, choice, path=path, depth=depth, request_limits=request_limits)
-            except ValueError:
-                pass
-        raise ValueError(f"{path}: invalid value")
-    kind = schema.get("type")
-    matches = {
-        "object": isinstance(value, dict),
-        "array": isinstance(value, (list, tuple)),
-        "string": isinstance(value, str),
-        "integer": type(value) is int,
-        "number": type(value) in (int, float),
-        "boolean": type(value) is bool,
-        "null": value is None,
-    }
-    if isinstance(kind, list):
-        if not any(matches.get(option, False) for option in kind):
-            raise ValueError(f"{path}: expected one of {kind}")
-    elif kind and not matches.get(kind, False):
-        raise ValueError(f"{path}: expected {kind}")
-    if isinstance(value, str) and len(value) < schema.get("minLength", 0):
-        raise ValueError(f"{path}: string too short")
-    if isinstance(value, str) and len(value) > schema.get("maxLength", 65536 if request_limits else math.inf):
-        raise ValueError(f"{path}: string too long")
-    if isinstance(value, str) and "pattern" in schema and not re.search(schema["pattern"], value):
-        raise ValueError(f"{path}: invalid format")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if (
-            not math.isfinite(value)
-            or value < schema.get("minimum", -1e100 if request_limits else -math.inf)
-            or value > schema.get("maximum", 1e100 if request_limits else math.inf)
-        ):
-            raise ValueError(f"{path}: number out of range")
-    if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(f"{path}: unsupported value")
-    if isinstance(value, dict):
-        if any(not isinstance(k, str) for k in value):
-            raise ValueError(f"{path}: keys must be strings")
-        properties = schema.get("properties", {})
-        unknown = value.keys() - properties.keys()
-        if unknown and schema.get("additionalProperties") is False:
-            raise ValueError(f"{path}: unknown fields: {', '.join(sorted(unknown))}")
-        if missing := set(schema.get("required", ())) - value.keys():
-            raise ValueError(f"{path}: missing fields: {', '.join(sorted(missing))}")
-        for key, item in value.items():
-            validate(
-                item,
-                properties.get(key, schema.get("additionalProperties") if isinstance(schema.get("additionalProperties"), dict) else {}),
-                path=f"{path}.{key}",
-                depth=depth + 1,
-                request_limits=request_limits,
-            )
-    if isinstance(value, (tuple, list)):
-        if len(value) < schema.get("minItems", 0):
-            raise ValueError(f"{path}: too few items")
-        if len(value) > schema.get("maxItems", 2048 if request_limits else math.inf):
-            raise ValueError(f"{path}: too many items")
-        for item in value:
-            validate(item, schema.get("items", {}), path=path + "[]", depth=depth + 1, request_limits=request_limits)
-    return value
 
 
 def reject_secrets(value):

@@ -224,7 +224,7 @@ def _verify_log_source_alive(
     3. **All sources dead** (none in the snapshot) →
        :meth:`Executor.describe_terminated` distinguishes
        **stopped-but-inspectable** (preserve metadata, render the executor's
-       investigation hints) from **fully gone** (clean up stale metadata).
+       investigation hints) from **fully gone** (report absence without cleanup).
        ``query_status`` reports only what is *running*, so it structurally
        cannot make that distinction itself.
 
@@ -305,8 +305,7 @@ def _verify_log_source_alive(
     # Every source is confirmed dead.  Ask the executor what became of the head
     # — whether anything is left to inspect, and how to inspect it.  A missing
     # entry means "cannot tell" (unreachable host, an executor with no
-    # post-mortem support), which must not be read as "gone": that verdict is
-    # what deletes cached metadata.
+    # post-mortem support), which must not be read as "gone".
     try:
         terminated = executor.describe_terminated([head], ssh_kwargs=ssh_kwargs)
     except Exception:  # noqa: BLE001 — best-effort, like the status sweep above
@@ -321,24 +320,18 @@ def _verify_log_source_alive(
             "Run `sparkrun stop %s` to clean up when ready." % (cluster_id, head.host, _detail_suffix(info), _hint_block(info), cluster_id)
         )
 
-    # Confirmed gone — the cached metadata is stale.  Remove it so
-    # ``logs <TAB>`` stops suggesting this dead workload.
-    removed = False
-    try:
-        from sparkrun.orchestration.workload_cleanup import finalize_workload
-
-        removed = finalize_workload(cluster_id, hosts=[source.host for source in sources], cache_dir=cache_dir, ssh_kwargs=ssh_kwargs)
-    except Exception:
-        logger.debug("Failed to remove stale metadata for %s", cluster_id, exc_info=True)
-
+    # Absence is only an observation: a launch persists metadata and claims
+    # before creating containers, and a relaunch may replace this ID while we
+    # probe. Reads must never finalize workloads or release their cache claims.
     raise JobNotFound(
         "Workload %s is not running on %s and nothing remains to read%s.\n"
-        "%s Run `sparkrun status` to see running workloads.%s"
+        "The job metadata has been preserved. Run `sparkrun stop %s` to clean up when ready.\n"
+        "Run `sparkrun status` to see running workloads.%s"
         % (
             cluster_id,
             head.host,
             _detail_suffix(info),
-            "The stale job metadata has been removed." if removed else "Metadata was retained; retry stop to reconcile cache claims.",
+            cluster_id,
             _hint_block(info),
         )
     )

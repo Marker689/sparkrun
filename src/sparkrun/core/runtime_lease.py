@@ -3,20 +3,94 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from importlib.machinery import ModuleSpec, PathFinder
 import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import uuid
 
 from sparkrun.core.process_identity import alive, process_identity
 from sparkrun.utils.fs import atomic_private_write, file_lock
 
 
+def _path_spec(name, search):
+    """Like PathFinder, but keep namespace locations concrete during discovery.
+
+    PathFinder's lazy namespace paths require parents in sys.modules, even to
+    construct a nested namespace spec. Path-entry finders expose the same
+    locations without that requirement. Preserve import path/hook precedence.
+    """
+    locations = []
+    for entry in sys.path if search is None else search:
+        if not isinstance(entry, str):
+            continue
+        entry = entry or os.getcwd()
+        if entry not in sys.path_importer_cache:
+            finder = None
+            for hook in sys.path_hooks:
+                try:
+                    finder = hook(entry)
+                    break
+                except ImportError:
+                    continue
+            sys.path_importer_cache[entry] = finder
+        finder = sys.path_importer_cache[entry]
+        spec = finder.find_spec(name) if finder is not None else None
+        if spec is not None:
+            if spec.loader is not None:
+                return spec
+            if spec.submodule_search_locations is not None:
+                locations.extend(spec.submodule_search_locations)
+    if locations:
+        spec = ModuleSpec(name, loader=None, is_package=True)
+        spec.submodule_search_locations = locations
+        return spec
+    return None
+
+
+def _module_sources(module, recorded):
+    """Resolve source ownership through import finders without importing modules.
+
+    Calling PathFinder directly misses PEP 660 meta-path hooks. Walking specs
+    ourselves also avoids importlib.util.find_spec importing parent packages.
+    Namespace directories do not imply ownership of every package below them.
+    """
+    search = None
+    package_root = None
+    parts = module.split(".")
+    for index in range(len(parts)):
+        name = ".".join(parts[: index + 1])
+        spec = None
+        for finder in sys.meta_path:
+            spec = _path_spec(name, search) if finder is PathFinder else finder.find_spec(name, search)
+            if spec is not None:
+                break
+        if spec is None:
+            raise RuntimeError("Cannot locate source for runtime component %r" % module)
+        origin = Path(spec.origin).resolve() if spec.has_location and spec.origin else None
+        search = spec.submodule_search_locations
+        if search is not None and origin is not None and package_root is None:
+            package_root = origin.parent
+        if index < len(parts) - 1 and search is None:
+            raise RuntimeError("Runtime component %r has a non-package parent" % module)
+
+    # Ordinary wheels already identify every owned source file in RECORD.
+    # Editable RECORDs contain the finder/.pth instead of the actual sources.
+    if origin is None or not origin.is_file():
+        raise RuntimeError("Runtime component %r has no trackable source location" % module)
+    if origin in recorded:
+        return {origin}
+    if package_root is not None:
+        return set(package_root.rglob("*.py")) | {origin}
+    # A single-file module owns that file, not its site-packages directory.
+    return {origin}
+
+
 def _component_identity(package, module):
     """Metadata and source stamps without importing integration code."""
     from importlib.metadata import distribution, PackageNotFoundError
-    from sparkrun.core.managed_plugins import physical_origin
 
     paths = set()
     version = None
@@ -25,14 +99,14 @@ def _component_identity(package, module):
             dist = distribution(package)
             version = dist.version
             paths.update(
-                Path(str(dist.locate_file(path))) for path in dist.files or () if path.suffix == ".py" or ".dist-info/" in str(path)
+                Path(str(dist.locate_file(path))).resolve()
+                for path in dist.files or ()
+                if path.suffix in {".py", ".pth"} or ".dist-info/" in str(path)
             )
         except PackageNotFoundError:
             pass
-    origin = physical_origin(module.split(":")[0]) if module else None
-    if origin:
-        # Covers editable installs whose wheel RECORD only contains a .pth file.
-        paths.update(origin.parent.rglob("*.py"))
+    if module:
+        paths.update(_module_sources(module.split(":")[0], paths))
     stamps = []
     for path in sorted(paths):
         try:

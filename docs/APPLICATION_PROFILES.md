@@ -512,5 +512,10 @@ Runtime leases fingerprint core, managed plugin generations, the owning
 application package/profile source, and selected installed integrations. Changed
 versions, same-version reinstalls and editable source changes require a daemon
 restart. Supported self-update continues to require draining active leases.
+Editable sources are resolved through import finders without importing application
+or integration modules, including PEP 660 import hooks. Wheel files are scoped to
+their owning distribution; a single-file module does not own neighboring packages.
+A selected component without a trackable source location fails runtime identity
+collection explicitly instead of silently claiming source-change protection.
 Application profile API, plugin API, feedback API and daemon operation versions
 are separate contracts even when their current version numbers coincide.
