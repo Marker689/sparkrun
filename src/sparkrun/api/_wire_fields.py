@@ -1,5 +1,8 @@
 """Reviewed DTO field allowlists; adding a Python model field never exports it implicitly."""
 
+from dataclasses import fields as _dataclass_fields
+from sparkrun.models.cache_reports import CacheEntry, CacheReport
+
 DTO_FIELDS = {
     "sparkrun.api._build_models.BuildOptions": [
         "hosts",
@@ -758,3 +761,9 @@ DTO_FIELDS.update(
         "sparkrun.core.layout.RecipeLayout": ["requires", "placements"],
     }
 )
+
+
+# Retention DTOs own their public field declarations.
+
+for _report in (CacheEntry, CacheReport):
+    DTO_FIELDS[_report.__module__ + "." + _report.__name__] = [field.name for field in _dataclass_fields(_report)]

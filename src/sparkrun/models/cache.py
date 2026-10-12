@@ -23,7 +23,13 @@ def host_cache(io, host, root, **options):
     # while fcntl and disk mutations belong exclusively to the Linux cache host.
     source = Path(__file__).with_name("_cache_agent.py").read_text()
     payload = json.dumps({"root": root, **options})
-    program = source + "\nprint(json.dumps(run(**json.loads(" + repr(payload) + "))))\n"
+    contract = Path(__file__).with_name("_cache_contract.py").read_text()
+    bootstrap = (
+        "import sys, types\nm=types.ModuleType('_sparkrun_cache_contract')\nsys.modules[m.__name__]=m\nexec("
+        + repr(contract)
+        + ", m.__dict__)\n"
+    )
+    program = bootstrap + source + "\nprint(json.dumps(run(**json.loads(" + repr(payload) + "))))\n"
     result = io.execute(host, "python3 -c " + str(quote(program)), timeout=300)
     if result.returncode:
         raise ModelArtifactError("cache operation on %s failed: %s" % (host or "control", result.stderr.decode(errors="replace")[-1500:]))
@@ -42,7 +48,9 @@ def cache_operation(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session
     with ModelHostIO(ssh_kwargs, session=session) as io:
         for host in dict.fromkeys(hosts if hosts is not None else ("localhost",)):
             root = io.root(host, cache_dir)
-            reports.append(host_cache(io, host, root, **options))
+            from sparkrun.models.cache_reports import CacheReport
+
+            reports.append(CacheReport.from_dict(host_cache(io, host, root, **options)))
     return tuple(reports)
 
 

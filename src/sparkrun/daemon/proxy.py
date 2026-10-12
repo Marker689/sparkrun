@@ -92,6 +92,8 @@ def watch_proxy(arguments, sctx, prompt=None):
     from sparkrun.core.operation import CURRENT
 
     operation = CURRENT.get()
+    if operation is None:
+        raise RuntimeError("Discovery service requires a daemon operation context")
     return run_session(
         session_for(sctx), arguments["generation"], sctx, cancelled=operation.cancel.is_set, wait=operation.cancel.wait, job_id=operation.id
     )
@@ -138,6 +140,30 @@ def serve_proxy(arguments, sctx, prompt=None):
         raise
 
 
+def submit_service(sctx, name, arguments, *, key):
+    """Host-local submission through the same durable registry and queue.
+
+    Internal operations have no HTTP submission path. The local controller
+    verifies the daemon runtime/admission state before publishing a service.
+    """
+    from sparkrun.core.daemon_registry import get_daemon_op
+    from sparkrun.core.runtime_lease import consistent_runtime
+    from sparkrun.daemon.client import Client
+
+    info = Client(binding=Binding.from_config(sctx.config)).request("GET", "/v1/info")
+    if info["restart_required"]:
+        raise RuntimeError("Daemon is draining or needs restart before accepting services")
+    from sparkrun.daemon.ops import register_core_ops
+
+    register_core_ops()
+    op = get_daemon_op(name)
+    if op.visibility != "internal":
+        raise ValueError("Service submission requires an internal operation")
+    with consistent_runtime(sctx.config, info["runtime"]):
+        identifier = _store(sctx).submit(op, arguments, "service:daemon", "proxy service", info["runtime"], key=key)
+    return {"job_id": identifier, "events_url": "/v1/jobs/" + identifier + "/events"}
+
+
 def launch_gateway(engine, config_path, ad_kwargs, sctx):
     """Submit a separate gateway service and wait only for its ready state."""
     from sparkrun.daemon.client import Client
@@ -170,14 +196,16 @@ def launch_gateway(engine, config_path, ad_kwargs, sctx):
             if pending_state and pending_state not in TERMINAL and pending_state != "expired":
                 raise RuntimeError("Gateway startup is already pending; inspect daemon job " + pending["job_id"])
             if not pending.get("claimed") and not pending.get("job_id"):
-                # Re-submit the original generation to resolve an uncertain HTTP
-                # acceptance before replacing its private launch descriptor.
-                previous = client.call("proxy.serve", {"generation": pending["generation"]}, key="proxy.serve:" + pending["generation"])
+                # Re-submit the original generation to resolve an interrupted job
+                # submission before replacing its private launch descriptor.
+                previous = submit_service(
+                    sctx, "proxy.serve", {"generation": pending["generation"]}, key="proxy.serve:" + pending["generation"]
+                )
                 pending["job_id"] = previous["job_id"]
                 atomic_private_write(pending_path, json.dumps(pending))
                 raise RuntimeError("Previous gateway submission requires reconciliation; inspect daemon job " + previous["job_id"])
         atomic_private_write(engine.state_dir / "gateway-start.json", json.dumps(saved))
-        result = client.call("proxy.serve", {"generation": generation}, key="proxy.serve:" + generation)
+        result = submit_service(sctx, "proxy.serve", {"generation": generation}, key="proxy.serve:" + generation)
         saved["job_id"] = result["job_id"]
         atomic_private_write(engine.state_dir / "gateway-start.json", json.dumps(saved))
     deadline = time.monotonic() + 60
@@ -238,6 +266,7 @@ def register_proxy_ops():
                 result_schema=result,
                 kind=kind,
                 scope="admin",
+                visibility="internal" if name in {"proxy.watch", "proxy.serve"} else "public",
                 resources="none",
                 description="Manage the proxy's dedicated gateway or discovery service.",
             )

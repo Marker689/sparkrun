@@ -4,6 +4,7 @@ These are explicit wire contracts, separate from runtime Python object graphs.
 """
 
 from sparkrun.api._wire import object_schema
+from sparkrun.models._cache_contract import CACHE_REASONS
 
 _REGISTRY_MUTATION_RESULT = {
     "type": "object",
@@ -3247,10 +3248,11 @@ _CACHE_ENTRY = {
         "reclaimable_bytes": {"type": "integer", "minimum": 0},
         "pinned": {"type": "boolean"},
         "claims": {"type": "object"},
-        "usage": {"type": "object"},
+        "usage": {"type": ["object", "null"]},
         "eligible": {"type": "boolean"},
         "reason": {"type": "string"},
-        "action": {"type": "string"},
+        "reason_code": {"type": "string", "enum": list(CACHE_REASONS)},
+        "action": {"type": ["string", "null"], "enum": [None, "pin", "reconcile", "would_remove", "removed"]},
     },
     "required": [
         "repo",
@@ -3265,8 +3267,9 @@ _CACHE_ENTRY = {
         "claims",
         "eligible",
         "reason",
+        "reason_code",
     ],
-    "additionalProperties": True,
+    "additionalProperties": False,
 }
 _CACHE_REPORT = {
     "type": "array",
@@ -3278,13 +3281,28 @@ _CACHE_REPORT = {
             "dry_run": {"type": "boolean"},
             "entries": {"type": "array", "items": _CACHE_ENTRY},
             "free_bytes": {"type": "integer", "minimum": 0},
-            "free_bytes_after": {"type": "integer", "minimum": 0},
+            "free_bytes_after": {"type": ["integer", "null"], "minimum": 0},
             "reclaimed_bytes": {"type": "integer", "minimum": 0},
             "planned_bytes": {"type": "integer", "minimum": 0},
             "target_met": {"type": "boolean"},
+            "budget_scope": {"type": "string", "enum": ["private_managed_snapshots"]},
+            "reclaimed_bytes_kind": {"type": "string", "enum": ["allocated_bytes_estimate"]},
+            "free_bytes_after_kind": {"type": "string", "enum": ["measured", "projected"]},
         },
-        "required": ["host", "cache_root", "dry_run", "entries", "free_bytes", "reclaimed_bytes", "planned_bytes", "target_met"],
-        "additionalProperties": True,
+        "required": [
+            "host",
+            "cache_root",
+            "dry_run",
+            "entries",
+            "free_bytes",
+            "reclaimed_bytes",
+            "planned_bytes",
+            "target_met",
+            "budget_scope",
+            "reclaimed_bytes_kind",
+            "free_bytes_after_kind",
+        ],
+        "additionalProperties": False,
     },
 }
 for _action in ("list", "prune", "pin", "reconcile"):

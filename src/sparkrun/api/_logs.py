@@ -323,17 +323,24 @@ def _verify_log_source_alive(
 
     # Confirmed gone — the cached metadata is stale.  Remove it so
     # ``logs <TAB>`` stops suggesting this dead workload.
+    removed = False
     try:
-        from sparkrun.orchestration.job_metadata import remove_job_metadata
+        from sparkrun.orchestration.workload_cleanup import finalize_workload
 
-        remove_job_metadata(cluster_id, cache_dir=cache_dir)
+        removed = finalize_workload(cluster_id, hosts=[source.host for source in sources], cache_dir=cache_dir, ssh_kwargs=ssh_kwargs)
     except Exception:
         logger.debug("Failed to remove stale metadata for %s", cluster_id, exc_info=True)
 
     raise JobNotFound(
         "Workload %s is not running on %s and nothing remains to read%s.\n"
-        "The stale job metadata has been removed. Run `sparkrun status` to see running workloads.%s"
-        % (cluster_id, head.host, _detail_suffix(info), _hint_block(info))
+        "%s Run `sparkrun status` to see running workloads.%s"
+        % (
+            cluster_id,
+            head.host,
+            _detail_suffix(info),
+            "The stale job metadata has been removed." if removed else "Metadata was retained; retry stop to reconcile cache claims.",
+            _hint_block(info),
+        )
     )
 
 

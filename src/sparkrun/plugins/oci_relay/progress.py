@@ -16,14 +16,15 @@ PROGRESS = 25
 logger = logging.getLogger(__name__)
 
 
-def status(log, stage, message, *args):
+def status(log, stage, message, *args, feedback=None):
     """Publish a preparation status on new hosts, retaining old-host logging."""
     try:
         from sparkrun.plugins import get_feedback
     except ImportError:
         log.log(PROGRESS, message, *args)
     else:
-        get_feedback("oci-relay", logger=log).progress(message % args if args else message, stage=stage)
+        reporter = feedback.child(source="oci-relay", logger=log) if feedback is not None else get_feedback("oci-relay", logger=log)
+        reporter.progress(message % args if args else message, stage=stage)
 
 
 def size(value):

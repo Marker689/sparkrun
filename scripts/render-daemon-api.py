@@ -46,7 +46,7 @@ def declarations(checkout):
         PluginIdentity("sparkroute", "sparkrun.plugins.sparkroute", ("external", "sparkrun.plugins.sparkroute", str(source)))
     ):
         register_sparkroute()
-    return registered_daemon_ops()
+    return tuple(op for op in registered_daemon_ops() if op.visibility == "public")
 
 
 def render(operations):

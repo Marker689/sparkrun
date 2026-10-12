@@ -32,6 +32,10 @@ class OperationError(RuntimeError):
     pass
 
 
+class UnsupportedHost(OperationError):
+    """A platform capability is unavailable, detected before payload transfer."""
+
+
 class Runner:
     def __init__(self, session, settings):
         from sparkrun.transports.session import SshHostSession
@@ -102,12 +106,12 @@ class Runner:
         if self.windows(host):
             arch = {"amd64": "amd64", "arm64": "arm64"}.get(platform.machine().lower())
             if arch is None:
-                raise OperationError("unsupported Windows architecture")
+                raise UnsupportedHost("unsupported Windows architecture")
             return arch
         fields = self.execute(host, ["uname", "-sm"]).decode().split()
         arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(fields[-1] if fields else "")
         if len(fields) != 2 or fields[0] != "Linux" or arch is None:
-            raise OperationError(f"unsupported execution host platform on {host or 'controller'}")
+            raise UnsupportedHost(f"unsupported execution host platform on {host or 'controller'}")
         return arch
 
     def cache_directory(self, host):

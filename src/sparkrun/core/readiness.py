@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 
 # Engine initialization, weight loading and graph capture can all precede port
@@ -22,6 +22,14 @@ INFERENCE_STYLE_APIS = {
     ANTHROPIC_MESSAGES_STREAM: "messages",
 }
 INFERENCE_STYLES = frozenset(INFERENCE_STYLE_APIS)
+
+
+class ReadinessCancellation(Protocol):
+    """Read-only cancellation interface shared by events and deadline adapters."""
+
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
 
 
 @dataclass(frozen=True)

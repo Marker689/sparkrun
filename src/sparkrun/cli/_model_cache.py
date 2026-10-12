@@ -17,6 +17,14 @@ def model_cache():
     """Inspect, repair, retain and prune model caches on selected hosts."""
 
 
+endpoint_option = click.option(
+    "--endpoint",
+    default="https://huggingface.co",
+    envvar="HF_ENDPOINT",
+    help="Model origin URL (defaults to HF_ENDPOINT or huggingface.co).",
+)
+
+
 def options(function):
     @wraps(function)
     def wrapped(ctx, model, revision, file_selection, projector, endpoint, cache_dir, hosts, checksums, **kwargs):
@@ -46,7 +54,7 @@ def options(function):
         click.option("--checksum", "checksums", is_flag=True, help="Hash selected files; normal inspection checks size and readability."),
         click.option("--host", "hosts", multiple=True, help="Target host (repeatable; default localhost)."),
         click.option("--cache-dir", default=None, help="HF_HOME on the target hosts."),
-        click.option("--endpoint", default="https://huggingface.co", envvar="HF_ENDPOINT"),
+        endpoint_option,
         click.option("--projector", default=None),
         click.option("--file-selection", type=click.Choice(["auto", "all", "safetensors"]), default="auto", show_default=True),
         click.option("--revision", default=None),
@@ -116,7 +124,7 @@ def cache_options(function):
             )
         except (ValueError, OSError) as exc:
             raise click.ClickException(str(exc)) from exc
-        click.echo(json.dumps(reports, indent=2))
+        click.echo(json.dumps([asdict(report) for report in reports], indent=2))
         if any(not r.get("target_met", True) for r in reports):
             ctx.exit(1)
 
@@ -164,10 +172,11 @@ def prune_cache(**kwargs):
 @click.argument("model")
 @click.option("--revision", required=True, help="Full immutable model commit ID.")
 @click.option("--remove", is_flag=True, help="Remove the retention pin instead of setting it.")
+@endpoint_option
 @cache_options
-def pin_cache(model, revision, remove, **kwargs):
+def pin_cache(model, revision, remove, endpoint, **kwargs):
     """Keep a tracked revision out of cleanup on each selected cache host."""
-    return api.pin_revision(ModelArtifactRequest(model, revision), pinned=not remove, **kwargs)
+    return api.pin_revision(ModelArtifactRequest(model, revision, endpoint=endpoint), pinned=not remove, **kwargs)
 
 
 @model_cache.command("reconcile")
@@ -175,8 +184,9 @@ def pin_cache(model, revision, remove, **kwargs):
 @click.option("--revision", required=True, help="Full immutable model commit ID.")
 @click.option("--claim", required=True, help="Exact outstanding claim ID shown by model-cache list.")
 @click.option("--confirm-inactive", is_flag=True, help="Confirm all workloads/launches sharing this claim have stopped.")
+@endpoint_option
 @cache_options
-def reconcile_cache(model, revision, claim, confirm_inactive, **kwargs):
+def reconcile_cache(model, revision, claim, confirm_inactive, endpoint, **kwargs):
     """Release an interrupted workload's claim after inspecting its hosts.
 
     Normal stop releases claims automatically. A dead controller or an old
@@ -185,4 +195,4 @@ def reconcile_cache(model, revision, claim, confirm_inactive, **kwargs):
     """
     if not confirm_inactive:
         raise click.ClickException("Inspect every host in the claim, stop its workloads, then pass --confirm-inactive")
-    return api.reconcile_claim(ModelArtifactRequest(model, revision), claim=claim, confirm_inactive=True, **kwargs)
+    return api.reconcile_claim(ModelArtifactRequest(model, revision, endpoint=endpoint), claim=claim, confirm_inactive=True, **kwargs)

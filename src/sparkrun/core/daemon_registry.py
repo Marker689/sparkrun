@@ -32,6 +32,8 @@ class DaemonOp:
     owner: str | None = None
     resources: str = "auto"
     local_name: str | None = None
+    visibility: str = "public"
+    cacheable: bool = False
 
     def __post_init__(self):
         if not re.fullmatch(rf"(?:{_LOCAL_NAME}|plugins\.{_PLUGIN_ID}\.{_LOCAL_NAME})", self.name) or self.kind not in {
@@ -42,6 +44,10 @@ class DaemonOp:
             raise ValueError("Invalid daemon operation")
         if self.resources not in {"auto", "controller", "none"}:
             raise ValueError("Invalid resource policy")
+        if self.visibility not in {"public", "internal"}:
+            raise ValueError("Invalid operation visibility")
+        if type(self.cacheable) is not bool or (self.cacheable and (self.kind != "query" or self.scope != "read")):
+            raise ValueError("Only bounded read queries can opt into caching")
         if self.scope not in {"read", "operate", "admin"} or self.version < 1:
             raise ValueError("Invalid operation scope/version")
         if self.request_schema.get("type") != "object" or self.request_schema.get("additionalProperties") is not False:
@@ -120,7 +126,7 @@ def get_daemon_op(name):
 
 
 def operation_http_path(op: DaemonOp) -> str | None:
-    if op.kind == "stream":
+    if op.kind == "stream" or op.visibility == "internal":
         return None
     if op.owner not in (None, "core"):
         if not op.local_name:

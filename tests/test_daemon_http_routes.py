@@ -127,6 +127,10 @@ def test_openapi_describes_alias_bodies_responses_and_rebuilds_after_startup(bin
                     if op.owner == "core"
                     else (f"/v1/plugins/{op.owner}/ops/" + op.local_name.replace(".", "/"))
                 )
+                if op.visibility == "internal":
+                    assert path not in schema["paths"]
+                    assert op.name not in schema["x-sparkrun-operations"]
+                    continue
                 if op.kind == "stream":
                     assert path not in schema["paths"]
                     assert schema["x-sparkrun-operations"][op.name]["http_path"] is None

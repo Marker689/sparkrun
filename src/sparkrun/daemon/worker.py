@@ -244,21 +244,21 @@ class Worker:
                         raise InterruptedError("Cancelled before execution")
                 self.operation.check()
                 with operation_scope(sctx):
-                    from sparkrun.core.coordination import reserve_resources
+                    from sparkrun.core.coordination import reserve_resources, reservation_keys
 
                     # Composite adapters use the same reservation mechanism as CLI/API.
                     args = self.job["arguments"]
                     hosts = args.get("hosts")
                     if not hosts and args.get("cluster"):
                         hosts = sctx.cluster_manager.get(args["cluster"]).hosts
-                    keys = {"host:" + h.rsplit("@", 1)[-1].lower() for h in hosts} if hosts else {"*"}
-                    if op.resources == "controller":
-                        keys = {"*"}
+                    keys = reservation_keys(hosts, executor_config=args.get("executor_config"), controller=op.resources == "controller")
                     if op.scope != "read" and op.resources != "none":
                         stack.enter_context(reserve_resources(config.config_path.parent, keys))
                     # Cleanup precedes releasing mutation reservations.
                     stack.enter_context(cleanup_on_failure())
-                    result = op.handler_loader()(dict(args), sctx, self.prompt)
+                    from sparkrun.api._wire import check_result
+
+                    result = check_result(op, op.handler_loader()(dict(args), sctx, self.prompt), redact=self.redact)
                     self.store.finish(self.id, "succeeded", result=self.redact(result))
             succeeded = True
         except (KeyboardInterrupt, InterruptedError):

@@ -425,6 +425,10 @@ class GatewaySupervisor(GatewayState):
         """
         return False
 
+    def _restart_proxy(self) -> int | None:
+        """Replace the gateway inside its supervisor; implementations own launch."""
+        raise NotImplementedError("This gateway does not support supervised restart")
+
     def _warn_insecure_bind(self) -> None:
         """Warn loudly when binding every interface without an explicit choice.
 

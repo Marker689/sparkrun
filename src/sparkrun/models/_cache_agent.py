@@ -14,7 +14,13 @@ import shutil
 import stat
 import time
 
-STATE = ".sparkrun-model-artifacts"
+try:
+    from ._cache_contract import STATE_DIRECTORY as STATE, CACHE_REASONS, validate_usage
+except ImportError:  # Shipped by the controller without installing Sparkrun.
+    from importlib import import_module
+
+    _contract = import_module("_sparkrun_cache_contract")
+    STATE, CACHE_REASONS, validate_usage = _contract.STATE_DIRECTORY, _contract.CACHE_REASONS, _contract.validate_usage
 
 
 def traversal_error(error):
@@ -33,23 +39,7 @@ def read_record(path, slug, revision):
     if path.is_symlink():
         raise ValueError("symlinked usage record")
     record = json.loads(path.read_text())
-    repo = record["repo"]
-    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)?", repo):
-        raise ValueError("invalid repository")
-    if record["schema"] != 1 or repo.replace("/", "--") != slug or record["revision"] != revision:
-        raise ValueError("usage identity mismatch")
-    if not isinstance(record["claims"], dict) or type(record["pinned"]) is not bool:
-        raise ValueError("invalid usage protection")
-    if not isinstance(record["files"], list) or not record["files"]:
-        raise ValueError("invalid file inventory")
-    for name in record["files"]:
-        if not isinstance(name, str) or not name or name.startswith("/") or any(p in {"", ".", ".."} for p in name.split("/")):
-            raise ValueError("invalid inventory path")
-    for name in ("last_used", "first_seen"):
-        value = record[name]
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-            raise ValueError("invalid usage time")
-    return record
+    return validate_usage(record, slug, revision)
 
 
 def observe(root, slug, revision, *, now, min_age_seconds, exclude_repos):
@@ -67,7 +57,8 @@ def observe(root, slug, revision, *, now, min_age_seconds, exclude_repos):
         "pinned": False,
         "claims": {},
         "eligible": False,
-        "reason": "untracked",
+        "reason": CACHE_REASONS["untracked"],
+        "reason_code": "untracked",
     }
     try:
         safe_directory(snapshot)
@@ -101,24 +92,24 @@ def observe(root, slug, revision, *, now, min_age_seconds, exclude_repos):
                             row["logical_bytes"] += item.stat().st_size
                         except OSError:
                             pass
-        reason = (
+        reason_code = (
             "absent"
             if not row["present"]
             else "pinned"
             if record["pinned"]
-            else "workload claim"
+            else "workload_claim"
             if record["claims"]
-            else "requested model"
+            else "requested_model"
             if record["repo"] in exclude_repos
-            else "untracked files"
+            else "untracked_files"
             if unknown
-            else "retention age"
+            else "retention_age"
             if now - record["last_used"] < min_age_seconds
             else "eligible"
         )
-        row.update(reason=reason, eligible=reason == "eligible")
+        row.update(reason=CACHE_REASONS[reason_code], reason_code=reason_code, eligible=reason_code == "eligible")
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        row.update(reason="cannot verify cache: " + str(exc), eligible=False)
+        row.update(reason=CACHE_REASONS["unverifiable"] + ": " + str(exc), reason_code="unverifiable", eligible=False)
     return row
 
 
@@ -161,6 +152,7 @@ def run(
     pinned=True,
     claim=None,
     confirm_inactive=False,
+    endpoint=None,
     now=None,
 ):
     root = Path(root)
@@ -188,6 +180,9 @@ def run(
         "reclaimed_bytes": 0,
         "planned_bytes": 0,
         "target_met": True,
+        "budget_scope": "private_managed_snapshots",
+        "reclaimed_bytes_kind": "allocated_bytes_estimate",
+        "free_bytes_after_kind": "projected" if dry_run else "measured",
     }
     if action == "inventory":
         return result
@@ -213,16 +208,16 @@ def run(
         try:
             fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
-            row.update(eligible=False, reason="publication lock unavailable")
+            row.update(eligible=False, reason=CACHE_REASONS["publication_lock_unavailable"], reason_code="publication_lock_unavailable")
             continue
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                row.update(eligible=False, reason="invalid publication lock")
+                row.update(eligible=False, reason=CACHE_REASONS["invalid_publication_lock"], reason_code="invalid_publication_lock")
                 continue
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                row.update(eligible=False, reason="cache busy")
+                row.update(eligible=False, reason=CACHE_REASONS["cache_busy"], reason_code="cache_busy")
                 continue
             observed_last_used = row["last_used"]
             fresh = observe(root, slug, row["revision"], **policy)
@@ -232,6 +227,8 @@ def run(
             path = root / STATE / "usage" / slug.removeprefix("models--") / (row["revision"] + ".json")
             if action != "prune":
                 record = fresh["usage"]
+                if endpoint is not None and record["endpoint"] != endpoint:
+                    raise ValueError("cache usage endpoint mismatch")
                 if action == "pin":
                     record["pinned"] = pinned
                     row["pinned"] = pinned
@@ -247,7 +244,7 @@ def run(
             if not fresh["eligible"]:
                 continue
             if row["last_used"] != observed_last_used:
-                row.update(eligible=False, reason="usage changed during cleanup")
+                row.update(eligible=False, reason=CACHE_REASONS["usage_changed_during_cleanup"], reason_code="usage_changed_during_cleanup")
                 continue
             amount = row["reclaimable_bytes"]
             result["planned_bytes"] += amount

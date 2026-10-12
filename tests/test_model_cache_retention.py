@@ -39,6 +39,49 @@ def tracked(root, *, revision=SHA, shared=False, last_used=1, repo="org/model"):
     return manifest, snapshot, path
 
 
+def test_retention_dtos_validate_on_wire_and_reject_wrong_origin(tmp_path):
+    from sparkrun.api._wire import to_wire, validate
+    from sparkrun.api._wire_schemas import RESULT_SCHEMAS
+    from sparkrun.models.cache_reports import CacheReport
+
+    tracked(tmp_path)
+    reports = model_cache.inventory_cache(cache_dir=str(tmp_path))
+    assert isinstance(reports[0], CacheReport)
+    assert reports[0].entries[0].reason_code == "eligible"
+    assert reports[0].budget_scope == "private_managed_snapshots"
+    validate(to_wire(reports), RESULT_SCHEMAS["model_cache.list"])
+    request = ModelArtifactRequest("org/model", SHA, endpoint="https://other.example")
+    with pytest.raises(ModelArtifactError, match="endpoint mismatch"):
+        model_cache.pin_revision(request, cache_dir=str(tmp_path))
+    assert not model_cache.inventory_cache(cache_dir=str(tmp_path))[0].entries[0].pinned
+
+
+def test_metadata_age_pruning_preserves_claim_recovery_handles(tmp_path, monkeypatch):
+    from sparkrun.orchestration.job_metadata import prune_job_metadata
+
+    job = SimpleNamespace(cluster_id="workload", metadata={"model_cache_claims": [{"claim": "keep"}]})
+    monkeypatch.setattr("sparkrun.api._jobs.list_jobs", lambda **kw: [job])
+    assert prune_job_metadata(cache_dir=str(tmp_path), max_age_days=1, keep_per_intent=0) == []
+
+
+def test_finalization_retains_metadata_on_partial_teardown_and_release_error(monkeypatch):
+    from sparkrun.orchestration import workload_cleanup as cleanup
+
+    claims = [{"host": "a"}, {"host": "b"}]
+    monkeypatch.setattr(
+        "sparkrun.orchestration.job_metadata.load_job_metadata", lambda *a, **k: {"hosts": ["a", "b"], "model_cache_claims": claims}
+    )
+    released, removed = [], []
+    monkeypatch.setattr("sparkrun.models.usage.release_claims", lambda claims, **kw: released.append(kw["hosts"]))
+    monkeypatch.setattr("sparkrun.orchestration.job_metadata.remove_job_metadata", lambda *a, **k: removed.append(True))
+    assert cleanup.finalize_workload("workload", hosts=["a"]) is False
+    assert released == [{"a"}] and not removed
+    monkeypatch.setattr("sparkrun.models.usage.release_claims", Mock(side_effect=ModelArtifactError("unreachable")))
+    with pytest.raises(ModelArtifactError):
+        cleanup.finalize_workload("workload", hosts=["a", "b"])
+    assert not removed
+
+
 def test_inventory_and_preview_are_read_only(tmp_path):
     _, snapshot, path = tracked(tmp_path)
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
@@ -237,7 +280,7 @@ def test_cli_preview_default_and_daemon_wire_report(tmp_path, monkeypatch):
 
 def test_empty_inventory_does_not_create_a_cache(tmp_path):
     missing = tmp_path / "not-created"
-    assert model_cache.inventory_cache(cache_dir=str(missing))[0]["entries"] == []
+    assert model_cache.inventory_cache(cache_dir=str(missing))[0].entries == ()
     assert not missing.exists()
 
 
@@ -307,3 +350,29 @@ def test_daemon_prune_and_reconcile_require_admin_scope():
 def test_invalid_retention_cannot_mutate_cache(tmp_path, days):
     with pytest.raises(ValueError):
         model_cache.prune_cache(cache_dir=str(tmp_path), min_age_days=days, dry_run=False)
+
+
+@pytest.mark.parametrize(
+    "command,function,extra",
+    [
+        ("pin", "pin_revision", []),
+        ("reconcile", "reconcile_claim", ["--claim", "interrupted", "--confirm-inactive"]),
+    ],
+)
+@pytest.mark.parametrize("via_env", [False, True])
+def test_cli_retention_preserves_custom_endpoint(monkeypatch, tmp_path, command, function, extra, via_env):
+    from click.testing import CliRunner
+    from sparkrun.cli import _model_cache as cli
+
+    context = SimpleNamespace(config=SimpleNamespace(ssh_user=None, ssh_key=None, ssh_options=None))
+    monkeypatch.setattr(cli, "_get_context", lambda ctx: context)
+    mutation = Mock(return_value=())
+    monkeypatch.setattr(model_cache, function, mutation)
+    endpoint = "https://mirror.example"
+    monkeypatch.setenv("HF_ENDPOINT", endpoint if via_env else "https://unused.example")
+    args = [command, "org/model", "--revision", SHA, "--cache-dir", str(tmp_path), *extra]
+    if not via_env:
+        args.extend(["--endpoint", endpoint])
+    result = CliRunner().invoke(cli.model_cache, args)
+    assert result.exit_code == 0, result.output
+    assert mutation.call_args.args[0].endpoint == endpoint

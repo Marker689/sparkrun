@@ -944,6 +944,10 @@ def prune_job_metadata(
     for job in jobs:
         if observation is not None and not observation.confirms_absent(job):
             continue
+        # Age/occupancy pruning must not erase the only claim recovery handles.
+        # Explicit confirmed teardown uses finalize_workload to release them.
+        if (job.metadata or {}).get("model_cache_claims"):
+            continue
         intent = job.intent_id or job.cluster_id
         rank = seen_per_intent.get(intent, 0)
         seen_per_intent[intent] = rank + 1

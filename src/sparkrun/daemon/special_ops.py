@@ -42,10 +42,14 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
         if name in management:
             data["ssh_kwargs"] = ssh
             if name in {"model_cache.pin", "model_cache.reconcile"}:
-                request = ModelArtifactRequest(data.pop("model"), data.pop("revision"))
+                request = ModelArtifactRequest(
+                    data.pop("model"), data.pop("revision"), endpoint=data.pop("endpoint", "https://huggingface.co")
+                )
                 return to_wire(management[name](request, **data))
             return to_wire(management[name](**data))
-        request = ModelArtifactRequest(**{k: data.pop(k) for k in ("model", "revision", "projector", "file_selection") if k in data})
+        request = ModelArtifactRequest(
+            **{k: data.pop(k) for k in ("model", "revision", "endpoint", "projector", "file_selection") if k in data}
+        )
         fn = {
             "model_cache.inspect": api.model_cache.inspect_model,
             "model_cache.repair": api.model_cache.repair_model,
@@ -124,7 +128,7 @@ def _load(name):
 
 
 def register_special_ops():
-    from sparkrun.daemon.ops import fields, B
+    from sparkrun.daemon.request_fields import fields
 
     specs = [
         ("recipes.validate", "read", "recipe overrides", "recipe"),
@@ -142,46 +146,32 @@ def register_special_ops():
         ("tailscale.join", "admin", "hosts cluster tag ephemeral enable_ssh hostname dry_run ask_sudo", ""),
         ("tailscale.down", "admin", "hosts cluster remove dry_run ask_sudo", ""),
         ("tailscale.expose", "admin", "cluster proxy head_host port set_proxy_host ask_sudo", ""),
-        ("model_cache.inspect", "read", "model revision projector file_selection cache_dir hosts checksums", "model cache_dir"),
+        ("model_cache.inspect", "read", "model revision endpoint projector file_selection cache_dir hosts checksums", "model cache_dir"),
         (
             "model_cache.repair",
             "operate",
-            "model revision projector file_selection cache_dir hosts local_cache_dir transfer_mode checksums offline dry_run",
+            "model revision endpoint projector file_selection cache_dir hosts local_cache_dir transfer_mode checksums offline dry_run",
             "model cache_dir",
         ),
         (
             "model_cache.import",
             "operate",
-            "model revision projector file_selection manifest cache_dir hosts checksums",
+            "model revision endpoint projector file_selection manifest cache_dir hosts checksums",
             "model manifest cache_dir",
         ),
-        ("model_cache.resolve", "read", "model revision projector file_selection cache_dir", "model"),
+        ("model_cache.resolve", "read", "model revision endpoint projector file_selection cache_dir", "model"),
         ("model_cache.list", "read", "cache_dir hosts", "cache_dir"),
         ("model_cache.prune", "admin", "cache_dir hosts dry_run min_age_days max_bytes min_free_bytes", "cache_dir"),
-        ("model_cache.pin", "operate", "cache_dir hosts model revision pinned", "cache_dir model revision"),
+        ("model_cache.pin", "operate", "cache_dir hosts model revision endpoint pinned", "cache_dir model revision"),
         (
             "model_cache.reconcile",
             "admin",
-            "cache_dir hosts model revision claim confirm_inactive",
+            "cache_dir hosts model revision endpoint claim confirm_inactive",
             "cache_dir model revision claim confirm_inactive",
         ),
     ]
     for name, scope, names, required in specs:
         properties = fields(names)
-        for key in required.split():
-            properties[key] = properties[key]["anyOf"][0]
-        if "manifest" in properties:
-            properties["manifest"] = {"type": "object"}
-        if "file_selection" in properties:
-            properties["file_selection"] = {"type": "string", "enum": ["auto", "all", "safetensors"]}
-        if "ask_sudo" in properties:
-            properties["ask_sudo"] = B
-        for key in ("pinned", "dry_run"):
-            if key in properties and name in {"model_cache.prune", "model_cache.pin"}:
-                properties[key] = B
-        for key in ("min_age_days", "max_bytes", "min_free_bytes"):
-            if key in properties:
-                properties[key] = {"type": "number" if key == "min_age_days" else "integer", "minimum": 0}
         if "confirm_inactive" in properties:
             properties["confirm_inactive"] = {"type": "boolean", "enum": [True]}
         register_daemon_op(

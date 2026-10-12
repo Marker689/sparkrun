@@ -109,3 +109,22 @@ def test_relay_structured_feedback_retains_upper_bound_and_verified_outcome():
     assert event['host'] == 'host-a' and event['total_kind'] == 'upper_bound'
     assert event['current'] == 4 and event['total'] == 8
     assert seen[-1]['status'] == 'failed'
+
+
+def test_unsupported_platform_preflight_obeys_auto_fallback(monkeypatch):
+    from types import SimpleNamespace
+    from sparkrun.core import image_distribution as api
+    from sparkrun.plugins.oci_relay.provider import RelayProvider
+    from sparkrun.plugins.oci_relay.host import Runner
+
+    monkeypatch.setattr(Runner, "execute", lambda *args, **kwargs: b"Darwin arm64\n")
+    monkeypatch.setattr(Runner, "close", lambda self: [])
+    monkeypatch.setattr(api, "_PROVIDERS", {"oci-relay": RelayProvider()})
+    config = SimpleNamespace(get=lambda key, default=None: default, plugin_settings=lambda name: {})
+    token = api._CONFIG.set(config)
+    try:
+        assert api.try_image_copy(image="org/image:test", source_host=None, targets=["node-a"],
+            transfer_hosts=None, ssh_user=None, ssh_key=None, ssh_options=None, timeout=10,
+            dry_run=False, offline=True, session=SimpleNamespace(open_process=lambda *a, **k: None)) is None
+    finally:
+        api._CONFIG.reset(token)

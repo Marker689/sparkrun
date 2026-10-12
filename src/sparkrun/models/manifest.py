@@ -15,8 +15,9 @@ from sparkrun.models.artifacts import (
     ModelInventoryUnavailable,
 )
 
+from sparkrun.models._cache_contract import STATE_DIRECTORY
+
 HUB_ADAPTER_VERSION = "2.2.0"
-STATE_DIRECTORY = ".sparkrun-model-artifacts"
 
 
 def select_manifest(request: ModelArtifactRequest, inventory: dict) -> ModelArtifactManifest:

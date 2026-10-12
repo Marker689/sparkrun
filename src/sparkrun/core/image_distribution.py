@@ -199,6 +199,30 @@ def _fallback_allowed(config: Any, provider: ImageDistributionProvider) -> bool:
     )
 
 
+def _select_provider():
+    config = _CONFIG.get()
+    selected = config.get("container_distribution_provider", "auto") if config is not None else "auto"
+    if selected == "builtin" or (selected == "auto" and not _PROVIDERS):
+        return None
+    if selected == "auto":
+        if len(_PROVIDERS) != 1:
+            raise ValueError("Multiple image-copy providers enabled; set container_distribution_provider explicitly")
+        selected = next(iter(_PROVIDERS))
+    if selected not in _PROVIDERS:
+        raise ValueError(f"Image distribution provider {selected!r} is not enabled")
+    return _PROVIDERS[selected]
+
+
+def _validated_outcomes(result, targets) -> tuple[ImageCopyResult, list[str]]:
+    if not isinstance(result, ImageCopyResult) or set(result.outcomes) != set(targets):
+        raise ValueError("Image provider did not report every requested target exactly once")
+    if any(state not in {"complete", "already_present", "failed", "cancelled"} for state in result.outcomes.values()):
+        raise ValueError("Image provider returned an invalid target state")
+    if set(result.errors) - set(targets):
+        raise ValueError("Image provider reported errors for an unrequested target")
+    return result, [host for host in targets if result.outcomes[host] in {"failed", "cancelled"} or host in result.errors]
+
+
 def try_image_copy(
     *,
     image: str,
@@ -212,21 +236,16 @@ def try_image_copy(
     dry_run: bool,
     offline: bool,
     session: Any = None,
+    feedback: FeedbackReporter | None = None,
 ) -> list[str] | None:
     """Return failed hosts, or None to use the builtin copy.
 
     A supplied host session is borrowed; only internally created sessions close.
     """
     config = _CONFIG.get()
-    selected = config.get("container_distribution_provider", "auto") if config is not None else "auto"
-    if selected == "builtin" or (selected == "auto" and not _PROVIDERS):
+    provider = _select_provider()
+    if provider is None:
         return None
-    if selected == "auto":
-        if len(_PROVIDERS) != 1:
-            raise ValueError("Multiple image-copy providers enabled; set container_distribution_provider explicitly")
-        selected = next(iter(_PROVIDERS))
-    if selected not in _PROVIDERS:
-        raise ValueError(f"Image distribution provider {selected!r} is not enabled")
     if not targets:
         return []
     addresses = targets if transfer_hosts is None else transfer_hosts
@@ -252,11 +271,12 @@ def try_image_copy(
         offline=offline,
         config=config,
         session=session,
+        feedback=feedback if feedback is not None else get_feedback("image-distribution"),
     )
     try:
-        result = _PROVIDERS[selected].copy(request)
+        result = provider.copy(request)
     except ImageDistributionUnsupported as error:
-        if _fallback_allowed(config, _PROVIDERS[selected]):
+        if _fallback_allowed(config, provider):
             logger.warning("Image relay unavailable (%s); using Docker save/load fallback", error)
             return None
         logger.error("Image copy unsupported: %s", error)
@@ -265,14 +285,9 @@ def try_image_copy(
         if owns_session and session is not None:
             session.close()
 
-    if not isinstance(result, ImageCopyResult) or set(result.outcomes) != set(targets):
-        raise ValueError("Image-copy provider did not report every requested target exactly once")
-    if any(status not in {"complete", "already_present", "failed", "cancelled"} for status in result.outcomes.values()):
-        raise ValueError("Image-copy provider returned an invalid target state")
-    if set(result.errors) - set(targets):
-        raise ValueError("Image-copy provider reported errors for an unrequested target")
+    result, failed = _validated_outcomes(result, targets)
     _record_runtime_images(image, result, dry_run=dry_run)
-    return [host for host in targets if result.outcomes[host] in {"failed", "cancelled"} or host in result.errors]
+    return failed
 
 
 class ImageDistributionFailed(RuntimeError):
@@ -293,6 +308,7 @@ def try_image_pull(
     offline: bool,
     force_pull: bool,
     session: Any = None,
+    feedback: FeedbackReporter | None = None,
 ) -> list[str] | None:
     """Optional registry-to-target operation before the builtin source pull.
 
@@ -305,17 +321,11 @@ def try_image_pull(
     if not targets:
         return None
     config = _CONFIG.get()
-    selected = config.get("container_distribution_provider", "auto") if config is not None else "auto"
-    if selected == "builtin" or (selected == "auto" and not _PROVIDERS):
+    provider = _select_provider()
+    if provider is None:
         return None
-    if selected == "auto":
-        if len(_PROVIDERS) != 1:
-            raise ValueError("Multiple image-copy providers enabled; set container_distribution_provider explicitly")
-        selected = next(iter(_PROVIDERS))
-    if selected not in _PROVIDERS:
-        raise ValueError(f"Image distribution provider {selected!r} is not enabled")
-    pull = getattr(_PROVIDERS[selected], "pull", None)
-    if not callable(pull) or (offline and not getattr(_PROVIDERS[selected], "supports_offline_pull", False)):
+    pull = getattr(provider, "pull", None)
+    if not callable(pull) or (offline and not getattr(provider, "supports_offline_pull", False)):
         return None
     addresses = targets if transfer_hosts is None else transfer_hosts
     if len(addresses) != len(targets) or len(set(targets)) != len(targets):
@@ -339,11 +349,12 @@ def try_image_pull(
         force_pull=force_pull,
         config=config,
         session=session,
+        feedback=feedback if feedback is not None else get_feedback("image-distribution"),
     )
     try:
         result = pull(request)
     except ImageDistributionUnsupported as error:
-        if _fallback_allowed(config, _PROVIDERS[selected]):
+        if _fallback_allowed(config, provider):
             logger.warning("Image pre-pull provider unavailable (%s); using builtin fallback", error)
             return None
         raise ImageDistributionFailed("Image pre-pull provider unsupported: " + str(error)) from error
@@ -352,13 +363,7 @@ def try_image_pull(
             session.close()
     if result is None:
         return None
-    if not isinstance(result, ImageCopyResult) or set(result.outcomes) != set(targets):
-        raise ValueError("Image-pull provider did not report every requested target exactly once")
-    if any(state not in {"complete", "already_present", "failed", "cancelled"} for state in result.outcomes.values()):
-        raise ValueError("Image-pull provider returned an invalid target state")
-    if set(result.errors) - set(targets):
-        raise ValueError("Image-pull provider reported errors for an unrequested target")
-    failed = [host for host in targets if result.outcomes[host] in {"failed", "cancelled"} or host in result.errors]
+    result, failed = _validated_outcomes(result, targets)
     if failed:
         raise ImageDistributionFailed("Registry image distribution failed on: " + ", ".join(failed))
     _record_runtime_images(image, result, dry_run=dry_run)

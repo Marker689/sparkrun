@@ -331,16 +331,10 @@ def _resolve_teardown_executor(
 
 def _forget_job(cluster_id: str, cache_dir: str | None, *, hosts=None, ssh_kwargs=None) -> None:
     """Remove job metadata, tolerating an already-absent record."""
-    from sparkrun.orchestration.job_metadata import load_job_metadata, remove_job_metadata
-    from sparkrun.models.usage import release_claims
+    from sparkrun.orchestration.workload_cleanup import finalize_workload
 
     try:
-        meta = load_job_metadata(cluster_id, cache_dir=cache_dir) or {}
-        connection = dict(ssh_kwargs or {})
-        if meta.get("ssh_user"):
-            connection["ssh_user"] = meta["ssh_user"]
-        release_claims(meta.get("model_cache_claims", []), hosts=hosts, ssh_kwargs=connection)
-        remove_job_metadata(cluster_id, cache_dir=cache_dir)
+        finalize_workload(cluster_id, hosts=hosts or (), cache_dir=cache_dir, ssh_kwargs=ssh_kwargs)
     except Exception:
         logger.warning(
             "Could not release model cache claims or remove job metadata for %s; retry stop to reconcile", cluster_id, exc_info=True

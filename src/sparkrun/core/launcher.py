@@ -25,6 +25,7 @@ from sparkrun.core.readiness import DEFAULT_PORT_READY_TIMEOUT_S, DEFAULT_HEALTH
 from sparkrun.core.readiness import (
     OPENAI_CHAT_STREAM,
     ReadinessObserver,
+    ReadinessCancellation,
     ObservationUnavailable,
     resolve_inference_style,
     validate_readiness_policy,
@@ -2217,7 +2218,7 @@ def wait_for_serve_ready(
     health_timeout_s: float | None = None,
     health_retry_interval: int = 5,
     timeline: "Timeline | None" = None,
-    cancel: "threading.Event | None" = None,
+    cancel: ReadinessCancellation | None = None,
     parent: int | None = None,
 ) -> ServeReadiness:
     """Apply the effective recipe/global policy to a launched workload.
@@ -2289,7 +2290,7 @@ def wait_for_endpoint_ready(
     health_timeout_s: float = DEFAULT_HEALTH_READY_TIMEOUT_S,
     health_retry_interval: int = 5,
     timeline: "Timeline | None" = None,
-    cancel: "threading.Event | None" = None,
+    cancel: ReadinessCancellation | None = None,
     parent: int | None = None,
 ) -> ServeReadiness:
     """Wait for a detached launch's head endpoint to answer ``/v1/models``.
@@ -2688,12 +2689,18 @@ def complete_post_launch(
     # If stop_after_post, stop the workload and exit
     if recipe.stop_after_post:
         report("Stopping workload (stop_after_post=true)...")
-        runtime.stop(
+        stop_rc = runtime.stop(
             hosts=host_list,
             cluster_id=result.cluster_id,
             config=config,
             dry_run=dry_run,
         )
+        if type(stop_rc) is not int or stop_rc != 0:
+            raise RuntimeError("Post-hook workload teardown failed; metadata and cache claims were retained")
+        if not dry_run:
+            from sparkrun.orchestration.workload_cleanup import finalize_workload
+
+            finalize_workload(result.cluster_id, hosts=host_list, cache_dir=getattr(config, "cache_dir", None), ssh_kwargs=_ssh_kw)
         return True
 
     return False

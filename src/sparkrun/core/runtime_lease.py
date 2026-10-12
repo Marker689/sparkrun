@@ -13,6 +13,36 @@ from sparkrun.core.process_identity import alive, process_identity
 from sparkrun.utils.fs import atomic_private_write, file_lock
 
 
+def _component_identity(package, module):
+    """Metadata and source stamps without importing integration code."""
+    from importlib.metadata import distribution, PackageNotFoundError
+    from sparkrun.core.managed_plugins import physical_origin
+
+    paths = set()
+    version = None
+    if package:
+        try:
+            dist = distribution(package)
+            version = dist.version
+            paths.update(
+                Path(str(dist.locate_file(path))) for path in dist.files or () if path.suffix == ".py" or ".dist-info/" in str(path)
+            )
+        except PackageNotFoundError:
+            pass
+    origin = physical_origin(module.split(":")[0]) if module else None
+    if origin:
+        # Covers editable installs whose wheel RECORD only contains a .pth file.
+        paths.update(origin.parent.rglob("*.py"))
+    stamps = []
+    for path in sorted(paths):
+        try:
+            st = path.stat()
+            stamps.append((str(path), st.st_ino, st.st_mtime_ns, st.st_size))
+        except FileNotFoundError:
+            stamps.append((str(path), None))
+    return {"package": package, "module": module, "version": version, "stamp": fingerprint(stamps)}
+
+
 def runtime_identity(config):
     from sparkrun import __version__
     from sparkrun.core.plugin_store import PluginStore
@@ -29,11 +59,17 @@ def runtime_identity(config):
         st = path.stat()
         stamps.append((str(path.relative_to(package.parent)), st.st_ino, st.st_mtime_ns, st.st_size))
     source_stamp = hashlib.sha256(json.dumps(stamps).encode()).hexdigest()
+    from sparkrun.core.installed_plugins import discover_installed_plugins
+
+    profile = config.profile
+    integrations = {row.name: _component_identity(row.package, row.module) for row in discover_installed_plugins(config) if row.selected}
     return {
         "version": __version__,
         "package": str(package),
         "package_stamp": [info.st_ino, info.st_mtime_ns, source_stamp],
         "plugins": {name: record["active_generation"] for name, record in sorted(records.items())},
+        "application": {"id": profile.id, **_component_identity(profile.package, profile.profile_ref)},
+        "integrations": integrations,
     }
 
 

@@ -119,7 +119,8 @@ def test_eviction_removes_observed_survivors_and_only_then_forgets_job(observed_
     assert job.calls[0][0] == {"h1": list(job.names)}
     assert job.calls[0][1].executor_name == backend
     assert job.calls[0][2]["ssh_user"] == "alice"
-    assert job.forgotten == [PRIOR]
+    # Other recorded hosts were not torn down by this scoped stop.
+    assert job.forgotten == ([] if metadata else [PRIOR])
 
 
 def test_failed_survivor_teardown_preserves_metadata_and_aborts_strict_eviction(observed_job):
@@ -145,7 +146,7 @@ def test_stop_releases_cache_claims_only_after_confirmed_teardown(observed_job, 
     job = observed_job(fail=failed)
     from sparkrun.orchestration.job_metadata import load_job_metadata
 
-    claims = [{"claim": "exact-generation"}]
+    claims = [{"claim": "exact-generation", "host": "h1"}]
     load_job_metadata(PRIOR)["model_cache_claims"] = claims
     release = Mock()
     monkeypatch.setattr("sparkrun.models.usage.release_claims", release)
@@ -155,9 +156,9 @@ def test_stop_releases_cache_claims_only_after_confirmed_teardown(observed_job, 
         assert not job.forgotten
     else:
         assert release.call_args.args == (claims,)
-        assert release.call_args.kwargs["hosts"] == ["h1"]
+        assert set(release.call_args.kwargs["hosts"]) == {"h1"}
         assert release.call_args.kwargs["ssh_kwargs"]["ssh_user"] == "alice"
-        assert job.forgotten == [PRIOR]
+        assert job.forgotten == []  # Recovery metadata still covers h0, h2 and h3.
 
 
 @pytest.mark.parametrize("mismatch", ["executor", "destination", "user", "missing_names"])

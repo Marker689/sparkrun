@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
-from sparkrun.api._wire import error_body
+from sparkrun.api._wire import error_body, check_result
 from sparkrun.core.daemon_registry import get_daemon_op, registered_daemon_ops, resolve_route_operation
 from sparkrun.core.operation import OperationState, operation_scope
 from sparkrun.daemon.auth import Principal, TokenStore
@@ -277,8 +277,12 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     @app.get("/v1/info")
     async def info(request: Request):
         user = principal(request)
+        from sparkrun.core.application_identity import get_controller_identity
+
+        controller = get_controller_identity(SparkrunConfig(binding.config_path))
         return {
             **binding.info(),
+            "controller": controller.to_dict(),
             "protocol": 1,
             "runtime": app.state.runtime,
             "restart_required": coordinator.maintenance,
@@ -296,6 +300,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                 "local_name": op.local_name,
                 "version": op.version,
                 "kind": op.kind,
+                "cacheable": op.cacheable,
                 "scope": op.scope,
                 "description": op.description,
                 "resources": op.resources,
@@ -304,7 +309,9 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                 "result_schema": op.result_schema,
             }
             for op in registered_daemon_ops()
-            if user.allows(op.scope, secret=op.secret) and (not op.feature_flag or current.is_feature_enabled(op.feature_flag))
+            if op.visibility == "public"
+            and user.allows(op.scope, secret=op.secret)
+            and (not op.feature_flag or current.is_feature_enabled(op.feature_flag))
         ]
 
     @app.get("/docs")
@@ -327,6 +334,8 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     async def dispatch(name, arguments, request):
         nonlocal query_admitted
         op = get_daemon_op(name)
+        if op.visibility != "public":
+            raise LookupError("Unknown public operation: " + name)
         user = principal(request, op.scope, secret=op.secret)
         arguments = check_request(op, arguments)
         current = SparkrunConfig(binding.config_path)
@@ -373,7 +382,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             user.manager,
             current.config_path.stat().st_mtime_ns if current.config_path.exists() else 0,
         )
-        cached = cache.get(cache_key) if op.scope == "read" else None
+        cached = cache.get(cache_key) if op.cacheable else None
         if cached is not None:
             return cached
         query_admitted += 1
@@ -386,9 +395,9 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                 deadline=time.monotonic() + float(current.get("daemon.query_timeout", 30)), via_daemon=True, manager=user.manager
             )
             with operation_scope(sctx, state=state):
-                result = op.handler_loader()(arguments, sctx, None)
+                result = check_result(op, op.handler_loader()(arguments, sctx, None))
                 state.check()
-                if op.scope == "read":
+                if op.cacheable:
                     cache.put(cache_key, result)
                 return result
 

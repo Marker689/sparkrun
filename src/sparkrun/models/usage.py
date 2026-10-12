@@ -15,7 +15,7 @@ import time
 import uuid
 
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactRequest
-from sparkrun.models.manifest import STATE_DIRECTORY
+from sparkrun.models._cache_contract import STATE_DIRECTORY, USAGE_SCHEMA_VERSION, validate_usage
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +95,7 @@ def read_usage(io, host, root, repo, revision):
         return None
     try:
         record = json.loads(text)
-        if record["schema"] != 1 or record["repo"] != repo or record["revision"] != revision:
-            raise ValueError("identity mismatch")
-        if not isinstance(record["claims"], dict) or not isinstance(record["files"], list):
-            raise ValueError("invalid usage fields")
-        return record
+        return validate_usage(record, repo.replace("/", "--"), revision)
     except (KeyError, TypeError, ValueError) as exc:
         raise ModelArtifactError("invalid model cache usage record; refusing mutation") from exc
 
@@ -109,7 +105,7 @@ def record_use(io, host, root, manifest, *, event="prepared", acquired=False):
     io.lock(host, root, manifest.repo)
     now = time.time()
     record = read_usage(io, host, root, manifest.repo, manifest.revision) or {
-        "schema": 1,
+        "schema": USAGE_SCHEMA_VERSION,
         "repo": manifest.repo,
         "revision": manifest.revision,
         "endpoint": manifest.endpoint,

@@ -7,18 +7,7 @@ from sparkrun.core.daemon_registry import (
     get_daemon_op,
 )
 
-
-JOB_ACCEPTED = {
-    "type": "object",
-    "properties": {"job_id": {"type": "string"}, "events_url": {"type": "string"}},
-    "required": ["job_id", "events_url"],
-    "additionalProperties": False,
-}
-ERROR = {
-    "type": "object",
-    "properties": {"detail": {"type": "string"}, "error": {"type": "object"}},
-    "required": ["detail"],
-}
+from sparkrun.daemon.contracts import JOB_ACCEPTED, ERROR, add_infrastructure_schemas
 
 
 def _ref(name):
@@ -64,6 +53,7 @@ def _extra(op):
             "owner": op.owner,
             "local_name": op.local_name,
             "kind": op.kind,
+            "cacheable": op.cacheable,
             "scope": op.scope,
             "version": op.version,
             "feature_flag": op.feature_flag,
@@ -101,7 +91,8 @@ def mount_operation_routes(app, operation_handler, envelope_handler):
     adapters = registered_daemon_routes()
     for route in adapters:
         for name in route.operations:
-            get_daemon_op(name)  # Resolve forward references before mounting any routes.
+            if get_daemon_op(name).visibility != "public":
+                raise ValueError("Public adapters cannot target internal operations")
     previous = getattr(app.state, "operation_routes", ())
     existing = [route for route in app.router.routes if route not in previous]
     claimed = {}
@@ -166,7 +157,7 @@ def add_operation_schemas(schema, paths):
     # same rule for API tools, including the generic operation/job endpoints.
     schema["security"] = [{"BearerAuth": []}]
     schema["paths"]["/v1/health"]["get"]["security"] = []
-    operations = registered_daemon_ops()
+    operations = tuple(op for op in registered_daemon_ops() if op.visibility == "public")
     for op in operations:
         schemas[op.name + "Request"] = op.request_schema
         schemas[op.name + "Result"] = op.result_schema
@@ -174,6 +165,7 @@ def add_operation_schemas(schema, paths):
         op.name: {
             "request": _ref(op.name + "Request"),
             "kind": op.kind,
+            "cacheable": op.cacheable,
             "version": op.version,
             "result": _ref(op.name + "Result"),
             "http_path": paths.get(op.name),
@@ -182,4 +174,5 @@ def add_operation_schemas(schema, paths):
         }
         for op in operations
     }
+    add_infrastructure_schemas(schema, operations)
     return schema

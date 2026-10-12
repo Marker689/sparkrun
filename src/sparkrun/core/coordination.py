@@ -84,6 +84,16 @@ def reserve_resources(root, keys):
         db.close()
 
 
+def reservation_keys(hosts=None, *, executor_config=None, controller=False):
+    """Canonical destination keys shared by daemon admission and API calls."""
+    keys = {"host:" + str(host).rsplit("@", 1)[-1].lower() for host in hosts} if hosts and not controller else {"*"}
+    if executor_config:
+        import json
+
+        keys.add("destination:" + hashlib.sha256(json.dumps(executor_config, sort_keys=True).encode()).hexdigest())
+    return keys
+
+
 def operation_boundary(*, mutation=False):
     """Bind operation state and destination locks around a public API call."""
 
@@ -133,12 +143,7 @@ def operation_boundary(*, mutation=False):
                         hosts = None
                 # Host conflicts are deliberately independent of SSH usernames:
                 # different login users still mutate the same machine/devices.
-                keys = {"host:" + str(host).rsplit("@", 1)[-1].lower() for host in hosts} if hosts else {"*"}
-                executor = getattr(cluster, "executor_config", None)
-                if executor:
-                    import json
-
-                    keys.add("destination:" + hashlib.sha256(json.dumps(executor, sort_keys=True).encode()).hexdigest())
+                keys = reservation_keys(hosts, executor_config=getattr(cluster, "executor_config", None))
                 with reserve_resources(config.config_path.parent, keys):
                     return function(*bound.args, **bound.kwargs)
 

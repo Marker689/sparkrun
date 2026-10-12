@@ -939,7 +939,7 @@ def test_post_hook_outcome_controls_exit(run_env, launched, monkeypatch, stop_af
     with mock.patch("sparkrun.orchestration.hooks.run_post_commands", side_effect=None if stop_after_post else RuntimeError("hook failed")):
         from sparkrun.runtimes.base import RuntimePlugin
 
-        with mock.patch.object(RuntimePlugin, "stop") as stop:
+        with mock.patch.object(RuntimePlugin, "stop", return_value=0) as stop:
             result = _invoke(CliRunner(), "--no-follow")
     assert result.exit_code == (0 if stop_after_post else 1), result.output
     assert stop.call_count == int(stop_after_post)

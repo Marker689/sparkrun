@@ -366,3 +366,33 @@ inventory under the default compatibility policy. It hashes no weights
 and batches metadata calls; these are local filesystem measurements, not NFS or
 multi-node startup promises. Actual NFS locking/latency and large-model startup
 remain deployment acceptance checks before removing the default compatibility fallback.
+
+## Retention report contract and lifecycle
+
+Python retention methods return `CacheReport` objects with typed `CacheEntry`
+entries; mapping access is also supported. CLI JSON and daemon results use the
+same fields. `reason_code` is the stable machine-readable eligibility outcome;
+`reason` is explanatory text. `budget_scope: private_managed_snapshots` makes the
+scope of `max_bytes` explicit. `reclaimed_bytes_kind: allocated_bytes_estimate`
+distinguishes removed allocation estimates from actual filesystem free space;
+`free_bytes_after_kind` identifies a dry-run projection or measured result.
+A successful prune operation can return `target_met: false` when protection or
+shared blobs prevent reaching the requested target. CLI reports that condition
+with a nonzero exit; API clients inspect `target_met` independently of job success.
+Model-origin operations accept `endpoint` consistently through Python and daemon
+requests; pin/reconcile reject an origin mismatch against the saved receipt.
+
+Confirmed stop, stop-all and stop-after-hooks share claim release and metadata
+finalization. Failed or partial teardown preserves recovery metadata. Age-based
+metadata pruning never discards outstanding claim references. Cache claims have
+no expiry: an unavailable controller is not proof of a stopped workload.
+
+A model revision identifies an immutable origin commit. A plugin generation
+identifies one managed plugin installation. Neither is a daemon job ID. Cache
+claims protect workload usage on cache hosts; runtime leases pin controller code,
+and operation reservations coordinate concurrent mutations. Their storage and
+lifetimes remain separate.
+
+Cache `pin` and `reconcile` also accept `--endpoint` (or `HF_ENDPOINT`), matching
+the model-origin argument used by inspection and repair. A different origin cannot
+mutate another origin's usage receipt merely because repo/revision names match.

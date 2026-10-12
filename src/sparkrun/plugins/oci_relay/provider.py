@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from . import __version__, pins, decoder, runtime as runtime_connection
 from .disk import registry_cache_budget
-from .host import Lines, OperationError, Runner, pump
+from .host import Lines, OperationError, UnsupportedHost, Runner, pump
 from .parallel import parallel
 from .paths import arguments as path_arguments, qualify as qualify_paths
 from .progress import PROGRESS as PROGRESS, status, Progress
@@ -192,7 +192,7 @@ class RelayProvider:
             raise OperationError("offline mode cannot fetch a fresh pinned image")
         if request.dry_run:
             return self.copy(request, registry=registry)
-        status(logger, 'source', 'OCI Relay: checking verified registry pin on receivers: %s', request.image)
+        status(logger, 'source', 'OCI Relay: checking verified registry pin on receivers: %s', request.image, feedback=getattr(request, "feedback", None))
         runner = Runner(request.session, settings)
         with progress_heartbeat(logger, "OCI Relay: checking verified registry pin"):
             try:
@@ -202,7 +202,7 @@ class RelayProvider:
                 if time.monotonic() - started >= timeout:
                     raise OperationError("pinned cache checks exceeded operation deadline")
                 if present and all(present.values()):
-                    status(logger, 'source', 'OCI Relay: pinned image already verified on all %d receiver(s); no transfer', len(present))
+                    status(logger, 'source', 'OCI Relay: pinned image already verified on all %d receiver(s); no transfer', len(present), feedback=getattr(request, "feedback", None))
                     return ImageCopyResult(dict.fromkeys(request.targets, "already_present"), runtime_images={host: image for host, image in present.items() if image is not None})
                 if not registry:
                     # Offline/local mode can reuse a verified pin on a receiver,
@@ -218,7 +218,7 @@ class RelayProvider:
             finally:
                 runner.close()
         if registry:
-            status(logger, 'source', 'OCI Relay: fetching exact registry pin and distributing directly to receivers: %s', request.image)
+            status(logger, 'source', 'OCI Relay: fetching exact registry pin and distributing directly to receivers: %s', request.image, feedback=getattr(request, "feedback", None))
         remaining = timeout - (time.monotonic() - started)
         if remaining < 1:
             raise OperationError("pinned source selection exceeded operation deadline")
@@ -243,7 +243,7 @@ class RelayProvider:
             raise ValueError("relay timeout must be between 1 and 86400 seconds")
         cached_image = None
         if not request.dry_run and not request.force_pull and settings.get("source_mode") != "registry" and (request.source_host is not None or platform.system() == "Linux"):
-            status(logger, 'source', 'OCI Relay: checking source image on %s', request.source_host or 'controller')
+            status(logger, 'source', 'OCI Relay: checking source image on %s', request.source_host or 'controller', feedback=getattr(request, "feedback", None))
             runner = Runner(request.session, settings)
             try:
                 inspected = runner.connection(request.source_host).execute(
@@ -255,7 +255,7 @@ class RelayProvider:
                     refresh = (request.source_host is None and is_pullable_image_ref(request.image)
                                and ref.tag in {None, "latest"})
                     if not refresh:
-                        status(logger, 'source', 'OCI Relay: using existing source image %s', request.image)
+                        status(logger, 'source', 'OCI Relay: using existing source image %s', request.image, feedback=getattr(request, "feedback", None))
                         return None
                     cached_image = inspected.stdout.decode().strip()
                     if not re.fullmatch(r"sha256:[0-9a-f]{64}", cached_image):
@@ -265,7 +265,7 @@ class RelayProvider:
         if not ref.tag:
             request = replace(request, image=request.image + ":latest")
         action = "refreshing latest image from registry" if cached_image else "pulling from registry"
-        status(logger, 'source', 'OCI Relay: %s and distributing directly to receivers: %s', action, request.image)
+        status(logger, 'source', 'OCI Relay: %s and distributing directly to receivers: %s', action, request.image, feedback=getattr(request, "feedback", None))
         remaining = timeout - (time.monotonic() - started)
         if remaining < 1:
             raise OperationError("registry source selection exceeded operation deadline")
@@ -334,7 +334,7 @@ class RelayProvider:
                 if remaining < 1:
                     raise OperationError("pinned source checks exceeded operation deadline")
             return self._copy(request, settings, int(remaining), source_image=source_image)
-        except (BinaryUnavailable, SourceUnavailable) as error:
+        except (BinaryUnavailable, SourceUnavailable, UnsupportedHost) as error:
             raise ImageDistributionUnsupported(str(error)) from error
         finally:
             self._operations.release()

@@ -15,6 +15,24 @@ class WireEncodingError(TypeError, ValueError):
     """A result type is missing an explicit public codec."""
 
 
+class ResultContractError(RuntimeError):
+    """An operation produced a result outside its declared public contract."""
+
+    code = "invalid_operation_result"
+
+
+def check_result(op, result, *, redact=None):
+    """Encode and validate once, before publishing or caching successful work."""
+    try:
+        result = to_wire(result)
+        if redact is not None:
+            result = redact(result)
+        validate(result, op.result_schema, path="result", request_limits=False)
+    except (ValueError, TypeError) as exc:
+        raise ResultContractError("Operation %s violated its result contract" % op.name) from exc
+    return result
+
+
 _SECRET = re.compile(r"(^|_)(password|passwd|secret|token|api_key|private_key|authorization)($|_)", re.I)
 
 
@@ -22,13 +40,14 @@ def object_schema(properties=None, required=()) -> dict[str, Any]:
     return {"type": "object", "properties": properties or {}, "required": list(required), "additionalProperties": False}
 
 
-def validate(value, schema, *, path="request", depth=0):
-    if depth > 20:
+def validate(value, schema, *, path="request", depth=0, request_limits=True):
+    """Check declared constraints; implicit request limits do not constrain results."""
+    if depth > (20 if request_limits else 25):
         raise ValueError(f"{path}: maximum nesting depth exceeded")
     if "anyOf" in schema:
         for choice in schema["anyOf"]:
             try:
-                return validate(value, choice, path=path, depth=depth + 1)
+                return validate(value, choice, path=path, depth=depth, request_limits=request_limits)
             except ValueError:
                 pass
         raise ValueError(f"{path}: invalid value")
@@ -49,10 +68,16 @@ def validate(value, schema, *, path="request", depth=0):
         raise ValueError(f"{path}: expected {kind}")
     if isinstance(value, str) and len(value) < schema.get("minLength", 0):
         raise ValueError(f"{path}: string too short")
-    if isinstance(value, str) and len(value) > schema.get("maxLength", 65536):
+    if isinstance(value, str) and len(value) > schema.get("maxLength", 65536 if request_limits else math.inf):
         raise ValueError(f"{path}: string too long")
+    if isinstance(value, str) and "pattern" in schema and not re.search(schema["pattern"], value):
+        raise ValueError(f"{path}: invalid format")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if not math.isfinite(value) or value < schema.get("minimum", -1e100) or value > schema.get("maximum", 1e100):
+        if (
+            not math.isfinite(value)
+            or value < schema.get("minimum", -1e100 if request_limits else -math.inf)
+            or value > schema.get("maximum", 1e100 if request_limits else math.inf)
+        ):
             raise ValueError(f"{path}: number out of range")
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError(f"{path}: unsupported value")
@@ -71,12 +96,15 @@ def validate(value, schema, *, path="request", depth=0):
                 properties.get(key, schema.get("additionalProperties") if isinstance(schema.get("additionalProperties"), dict) else {}),
                 path=f"{path}.{key}",
                 depth=depth + 1,
+                request_limits=request_limits,
             )
     if isinstance(value, (tuple, list)):
-        if len(value) > schema.get("maxItems", 2048):
+        if len(value) < schema.get("minItems", 0):
+            raise ValueError(f"{path}: too few items")
+        if len(value) > schema.get("maxItems", 2048 if request_limits else math.inf):
             raise ValueError(f"{path}: too many items")
         for item in value:
-            validate(item, schema.get("items", {}), path=path + "[]", depth=depth + 1)
+            validate(item, schema.get("items", {}), path=path + "[]", depth=depth + 1, request_limits=request_limits)
     return value
 
 
@@ -135,7 +163,7 @@ def error_body(exc):
     from sparkrun.core.coordination import ResourceBusy
     from sparkrun.daemon.jobs import Conflict
 
-    known = isinstance(exc, (SparkrunError, ValueError, LookupError, TimeoutError, ResourceBusy, Conflict))
+    known = isinstance(exc, (SparkrunError, ValueError, LookupError, TimeoutError, ResourceBusy, Conflict, ResultContractError))
     attrs = {
         key: to_wire(getattr(exc, key)) for key in ("hosts", "required", "reasons", "reason", "available", "code") if hasattr(exc, key)
     }

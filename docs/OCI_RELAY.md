@@ -3,10 +3,11 @@
 Sparkrun `develop-next` / 0.4.0 bundles the [OCI Relay](https://github.com/spark-arena/oci-relay)
 image-distribution adapter. It streams registry pulls or existing local images
 to Docker hosts, reuses compatible layers across storage backends, and reports
-transfer progress. The `plugins.oci_relay` feature defaults **on for every channel**. Explicit config or environment overrides take precedence.
+transfer progress. The `plugins.oci_relay` feature defaults **on for every channel**.
+Explicit config or environment overrides take precedence.
 
 Use `sparkrun run YOUR_RECIPE` normally. There is no separate plugin install
-or Go build: the controller downloads checksum-pinned v0.1.3 Linux binaries and
+or Go build: the controller downloads checksum-pinned v0.1.4 binaries and
 stages them to the execution hosts. Targets need no internet access for binary
 installation. Verified cached releases work offline. In automatic provider mode,
 an unavailable release download (including offline mode without a cached bundle)
@@ -18,7 +19,9 @@ resident source image.
 Native-store access and preparation reads default on; source and transport
 selection are automatic. Controller-local `:latest` refreshes stream from the
 registry through OCI Relay, including when the controller already has an older
-image; there is no preliminary Docker pull/import. Routine receiver and registry
+image; there is no preliminary Docker pull/import. Operation-bound structured
+feedback survives callback threads, including ColdSnap image acquisition, and
+reaches daemon job events as well as CLI logs. Routine receiver and registry
 progress updates use a 30-second cadence, with phase changes and completion
 reported immediately. INFO logs identify each execution host's verified relay
 version, commit, and protocol; DEBUG also includes its checksum and capabilities.
@@ -29,7 +32,9 @@ To opt out on any channel, set the feature to `false`, or use
 
 Mac controllers should use `transfer_mode: delegated` so that the relay runs
 on Linux cluster nodes. The separate macOS ARM64 binary is a standalone build;
-the adapter's execution-host setup currently supports Linux amd64/arm64 only.
+execution targets support Linux amd64/arm64, with a native Windows controller
+path also available. Unsupported platform preflight uses builtin fallback in
+automatic provider mode; explicit relay selection remains strict.
 See upstream [platform support](https://github.com/spark-arena/oci-relay/blob/main/docs/platforms.md)
 and [plugin configuration](https://github.com/spark-arena/oci-relay/blob/main/docs/sparkrun-plugin.md)
 for transport, authentication, cache, and tuning settings. Avoid enabling both

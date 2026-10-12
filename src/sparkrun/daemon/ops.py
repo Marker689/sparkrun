@@ -6,6 +6,8 @@ from functools import partial
 import inspect
 from typing import Any
 
+from sparkrun.daemon.request_fields import fields
+
 from sparkrun.api._wire import object_schema, to_wire, validate
 from sparkrun.core.daemon_registry import DaemonOp, register_daemon_op
 from sparkrun.core.plugin_identity import core_registration
@@ -21,21 +23,6 @@ D = {"type": "object"}
 
 def nullable(schema) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
-
-
-def fields(names) -> dict[str, Any]:
-    bools = set(
-        "restart persist clear_cluster now auto_discover dry_run solo trust ensure offline runtime_cache auto_port dashboard rootful sync_tuning preserve_model_perms skip_model_fan_out rebuild no_stop skip_run exit_on_first_fail export_files include_hidden include_local unique_names local_only acknowledge_trust generate full force_container keep_containers enable_ssh ephemeral proxy set_proxy_host remove checksums confirm wait_ready post_launch".split()
-    )
-    ints = set(
-        "discover_interval discover_removal_grace_sweeps port ray_port dashboard_port init_port offset limit timeout duration parallel_pairs queue_pairs gid_index journal_lines tail interval max_workers".split()
-    )
-    arrays = {"cluster_ids", "hosts", "host_list", "host_filter", "extra_docker_opts", "only_steps"}
-    maps = {"overrides", "executor_config", "strategy_options", "filters", "integrations", "aliases", "bench_args", "builder_context"}
-    return {
-        name: nullable(B if name in bools else INTEGER if name in ints else A if name in arrays else D if name in maps else S)
-        for name in names.split()
-    }
 
 
 # Each row is a reviewed allowlist, not reflection over api.__all__.
@@ -87,6 +74,21 @@ SPECS = [
     ("setup.ensure_local_key", "setup.ensure_local_key", "job", "admin", "preferred generate", ""),
     ("setup.mesh_ssh_keys", "setup.mesh_ssh_keys_native", "job", "admin", "hosts user key timeout dry_run", "hosts"),
 ]
+
+# Audited local reads that tolerate the short cache TTL. A new read query must
+# opt in here; declaring its permission alone never makes it cacheable.
+CACHEABLE_QUERIES = frozenset(
+    {
+        "catalog.recipes",
+        "catalog.registries",
+        "catalog.clusters",
+        "catalog.search",
+        "workloads.list",
+        "proxy.list_aliases",
+        "proxy.list_gateways",
+        "proxy.resolve_gateway",
+    }
+)
 
 OPTION_SPECS = [
     ("workloads.run", "run", "RunOptions", "operate"),
@@ -232,8 +234,8 @@ def _options_loader(target, model):
 def register_core_ops():
     for name, target, kind, scope, names, required in SPECS:
         properties = fields(names)
-        for key in required.split():
-            properties[key] = properties[key]["anyOf"][0]
+        if name == "cluster.default":
+            properties["name"] = nullable(S)
         if name == "catalog.import":
             properties["content"] = {"type": "string", "maxLength": 262144}
         register_daemon_op(
@@ -244,6 +246,7 @@ def register_core_ops():
                 result_schema=RESULT_SCHEMAS[name],
                 kind=kind,
                 scope=scope,
+                cacheable=name in CACHEABLE_QUERIES,
                 resources="none" if name.startswith("proxy.") else "auto",
                 description=DESCRIPTIONS.get(name, f"{target.replace('_', ' ').capitalize()} through the library API."),
             )

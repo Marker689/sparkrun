@@ -7,13 +7,30 @@ Operational setup and examples are in [DAEMON.md](DAEMON.md).
 
 ## Contract and terminology
 
+Optional request fields are omitted unless their schema explicitly accepts null.
+Core adapters use reviewed reusable field contracts; they do not infer a type
+from a parameter name. Query and worker results are encoded, redacted and checked
+against the published result schema before success is cached or stored. Invalid
+results produce `ResultContractError` (`invalid_operation_result`), not success.
+OpenAPI includes Job, Prompt, Error, Event and Info envelopes. Successful job
+results discriminate by operation name and version. Request safety limits are
+separate from result constraints: large inventories follow their declared result
+schemas. Stored job results still have a 2 MiB encoded-size limit.
+
+`proxy.serve` and `proxy.watch` are internal service executors. They use the same
+registry and durable job queue, but have no public operation alias, catalog entry
+or HTTP submission path. Applications use public proxy/discovery controls.
+
+
 - HTTP protocol: **1** (`/v1`); every operation listed here currently has operation **version 1**.
   The old SparkRoute stdio bridge protocol **5** is a separate, explicitly selected transport.
 - The canonical operation name selects a handler. Both `POST /v1/ops/{name}`
   and the literal alias listed below call the same dispatcher, authorization,
   schema validation, idempotency and worker admission path. They take the same
   JSON object. A query still uses POST; these aliases are RPC conveniences.
-- `query` returns the declared result with HTTP **200**. `job` returns HTTP **202**
+- `query` means bounded inline execution, including administrative controls; it
+  does not imply read-only behavior. Only operations explicitly declaring
+  `cacheable: true` opt into the short query cache. It returns the declared result with HTTP **200**. `job` returns HTTP **202**
   with `{"job_id":"…","events_url":"/v1/jobs/…/events"}`. The final result is
   `GET /v1/jobs/{id}` → `result`; acceptance is never execution success.
 - `read < operate < admin` are hierarchical permissions. Secret-prompt permission
@@ -104,7 +121,7 @@ listed and revoked through local CLI tooling, not an HTTP token-administration A
 Raw recipe-trust and credentials are not accepted as arbitrary request fields;
 trust and secret prompts retain their separate server policies.
 
-This snapshot contains **96 operations: 85 core, 8 K8s and 3 SparkRoute**.
+This snapshot contains **94 operations: 83 core, 8 K8s and 3 SparkRoute**.
 
 ## Domain vocabulary
 
@@ -144,8 +161,8 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `benchmarks.resume` | `/v1/benchmarks/resume` | job / operate | auto | `benchmark_id!: string`, `dry_run: boolean/null`, `integrations: object/null`, `export_files: boolean/null`, `output_file: string/null`, `timeout: integer/null`, `exit_on_first_fail: boolean/null`, `api_key_env: string/null` |
-| `benchmarks.run` | `/v1/benchmarks/run` | job / operate | auto | `recipe!: string`, `category: string/null`, `framework: string/null`, `profile: string/null`, `bench_args: object/null`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `resume: string/null`, `skip_run: boolean/null`, `no_stop: boolean/null`, `exit_on_first_fail: boolean/null`, `timeout: integer/null`, `api_key_env: string/null`, `integrations: object/null`, `output_file: string/null`, `export_files: boolean/null`, `solo: boolean/null`, `dry_run: boolean/null`, `scheduler: string/null`, `rootful: boolean/null`, `trust: boolean/null`, `offline: boolean/null`, `sync_tuning: boolean/null`, `extra_docker_opts: string[]/null` |
+| `benchmarks.resume` | `/v1/benchmarks/resume` | job / operate | auto | `benchmark_id!: string`, `dry_run: boolean`, `integrations: object`, `export_files: boolean`, `output_file: string`, `timeout: integer`, `exit_on_first_fail: boolean`, `api_key_env: string` |
+| `benchmarks.run` | `/v1/benchmarks/run` | job / operate | auto | `recipe!: string`, `category: string`, `framework: string`, `profile: string`, `bench_args: object`, `hosts: string[]`, `cluster: string`, `overrides: object`, `resume: string`, `skip_run: boolean`, `no_stop: boolean`, `exit_on_first_fail: boolean`, `timeout: integer`, `api_key_env: string`, `integrations: object`, `output_file: string`, `export_files: boolean`, `solo: boolean`, `dry_run: boolean`, `scheduler: string`, `rootful: boolean`, `trust: boolean`, `offline: boolean`, `sync_tuning: boolean`, `extra_docker_opts: string[]` |
 
 ### catalog
 
@@ -155,8 +172,8 @@ own namespaces and routing-policy fields.
 | `catalog.cleanup` | `/v1/catalog/cleanup` | job / operate | auto | `{}` |
 | `catalog.clusters` | `/v1/catalog/clusters` | query / read | auto | `{}` |
 | `catalog.import` | `/v1/catalog/import` | job / operate | auto | `content!: string` |
-| `catalog.recipe` | `/v1/catalog/recipe` | job / read | auto | `reference!: string`, `overrides: object/null`, `expected_revision: string/null` |
-| `catalog.recipes` | `/v1/catalog/recipes` | query / read | auto | `query: string/null`, `registry: string/null`, `runtime: string/null`, `local_only: boolean/null`, `offset: integer/null`, `limit: integer/null`, `filters: object/null` |
+| `catalog.recipe` | `/v1/catalog/recipe` | job / read | auto | `reference!: string`, `overrides: object`, `expected_revision: string` |
+| `catalog.recipes` | `/v1/catalog/recipes` | query / read | auto | `query: string`, `registry: string`, `runtime: string`, `local_only: boolean`, `offset: integer`, `limit: integer`, `filters: object` |
 | `catalog.refresh` | `/v1/catalog/refresh` | job / operate | auto | `{}` |
 | `catalog.registries` | `/v1/catalog/registries` | query / read | auto | `{}` |
 | `catalog.registries.add` | `/v1/catalog/registries/add` | job / admin | auto | `name!: string`, `url!: string`, `subpath: string` |
@@ -166,37 +183,37 @@ own namespaces and routing-policy fields.
 | `catalog.registries.trust` | `/v1/catalog/registries/trust` | job / admin | auto | `name!: string`, `acknowledge_trust!: boolean` |
 | `catalog.registries.untrust` | `/v1/catalog/registries/untrust` | job / admin | auto | `name!: string` |
 | `catalog.retain` | `/v1/catalog/retain` | job / operate | auto | `reference!: string` |
-| `catalog.search` | `/v1/catalog/search` | query / read | auto | `query: string/null`, `registry: string/null`, `runtime: string/null`, `include_hidden: boolean/null`, `include_local: boolean/null`, `unique_names: boolean/null` |
+| `catalog.search` | `/v1/catalog/search` | query / read | auto | `query: string`, `registry: string`, `runtime: string`, `include_hidden: boolean`, `include_local: boolean`, `unique_names: boolean` |
 
 ### cluster
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `cluster.create` | `/v1/cluster/create` | job / admin | auto | `name!: string`, `hosts!: string[]`, `description: string/null`, `user: string/null` |
+| `cluster.create` | `/v1/cluster/create` | job / admin | auto | `name!: string`, `hosts!: string[]`, `description: string`, `user: string` |
 | `cluster.default` | `/v1/cluster/default` | job / admin | auto | `name: string/null` |
 | `cluster.delete` | `/v1/cluster/delete` | job / admin | auto | `name!: string` |
-| `cluster.observe` | `/v1/cluster/observe` | job / read | auto | `hosts!: string[]`, `cluster: string/null`, `executor: string/null` |
-| `cluster.report` | `/v1/cluster/report` | job / read | auto | `hosts!: string[]`, `cluster: string/null`, `executor: string/null` |
-| `cluster.update` | `/v1/cluster/update` | job / admin | auto | `name!: string`, `hosts: string[]/null`, `description: string/null`, `user: string/null` |
+| `cluster.observe` | `/v1/cluster/observe` | job / read | auto | `hosts!: string[]`, `cluster: string`, `executor: string` |
+| `cluster.report` | `/v1/cluster/report` | job / read | auto | `hosts!: string[]`, `cluster: string`, `executor: string` |
+| `cluster.update` | `/v1/cluster/update` | job / admin | auto | `name!: string`, `hosts: string[]`, `description: string`, `user: string` |
 
 ### discovery
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `discovery.snapshot` | `/v1/discovery/snapshot` | job / read | auto | `hosts: string[]/null`, `cluster: string/null`, `cluster_ids: string[]/null` |
+| `discovery.snapshot` | `/v1/discovery/snapshot` | job / read | auto | `hosts: string[]`, `cluster: string`, `cluster_ids: string[]` |
 
 ### model_cache
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]/null`, `checksums: boolean/null` |
-| `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]/null`, `checksums: boolean/null` |
-| `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]/null` |
-| `model_cache.pin` | `/v1/model_cache/pin` | job / operate | auto | `cache_dir!: string`, `hosts: string[]/null`, `model!: string`, `revision!: string`, `pinned: boolean` |
-| `model_cache.prune` | `/v1/model_cache/prune` | job / admin | auto | `cache_dir!: string`, `hosts: string[]/null`, `dry_run: boolean`, `min_age_days: number`, `max_bytes: integer`, `min_free_bytes: integer` |
-| `model_cache.reconcile` | `/v1/model_cache/reconcile` | job / admin | auto | `cache_dir!: string`, `hosts: string[]/null`, `model!: string`, `revision!: string`, `claim!: string`, `confirm_inactive!: boolean` |
-| `model_cache.repair` | `/v1/model_cache/repair` | job / operate | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]/null`, `local_cache_dir: string/null`, `transfer_mode: string/null`, `checksums: boolean/null`, `offline: boolean/null`, `dry_run: boolean/null` |
-| `model_cache.resolve` | `/v1/model_cache/resolve` | job / read | auto | `model!: string`, `revision: string/null`, `projector: string/null`, `file_selection: string`, `cache_dir: string/null` |
+| `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
+| `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
+| `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]` |
+| `model_cache.pin` | `/v1/model_cache/pin` | job / operate | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision!: string`, `endpoint: string`, `pinned: boolean` |
+| `model_cache.prune` | `/v1/model_cache/prune` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `dry_run: boolean`, `min_age_days: number`, `max_bytes: integer`, `min_free_bytes: integer` |
+| `model_cache.reconcile` | `/v1/model_cache/reconcile` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision!: string`, `endpoint: string`, `claim!: string`, `confirm_inactive!: boolean` |
+| `model_cache.repair` | `/v1/model_cache/repair` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `local_cache_dir: string`, `transfer_mode: string`, `checksums: boolean`, `offline: boolean`, `dry_run: boolean` |
+| `model_cache.resolve` | `/v1/model_cache/resolve` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir: string` |
 
 ### proxy
 
@@ -206,53 +223,51 @@ own namespaces and routing-policy fields.
 | `proxy.discovery.ensure` | `/v1/proxy/discovery/ensure` | query / admin | none | `generation!: string` |
 | `proxy.discovery.status` | `/v1/proxy/discovery/status` | query / admin | none | `{}` |
 | `proxy.discovery.stop` | `/v1/proxy/discovery/stop` | query / admin | none | `{}` |
-| `proxy.install_service` | `/v1/proxy/install_service` | job / admin | none | `scope: string/null`, `cluster: string/null`, `now: boolean/null`, `dry_run: boolean/null` |
+| `proxy.install_service` | `/v1/proxy/install_service` | job / admin | none | `scope: string`, `cluster: string`, `now: boolean`, `dry_run: boolean` |
 | `proxy.list_aliases` | `/v1/proxy/list_aliases` | query / read | none | `{}` |
 | `proxy.list_gateways` | `/v1/proxy/list_gateways` | query / read | none | `{}` |
 | `proxy.models` | `/v1/proxy/models` | job / read | none | `{}` |
-| `proxy.register_loaded_model` | `/v1/proxy/register_loaded_model` | job / operate | none | `recipe!: string`, `overrides: object/null`, `cluster: string/null` |
+| `proxy.register_loaded_model` | `/v1/proxy/register_loaded_model` | job / operate | none | `recipe!: string`, `overrides: object`, `cluster: string` |
 | `proxy.remove_alias` | `/v1/proxy/remove_alias` | job / admin | none | `alias!: string` |
-| `proxy.resolve_gateway` | `/v1/proxy/resolve_gateway` | query / read | none | `name: string/null` |
-| `proxy.serve` | `/v1/proxy/serve` | job / admin | none | `generation!: string` |
-| `proxy.service_status` | `/v1/proxy/service_status` | job / admin | none | `scope: string/null`, `journal_lines: integer/null` |
-| `proxy.start` | `/v1/proxy/start` | job / operate | none | `host: string/null`, `port: integer/null`, `gateway: string/null`, `host_filter: string[]/null`, `cluster: string/null`, `clear_cluster: boolean/null`, `auto_discover: boolean/null`, `discovery_backend: string/null`, `discover_interval: integer/null`, `discover_removal_grace_sweeps: integer/null`, `restart: boolean/null`, `persist: boolean/null`, `dry_run: boolean/null` |
+| `proxy.resolve_gateway` | `/v1/proxy/resolve_gateway` | query / read | none | `name: string` |
+| `proxy.service_status` | `/v1/proxy/service_status` | job / admin | none | `scope: string`, `journal_lines: integer` |
+| `proxy.start` | `/v1/proxy/start` | job / operate | none | `host: string`, `port: integer`, `gateway: string`, `host_filter: string[]`, `cluster: string`, `clear_cluster: boolean`, `auto_discover: boolean`, `discovery_backend: string`, `discover_interval: integer`, `discover_removal_grace_sweeps: integer`, `restart: boolean`, `persist: boolean`, `dry_run: boolean` |
 | `proxy.status` | `/v1/proxy/status` | job / read | none | `{}` |
-| `proxy.stop` | `/v1/proxy/stop` | job / operate | none | `dry_run: boolean/null` |
-| `proxy.sync` | `/v1/proxy/sync` | job / operate | none | `aliases: object/null`, `host_filter: string[]/null` |
-| `proxy.uninstall_service` | `/v1/proxy/uninstall_service` | job / admin | none | `scope: string/null`, `dry_run: boolean/null` |
+| `proxy.stop` | `/v1/proxy/stop` | job / operate | none | `dry_run: boolean` |
+| `proxy.sync` | `/v1/proxy/sync` | job / operate | none | `aliases: object`, `host_filter: string[]` |
+| `proxy.uninstall_service` | `/v1/proxy/uninstall_service` | job / admin | none | `scope: string`, `dry_run: boolean` |
 | `proxy.unregister_loaded_model` | `/v1/proxy/unregister_loaded_model` | job / operate | none | `recipe!: string` |
-| `proxy.watch` | `/v1/proxy/watch` | job / admin | none | `generation!: string` |
 
 ### recipes
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `recipes.build` | `/v1/recipes/build` | job / operate | auto | `recipe!: string`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `dry_run: boolean/null`, `trust: boolean/null`, `rebuild: boolean/null`, `executor: string/null`, `executor_config: object/null`, `cache_dir: string/null`, `local_cache_dir: string/null`, `transfer_mode: string/null`, `transfer_interface: string/null`, `topology: string/null`, `sync_tuning: boolean/null`, `preserve_model_perms: boolean/null`, `skip_model_fan_out: boolean/null`, `builder_context: object/null` |
-| `recipes.plan_build` | `/v1/recipes/plan_build` | job / read | auto | `recipe!: string`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `dry_run: boolean/null`, `trust: boolean/null`, `rebuild: boolean/null`, `executor: string/null`, `executor_config: object/null`, `cache_dir: string/null`, `local_cache_dir: string/null`, `transfer_mode: string/null`, `transfer_interface: string/null`, `topology: string/null`, `sync_tuning: boolean/null`, `preserve_model_perms: boolean/null`, `skip_model_fan_out: boolean/null`, `builder_context: object/null` |
-| `recipes.realize` | `/v1/recipes/realize` | job / operate | auto | `recipe!: string`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `strategy_options: object/null`, `solo: boolean/null`, `dry_run: boolean/null`, `trust: boolean/null`, `ensure: boolean/null`, `scheduler: string/null`, `transfer_mode: string/null`, `cache_dir: string/null`, `offline: boolean/null`, `runtime_cache: boolean/null`, `auto_port: boolean/null`, `ray_port: integer/null`, `dashboard_port: integer/null`, `dashboard: boolean/null`, `init_port: integer/null`, `executor: string/null`, `executor_config: object/null`, `rootful: boolean/null`, `cluster_id_override: string/null`, `transfer_interface: string/null`, `local_cache_dir: string/null`, `sync_tuning: boolean/null`, `extra_docker_opts: string[]/null`, `topology: string/null`, `preserve_model_perms: boolean/null`, `skip_model_fan_out: boolean/null`, `recipe_ref: string/null` |
-| `recipes.validate` | `/v1/recipes/validate` | job / read | auto | `recipe!: string`, `overrides: object/null` |
+| `recipes.build` | `/v1/recipes/build` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `dry_run: boolean`, `trust: boolean`, `rebuild: boolean`, `executor: string`, `executor_config: object`, `cache_dir: string`, `local_cache_dir: string`, `transfer_mode: string`, `transfer_interface: string`, `topology: string`, `sync_tuning: boolean`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `builder_context: object` |
+| `recipes.plan_build` | `/v1/recipes/plan_build` | job / read | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `dry_run: boolean`, `trust: boolean`, `rebuild: boolean`, `executor: string`, `executor_config: object`, `cache_dir: string`, `local_cache_dir: string`, `transfer_mode: string`, `transfer_interface: string`, `topology: string`, `sync_tuning: boolean`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `builder_context: object` |
+| `recipes.realize` | `/v1/recipes/realize` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
+| `recipes.validate` | `/v1/recipes/validate` | job / read | auto | `recipe!: string`, `overrides: object` |
 
 ### setup
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `setup.ensure_local_key` | `/v1/setup/ensure_local_key` | job / admin | auto | `preferred: string/null`, `generate: boolean/null` |
-| `setup.mesh_ssh_keys` | `/v1/setup/mesh_ssh_keys` | job / admin | auto | `hosts!: string[]`, `user: string/null`, `key: string/null`, `timeout: integer/null`, `dry_run: boolean/null` |
-| `setup.plan` | `/v1/setup/plan` | job / read | auto | `hosts: string[]/null`, `cluster: string/null` |
-| `setup.probe_hosts` | `/v1/setup/probe_hosts` | job / read | auto | `hosts: string[]/null`, `cluster: string/null` |
-| `setup.probe_ssh_access` | `/v1/setup/probe_ssh_access` | job / read | auto | `hosts!: string[]`, `user: string/null`, `key: string/null`, `timeout: integer/null`, `max_workers: integer/null` |
-| `setup.rdma_test` | `/v1/setup/rdma_test` | job / operate | auto | `hosts: string[]/null`, `cluster: string/null`, `suite: string/null`, `parallel_pairs: integer/null`, `full: boolean/null`, `image: string/null`, `duration: integer/null`, `queue_pairs: integer/null`, `msg_size: string/null`, `nccl_binary: string/null`, `gid_index: integer/null`, `link_type: string/null`, `force_container: boolean/null`, `keep_containers: boolean/null`, `dry_run: boolean/null` |
-| `setup.run_steps` | `/v1/setup/run_steps` | job / admin | auto | `hosts: string[]/null`, `cluster: string/null`, `dry_run: boolean/null`, `only_steps: string[]/null` |
-| `setup.undo` | `/v1/setup/undo` | job / admin | auto | `cluster!: string`, `dry_run: boolean/null`, `only_steps: string[]/null` |
+| `setup.ensure_local_key` | `/v1/setup/ensure_local_key` | job / admin | auto | `preferred: string`, `generate: boolean` |
+| `setup.mesh_ssh_keys` | `/v1/setup/mesh_ssh_keys` | job / admin | auto | `hosts!: string[]`, `user: string`, `key: string`, `timeout: integer`, `dry_run: boolean` |
+| `setup.plan` | `/v1/setup/plan` | job / read | auto | `hosts: string[]`, `cluster: string` |
+| `setup.probe_hosts` | `/v1/setup/probe_hosts` | job / read | auto | `hosts: string[]`, `cluster: string` |
+| `setup.probe_ssh_access` | `/v1/setup/probe_ssh_access` | job / read | auto | `hosts!: string[]`, `user: string`, `key: string`, `timeout: integer`, `max_workers: integer` |
+| `setup.rdma_test` | `/v1/setup/rdma_test` | job / operate | auto | `hosts: string[]`, `cluster: string`, `suite: string`, `parallel_pairs: integer`, `full: boolean`, `image: string`, `duration: integer`, `queue_pairs: integer`, `msg_size: string`, `nccl_binary: string`, `gid_index: integer`, `link_type: string`, `force_container: boolean`, `keep_containers: boolean`, `dry_run: boolean` |
+| `setup.run_steps` | `/v1/setup/run_steps` | job / admin | auto | `hosts: string[]`, `cluster: string`, `dry_run: boolean`, `only_steps: string[]` |
+| `setup.undo` | `/v1/setup/undo` | job / admin | auto | `cluster!: string`, `dry_run: boolean`, `only_steps: string[]` |
 
 ### tailscale
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `tailscale.down` | `/v1/tailscale/down` | job / admin | auto | `hosts: string[]/null`, `cluster: string/null`, `remove: boolean/null`, `dry_run: boolean/null`, `ask_sudo: boolean` |
-| `tailscale.expose` | `/v1/tailscale/expose` | job / admin | auto | `cluster: string/null`, `proxy: boolean/null`, `head_host: string/null`, `port: integer/null`, `set_proxy_host: boolean/null`, `ask_sudo: boolean` |
-| `tailscale.join` | `/v1/tailscale/join` | job / admin | auto | `hosts: string[]/null`, `cluster: string/null`, `tag: string/null`, `ephemeral: boolean/null`, `enable_ssh: boolean/null`, `hostname: string/null`, `dry_run: boolean/null`, `ask_sudo: boolean` |
-| `tailscale.status` | `/v1/tailscale/status` | job / read | auto | `hosts: string[]/null`, `cluster: string/null` |
+| `tailscale.down` | `/v1/tailscale/down` | job / admin | auto | `hosts: string[]`, `cluster: string`, `remove: boolean`, `dry_run: boolean`, `ask_sudo: boolean` |
+| `tailscale.expose` | `/v1/tailscale/expose` | job / admin | auto | `cluster: string`, `proxy: boolean`, `head_host: string`, `port: integer`, `set_proxy_host: boolean`, `ask_sudo: boolean` |
+| `tailscale.join` | `/v1/tailscale/join` | job / admin | auto | `hosts: string[]`, `cluster: string`, `tag: string`, `ephemeral: boolean`, `enable_ssh: boolean`, `hostname: string`, `dry_run: boolean`, `ask_sudo: boolean` |
+| `tailscale.status` | `/v1/tailscale/status` | job / read | auto | `hosts: string[]`, `cluster: string` |
 
 ### workloads
 
@@ -260,19 +275,19 @@ own namespaces and routing-policy fields.
 | --- | --- | --- | --- | --- |
 | `workloads.endpoints` | `/v1/workloads/endpoints` | job / read | none | `recipe_revision: string`, `cluster_candidates: string[]`, `cluster_id: string` |
 | `workloads.ensure_ready` | `/v1/workloads/ensure_ready` | job / operate | controller | `recipe!: string`, `recipe_revision: string`, `cluster_candidates: string[]`, `overrides: object`, `timeout: number` |
-| `workloads.find_intent` | `/v1/workloads/find_intent` | job / read | auto | `intent_id!: string`, `hosts!: string[]`, `cluster: string/null` |
+| `workloads.find_intent` | `/v1/workloads/find_intent` | job / read | auto | `intent_id!: string`, `hosts!: string[]`, `cluster: string` |
 | `workloads.inventory` | `/v1/workloads/inventory` | job / read | none | `{}` |
-| `workloads.list` | `/v1/workloads/list` | query / read | auto | `limit: integer/null` |
-| `workloads.materialize` | `/v1/workloads/materialize` | job / operate | auto | `recipe!: string`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `strategy_options: object/null`, `solo: boolean/null`, `dry_run: boolean/null`, `trust: boolean/null`, `ensure: boolean/null`, `scheduler: string/null`, `transfer_mode: string/null`, `cache_dir: string/null`, `offline: boolean/null`, `runtime_cache: boolean/null`, `auto_port: boolean/null`, `ray_port: integer/null`, `dashboard_port: integer/null`, `dashboard: boolean/null`, `init_port: integer/null`, `executor: string/null`, `executor_config: object/null`, `rootful: boolean/null`, `cluster_id_override: string/null`, `transfer_interface: string/null`, `local_cache_dir: string/null`, `sync_tuning: boolean/null`, `extra_docker_opts: string[]/null`, `topology: string/null`, `preserve_model_perms: boolean/null`, `skip_model_fan_out: boolean/null`, `recipe_ref: string/null` |
-| `workloads.plan` | `/v1/workloads/plan` | job / read | auto | `recipe!: string`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `strategy_options: object/null`, `solo: boolean/null`, `dry_run: boolean/null`, `trust: boolean/null`, `ensure: boolean/null`, `scheduler: string/null`, `transfer_mode: string/null`, `cache_dir: string/null`, `offline: boolean/null`, `runtime_cache: boolean/null`, `auto_port: boolean/null`, `ray_port: integer/null`, `dashboard_port: integer/null`, `dashboard: boolean/null`, `init_port: integer/null`, `executor: string/null`, `executor_config: object/null`, `rootful: boolean/null`, `cluster_id_override: string/null`, `transfer_interface: string/null`, `local_cache_dir: string/null`, `sync_tuning: boolean/null`, `extra_docker_opts: string[]/null`, `topology: string/null`, `preserve_model_perms: boolean/null`, `skip_model_fan_out: boolean/null`, `recipe_ref: string/null` |
+| `workloads.list` | `/v1/workloads/list` | query / read | auto | `limit: integer` |
+| `workloads.materialize` | `/v1/workloads/materialize` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
+| `workloads.plan` | `/v1/workloads/plan` | job / read | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
 | `workloads.plugins` | `/v1/workloads/plugins` | job / read | none | `{}` |
 | `workloads.reconcile` | `/v1/workloads/reconcile` | job / admin | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string`, `acknowledge_effects!: boolean` |
-| `workloads.run` | `/v1/workloads/run` | job / operate | auto | `recipe!: string`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null`, `strategy_options: object/null`, `solo: boolean/null`, `dry_run: boolean/null`, `trust: boolean/null`, `ensure: boolean/null`, `scheduler: string/null`, `transfer_mode: string/null`, `cache_dir: string/null`, `offline: boolean/null`, `runtime_cache: boolean/null`, `auto_port: boolean/null`, `ray_port: integer/null`, `dashboard_port: integer/null`, `dashboard: boolean/null`, `init_port: integer/null`, `executor: string/null`, `executor_config: object/null`, `rootful: boolean/null`, `cluster_id_override: string/null`, `transfer_interface: string/null`, `local_cache_dir: string/null`, `sync_tuning: boolean/null`, `extra_docker_opts: string[]/null`, `topology: string/null`, `preserve_model_perms: boolean/null`, `skip_model_fan_out: boolean/null`, `recipe_ref: string/null`, `confirm: boolean`, `wait_ready: boolean`, `post_launch: boolean` |
+| `workloads.run` | `/v1/workloads/run` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string`, `confirm: boolean`, `wait_ready: boolean`, `post_launch: boolean` |
 | `workloads.sleep` | `/v1/workloads/sleep` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 | `workloads.status` | `/v1/workloads/status` | job / read | none | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 | `workloads.stop` | `/v1/workloads/stop` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
-| `workloads.stop_all` | `/v1/workloads/stop_all` | job / operate | auto | `hosts!: string[]`, `cluster: string/null`, `dry_run: boolean/null` |
-| `workloads.stop_matching` | `/v1/workloads/stop_matching` | job / operate | auto | `cluster_id: string/null`, `recipe: string/null`, `hosts: string[]/null`, `cluster: string/null`, `overrides: object/null` |
+| `workloads.stop_all` | `/v1/workloads/stop_all` | job / operate | auto | `hosts!: string[]`, `cluster: string`, `dry_run: boolean` |
+| `workloads.stop_matching` | `/v1/workloads/stop_matching` | job / operate | auto | `cluster_id: string`, `recipe: string`, `hosts: string[]`, `cluster: string`, `overrides: object` |
 | `workloads.wake` | `/v1/workloads/wake` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 
 ## Bundled Kubernetes plugin

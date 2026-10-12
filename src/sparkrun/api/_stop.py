@@ -73,7 +73,6 @@ def stop(
     from sparkrun.orchestration.job_metadata import (
         generate_intent_id,
         load_job_metadata,
-        remove_job_metadata,
     )
 
     from sparkrun.core.config import resolve_configured_cache_dir
@@ -228,11 +227,10 @@ def stop(
         )
     else:
         try:
-            from sparkrun.models.usage import release_claims
+            from sparkrun.orchestration.workload_cleanup import finalize_workload
             from sparkrun.orchestration.primitives import build_ssh_kwargs
 
-            release_claims((meta or {}).get("model_cache_claims", []), hosts=target_hosts, ssh_kwargs=build_ssh_kwargs(sctx.config))
-            remove_job_metadata(cluster_id, cache_dir=cache_dir)
+            finalize_workload(cluster_id, hosts=target_hosts, cache_dir=cache_dir, ssh_kwargs=build_ssh_kwargs(sctx.config))
         except Exception:
             logger.warning(
                 "Could not release model cache claims or remove job metadata for %s; retry stop to reconcile", cluster_id, exc_info=True

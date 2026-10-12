@@ -6,8 +6,9 @@ Extracted from orchestration/primitives.py to reduce scope creep in that module.
 from __future__ import annotations
 
 import logging
-import threading
 import time
+
+from sparkrun.core.readiness import ReadinessCancellation
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def wait_for_port(
     ssh_kwargs: dict | None = None,
     dry_run: bool = False,
     container_name: str | None = None,
-    cancel: "threading.Event | None" = None,
+    cancel: ReadinessCancellation | None = None,
     timeout_s: float | None = None,
     executor=None,
 ) -> bool:
@@ -223,7 +224,7 @@ def _budget_spent(t0: float, attempt: int, max_retries: int, timeout_s: float | 
     return (time.monotonic() - t0) >= timeout_s
 
 
-def _interruptible_sleep(seconds: float, cancel: "threading.Event | None") -> bool:
+def _interruptible_sleep(seconds: float, cancel: ReadinessCancellation | None) -> bool:
     """Sleep *seconds*, returning ``True`` if *cancel* fired instead.
 
     A plain :func:`time.sleep` between polls is what makes a cancelled wait
@@ -243,7 +244,7 @@ def wait_for_healthy(
     retry_interval: int = 5,
     dry_run: bool = False,
     max_consecutive_refused=2,
-    cancel: "threading.Event | None" = None,
+    cancel: ReadinessCancellation | None = None,
     timeout_s: float | None = None,
 ) -> bool:
     """Poll an HTTP endpoint until it returns 200.

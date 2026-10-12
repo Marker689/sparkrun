@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from sparkrun.models.artifacts import CacheValidationReport, ModelArtifactManifest, ModelArtifactRequest
 from sparkrun.models.host_io import ModelHostIO
+from sparkrun.models.cache_reports import CacheReport
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
 from sparkrun.models.preparation import PreparedModel, prepare_model
 
@@ -107,7 +108,7 @@ def repair_model(
     )
 
 
-def inventory_cache(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None):
+def inventory_cache(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None) -> tuple[CacheReport, ...]:
     """Read host-local inventory, usage, pins and outstanding workload claims."""
     from sparkrun.models.cache import cache_operation
 
@@ -116,7 +117,7 @@ def inventory_cache(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session
 
 def prune_cache(
     *, cache_dir, hosts=("localhost",), dry_run=True, min_age_days=7, max_bytes=None, min_free_bytes=None, ssh_kwargs=None, session=None
-):
+) -> tuple[CacheReport, ...]:
     """Evict eligible revisions in LRU order; preview by default.
 
     max_bytes budgets private managed snapshot allocations, excluding shared
@@ -138,7 +139,7 @@ def prune_cache(
     )
 
 
-def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_kwargs=None, session=None):
+def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_kwargs=None, session=None) -> tuple[CacheReport, ...]:
     """Pin/unpin an already tracked immutable revision on selected cache hosts."""
     from sparkrun.models.cache import cache_operation
     from sparkrun.models.usage import usage_path
@@ -153,11 +154,14 @@ def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_k
         dry_run=False,
         repo=request.repo,
         revision=request.revision,
+        endpoint=request.endpoint,
         pinned=pinned,
     )
 
 
-def reconcile_claim(request, *, cache_dir, claim, confirm_inactive=False, hosts=("localhost",), ssh_kwargs=None, session=None):
+def reconcile_claim(
+    request, *, cache_dir, claim, confirm_inactive=False, hosts=("localhost",), ssh_kwargs=None, session=None
+) -> tuple[CacheReport, ...]:
     """Release an interrupted workload claim after explicit operator inspection.
 
     Normal stop releases exact claims automatically. Never infer inactivity from
@@ -176,6 +180,7 @@ def reconcile_claim(request, *, cache_dir, claim, confirm_inactive=False, hosts=
         dry_run=False,
         repo=request.repo,
         revision=request.revision,
+        endpoint=request.endpoint,
         claim=claim,
         confirm_inactive=confirm_inactive,
     )

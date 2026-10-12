@@ -8,7 +8,7 @@ registry formats and protocol keys remain shared.
 CLI startup and completion measurements are recorded in
 [the performance report](APPLICATION_PROFILE_PERFORMANCE.md).
 
-The public contract is **application profile/plugin API version 1**, exposed by
+The public contract is **application profile API version 1**, exposed by
 `sparkrun.application.APPLICATION_PROFILE_API_VERSION`. The controller still
 requires Python >=3.12; inference containers have their own interpreter.
 
@@ -498,3 +498,19 @@ return an API-ready context with missing plugins.
 
 [Benchmark API usage](BENCHMARK_API.md) covers callback-driven progress, explicit
 decisions, results, and publication retries for applications with their own UI.
+
+## Daemon identity and runtime consistency
+
+`GET /v1/info` publishes the existing `ControllerIdentity` envelope under
+`controller`. Its application descriptor identifies the product; `controller_id`
+identifies that application's canonical config directory. The daemon `binding`
+also includes the OS account and exact canonical config file. Two files in one
+directory therefore share controller identity but can have separate daemon bindings.
+The `profile` info field is the application profile ID, not a benchmark profile.
+
+Runtime leases fingerprint core, managed plugin generations, the owning
+application package/profile source, and selected installed integrations. Changed
+versions, same-version reinstalls and editable source changes require a daemon
+restart. Supported self-update continues to require draining active leases.
+Application profile API, plugin API, feedback API and daemon operation versions
+are separate contracts even when their current version numbers coincide.
