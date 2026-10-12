@@ -88,13 +88,15 @@ class Boundary:
         if scope["path"] != "/v1/health":
             try:
                 uid = scope.get("sparkrun.peer_uid")
-                if uid is not None and hasattr(os, "getuid") and uid == os.getuid():
-                    principal = Principal("uid:" + str(uid), "admin", True, True)
-                else:
-                    authorization = dict(scope.get("headers", [])).get(b"authorization", b"").decode("ascii")
+                authorization = dict(scope.get("headers", [])).get(b"authorization", b"").decode("ascii")
+                if authorization:
                     if not authorization.startswith("Bearer "):
                         raise PermissionError("Bearer token required")
                     principal = self.tokens.authenticate(authorization[7:])
+                elif uid is not None and hasattr(os, "getuid") and uid == os.getuid():
+                    principal = Principal("uid:" + str(uid), "admin", True, True)
+                else:
+                    raise PermissionError("Bearer token required")
                 scope["sparkrun.principal"] = principal
             except (PermissionError, UnicodeError):
                 response = JSONResponse({"detail": "Authentication required"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
@@ -138,6 +140,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
 
     for name, default in {
         "max_jobs": 4,
+        "max_services": 2,
         "cancel_grace": 15,
         "worker_start_timeout": 60,
         "max_streams": 64,
@@ -158,6 +161,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
         store,
         systemd=worker_supervisor == "systemd",
         max_active=int(config.get("daemon.max_jobs", 4)),
+        max_services=int(config.get("daemon.max_services", 2)),
         cancel_grace=float(config.get("daemon.cancel_grace", 15)),
         start_timeout=float(config.get("daemon.worker_start_timeout", 60)),
     )
@@ -272,8 +276,14 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
 
     @app.get("/v1/info")
     async def info(request: Request):
-        principal(request)
-        return {**binding.info(), "protocol": 1, "runtime": app.state.runtime, "restart_required": coordinator.maintenance}
+        user = principal(request)
+        return {
+            **binding.info(),
+            "protocol": 1,
+            "runtime": app.state.runtime,
+            "restart_required": coordinator.maintenance,
+            "manager": user.manager,
+        }
 
     @app.get("/v1/ops")
     async def operations(request: Request):
@@ -340,14 +350,15 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             from sparkrun.core.runtime_lease import consistent_runtime
 
             try:
-                with consistent_runtime(current, app.state.runtime):
+                with tokens.admission(user) as admitted, consistent_runtime(current, app.state.runtime):
                     identifier = store.submit(
                         op,
                         arguments,
-                        user.id,
+                        admitted.id,
                         request.headers.get("X-Sparkrun-Client", ""),
                         app.state.runtime,
                         key=request.headers.get("Idempotency-Key"),
+                        manager=admitted.manager,
                     )
             except RuntimeError as exc:
                 coordinator.maintenance = True
@@ -359,9 +370,10 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             op.name,
             json.dumps(arguments, sort_keys=True),
             user.id,
+            user.manager,
             current.config_path.stat().st_mtime_ns if current.config_path.exists() else 0,
         )
-        cached = cache.get(cache_key)
+        cached = cache.get(cache_key) if op.scope == "read" else None
         if cached is not None:
             return cached
         query_admitted += 1
@@ -370,11 +382,14 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             from sparkrun.application import initialize
 
             sctx = initialize(config_path=binding.config_path)
-            state = OperationState(deadline=time.monotonic() + float(current.get("daemon.query_timeout", 30)), via_daemon=True)
+            state = OperationState(
+                deadline=time.monotonic() + float(current.get("daemon.query_timeout", 30)), via_daemon=True, manager=user.manager
+            )
             with operation_scope(sctx, state=state):
                 result = op.handler_loader()(arguments, sctx, None)
                 state.check()
-                cache.put(cache_key, result)
+                if op.scope == "read":
+                    cache.put(cache_key, result)
                 return result
 
         try:
@@ -451,8 +466,8 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
 
     @app.get("/v1/snapshots/{name}")
     async def snapshot(name: str, request: Request):
-        principal(request, "admin" if name.startswith("proxy.") else "read")
-        if name not in {"discover_endpoints", "proxy.status", "proxy.watch"}:
+        principal(request, "read")
+        if name != "discovery.snapshot":
             raise LookupError("Unknown snapshot")
         return services.snapshot(name)
 

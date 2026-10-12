@@ -30,7 +30,7 @@ def fields(names) -> dict[str, Any]:
     ints = set(
         "discover_interval discover_removal_grace_sweeps port ray_port dashboard_port init_port offset limit timeout duration parallel_pairs queue_pairs gid_index journal_lines tail interval max_workers".split()
     )
-    arrays = {"hosts", "host_list", "host_filter", "extra_docker_opts", "only_steps"}
+    arrays = {"cluster_ids", "hosts", "host_list", "host_filter", "extra_docker_opts", "only_steps"}
     maps = {"overrides", "executor_config", "strategy_options", "filters", "integrations", "aliases", "bench_args", "builder_context"}
     return {
         name: nullable(B if name in bools else INTEGER if name in ints else A if name in arrays else D if name in maps else S)
@@ -42,7 +42,7 @@ def fields(names) -> dict[str, Any]:
 # Long or potentially mutating reads run in workers until their query audit is complete.
 SPECS = [
     ("catalog.recipes", "catalog_recipes", "query", "read", "query registry runtime local_only offset limit filters", ""),
-    ("catalog.recipe", "get_recipe_details", "job", "read", "reference overrides", "reference"),
+    ("catalog.recipe", "get_recipe_details", "job", "read", "reference overrides expected_revision", "reference"),
     ("catalog.registries", "list_registries", "query", "read", "", ""),
     ("catalog.clusters", "list_clusters", "query", "read", "", ""),
     ("catalog.capacity", "catalog_cluster_capacity", "job", "read", "cluster", "cluster"),
@@ -50,17 +50,16 @@ SPECS = [
     ("catalog.retain", "retain_catalog_recipe", "job", "operate", "reference", "reference"),
     ("catalog.cleanup", "cleanup_catalog_imports", "job", "operate", "", ""),
     ("catalog.refresh", "refresh_registries", "job", "operate", "", ""),
-    ("catalog.registry", "configure_registry", "job", "admin", "action name url subpath acknowledge_trust", "action name"),
-    ("list_jobs", "list_jobs", "query", "read", "limit", ""),
-    ("status", "status", "job", "read", "hosts cluster executor", "hosts"),
-    ("status_report", "status_report", "job", "read", "hosts cluster executor", "hosts"),
-    ("find_running_intent", "find_running_intent", "job", "read", "intent_id hosts cluster", "intent_id hosts"),
-    ("search_recipes", "search_recipes", "query", "read", "query registry runtime include_hidden include_local unique_names", ""),
-    ("stop", "stop", "job", "operate", "cluster_id recipe hosts cluster overrides", ""),
-    ("stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", "hosts"),
-    ("discover_endpoints", "discover_endpoints", "job", "read", "", ""),
+    ("workloads.list", "list_jobs", "query", "read", "limit", ""),
+    ("cluster.observe", "status", "job", "read", "hosts cluster executor", "hosts"),
+    ("cluster.report", "status_report", "job", "read", "hosts cluster executor", "hosts"),
+    ("workloads.find_intent", "find_running_intent", "job", "read", "intent_id hosts cluster", "intent_id hosts"),
+    ("catalog.search", "search_recipes", "query", "read", "query registry runtime include_hidden include_local unique_names", ""),
+    ("workloads.stop_matching", "stop", "job", "operate", "cluster_id recipe hosts cluster overrides", ""),
+    ("workloads.stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", "hosts"),
+    ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster cluster_ids", ""),
     (
-        "resume_benchmark",
+        "benchmarks.resume",
         "resume_benchmark",
         "job",
         "operate",
@@ -89,11 +88,43 @@ SPECS = [
     ("setup.mesh_ssh_keys", "setup.mesh_ssh_keys_native", "job", "admin", "hosts user key timeout dry_run", "hosts"),
 ]
 
+OPTION_SPECS = [
+    ("workloads.run", "run", "RunOptions", "operate"),
+    ("workloads.plan", "plan", "RunOptions", "read"),
+    ("workloads.materialize", "materialize", "RunOptions", "operate"),
+    ("recipes.realize", "realize_recipe", "RunOptions", "operate"),
+    ("recipes.build", "build", "BuildOptions", "operate"),
+    ("recipes.plan_build", "plan_build", "BuildOptions", "read"),
+    ("benchmarks.run", "benchmark", "BenchmarkOptions", "operate"),
+    ("proxy.start", "proxy.start", "ProxyStartOptions", "operate"),
+    ("proxy.install_service", "proxy.install_service", "ProxyServiceOptions", "admin"),
+]
+
+
+DESCRIPTIONS = {
+    "workloads.list": "List saved workload metadata without probing live health.",
+    "workloads.run": "Plan and launch a workload, with optional readiness and post-launch hooks.",
+    "workloads.plan": "Resolve placement and launch settings without launching a workload.",
+    "workloads.materialize": "Resolve container launch units from a plan without starting them.",
+    "workloads.stop_matching": "Stop workloads selected by ID, recipe or hosts; no integration-owner guard.",
+    "workloads.stop_all": "Discover and stop all workloads on the selected hosts.",
+    "workloads.find_intent": "Find an observed running deployment matching a launch intent.",
+    "cluster.observe": "Observe raw per-host occupancy and coverage errors.",
+    "cluster.report": "Observe occupancy and enrich grouped workload/idle-host results with saved metadata.",
+    "catalog.search": "Search recipe summaries with simple filters; catalog.recipes provides paginated browsing.",
+    "recipes.build": "Prepare images or native environments and stage recipe assets without starting inference.",
+    "recipes.plan_build": "Plan environment preparation and asset staging without reserving inference ranks.",
+    "recipes.realize": "Plan against the selected cluster and export a pinned, resolved recipe.",
+    "benchmarks.run": "Launch or reuse inference and execute the selected benchmark framework.",
+    "benchmarks.resume": "Resume a saved benchmark by benchmark ID, separate from its daemon job ID.",
+}
+
+
 OPTION_FIELDS = {
     "RunOptions": "recipe hosts cluster overrides strategy_options solo dry_run trust ensure scheduler transfer_mode cache_dir offline runtime_cache auto_port ray_port dashboard_port dashboard init_port executor executor_config rootful cluster_id_override transfer_interface local_cache_dir sync_tuning extra_docker_opts topology preserve_model_perms skip_model_fan_out recipe_ref",
     "BuildOptions": "recipe hosts cluster overrides dry_run trust rebuild executor executor_config cache_dir local_cache_dir transfer_mode transfer_interface topology sync_tuning preserve_model_perms skip_model_fan_out builder_context",
     "BenchmarkOptions": "recipe category framework profile bench_args hosts cluster overrides resume skip_run no_stop exit_on_first_fail timeout api_key_env integrations output_file export_files solo dry_run scheduler rootful trust offline sync_tuning extra_docker_opts",
-    "ProxyStartOptions": "host port gateway host_filter cluster clear_cluster auto_discover discover_interval discover_removal_grace_sweeps restart persist dry_run",
+    "ProxyStartOptions": "host port gateway host_filter cluster clear_cluster auto_discover discovery_backend discover_interval discover_removal_grace_sweeps restart persist dry_run",
     "ProxyServiceOptions": "scope cluster now dry_run",
 }
 
@@ -154,7 +185,7 @@ def invoke_options(target, model, arguments, sctx, prompt=unavailable_prompt):
     hooks = arguments.pop("post_launch", True)
     cls = getattr(api.proxy, model) if model.startswith("Proxy") else getattr(api, model)
     if model == "RunOptions":
-        arguments.update(detached=True, follow=False, owner="daemon:" + sctx.operation.id)
+        arguments.update(detached=True, follow=False, owner=sctx.operation.manager)
     if model == "BenchmarkOptions":
         arguments["progress_callback"] = lambda event: _benchmark_progress(sctx, event)
         arguments["decision_callback"] = lambda decision: prompt("decision", decision.message, default=False)
@@ -213,50 +244,37 @@ def register_core_ops():
                 result_schema=RESULT_SCHEMAS[name],
                 kind=kind,
                 scope=scope,
-                description=f"{target.replace('_', ' ').capitalize()} through the library API.",
+                resources="none" if name.startswith("proxy.") else "auto",
+                description=DESCRIPTIONS.get(name, f"{target.replace('_', ' ').capitalize()} through the library API."),
             )
         )
-    for name, model, scope in [
-        ("run", "RunOptions", "operate"),
-        ("plan", "RunOptions", "read"),
-        ("materialize", "RunOptions", "operate"),
-        ("realize_recipe", "RunOptions", "operate"),
-        ("build", "BuildOptions", "operate"),
-        ("plan_build", "BuildOptions", "read"),
-        ("benchmark", "BenchmarkOptions", "operate"),
-        ("proxy.start", "ProxyStartOptions", "operate"),
-        ("proxy.install_service", "ProxyServiceOptions", "admin"),
-    ]:
+    for name, target, model, scope in OPTION_SPECS:
         properties = fields(OPTION_FIELDS[model])
         if "recipe" in properties:
             properties["recipe"] = S
-        if name == "run":
+        if target == "run":
             properties.update({"confirm": B, "wait_ready": B, "post_launch": B})
         register_daemon_op(
             DaemonOp(
                 name,
-                partial(_options_loader, name, model),
+                partial(_options_loader, target, model),
                 object_schema(properties, [] if model.startswith("Proxy") else ["recipe"]),
                 result_schema=RESULT_SCHEMAS[name],
                 kind="job",
                 scope=scope,
-                description=f"{name.replace('_', ' ').capitalize()} with an operation-local context.",
+                resources="none" if name.startswith("proxy.") else "auto",
+                description=DESCRIPTIONS.get(name, f"{name.replace('_', ' ').capitalize()} with an operation-local context."),
             )
         )
-    from sparkrun.daemon.services import watch_proxy
+    from sparkrun.daemon.registry_ops import register_registry_ops
 
-    register_daemon_op(
-        DaemonOp(
-            "proxy.watch",
-            lambda: watch_proxy,
-            object_schema(),
-            result_schema={"type": "object", "properties": {"stopped": {"type": "string"}}, "required": ["stopped"]},
-            kind="job",
-            scope="admin",
-            resources="none",
-            description="Follow a running proxy with graceful endpoint removal; opt in via daemon.proxy_autodiscover.",
-        )
-    )
+    register_registry_ops()
+    from sparkrun.daemon.proxy import register_proxy_ops
+
+    register_proxy_ops()
+    from sparkrun.daemon.workloads import register_workload_ops
+
+    register_workload_ops()
     from sparkrun.daemon.special_ops import register_special_ops
 
     register_special_ops()

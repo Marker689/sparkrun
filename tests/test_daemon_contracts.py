@@ -41,14 +41,14 @@ def test_public_api_coverage_and_closed_schemas(binding):
         register()
     names = {op.name for op in registered_daemon_ops()}
     for endpoint in [*API_OPERATIONS.values(), *K8S_OPERATIONS.values()]:
-        assert endpoint.startswith("/v1/streams/") or endpoint in names
+        assert all(target.startswith("/v1/streams/") or target in names for target in endpoint.split(" / "))
     for op in registered_daemon_ops():
         assert op.request_schema["additionalProperties"] is False
         assert op.result_schema, op.name
         with pytest.raises(ValueError):
             check_request(op, {"unadvertised_argument": "ignored inputs are forbidden"})
     with pytest.raises(ValueError):
-        check_request(get_daemon_op("run"), {"recipe": None})
+        check_request(get_daemon_op("workloads.run"), {"recipe": None})
     assert check_request(get_daemon_op("proxy.start"), {"auto_discover": False, "restart": True})
     assert check_request(get_daemon_op("model_cache.inspect"), {"model": "org/model", "cache_dir": "/tmp/cache", "file_selection": "all"})
     assert check_request(get_daemon_op("plugins.k8s.configure_service_account"), {"token_duration": "1h"})
@@ -466,3 +466,21 @@ def test_supervisor_launch_diagnostics_do_not_expose_command_secrets(binding, mo
     assert store.get(job)["state"] == "lost"
     assert reason in caplog.text and job in caplog.text
     assert "private-key" not in caplog.text
+
+
+def test_public_workload_api_coverage():
+    from sparkrun.api import workloads
+    from sparkrun.daemon.coverage import WORKLOAD_OPERATIONS, WORKLOAD_EXCLUSIONS
+    from sparkrun.daemon.ops import register_core_ops
+    from sparkrun.core.daemon_registry import registered_daemon_ops
+
+    public = {
+        name
+        for name, obj in vars(workloads).items()
+        if inspect.isfunction(obj) and obj.__module__ == workloads.__name__ and not name.startswith("_")
+    }
+    assert public == WORKLOAD_OPERATIONS.keys() | WORKLOAD_EXCLUSIONS.keys()
+    register_core_ops()
+    names = {op.name for op in registered_daemon_ops()}
+    for targets in WORKLOAD_OPERATIONS.values():
+        assert set(targets.split(" / ")) <= names

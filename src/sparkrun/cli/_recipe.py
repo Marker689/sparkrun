@@ -51,7 +51,7 @@ def _search_recipes(ctx, query, *, registry, runtime, show_all, unique_names=Fal
         from sparkrun.daemon.passthrough import query as daemon_query
 
         handled, remote = daemon_query(
-            "search_recipes",
+            "catalog.search",
             {
                 "query": query,
                 "registry": registry,

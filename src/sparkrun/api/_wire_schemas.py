@@ -3,6 +3,73 @@
 These are explicit wire contracts, separate from runtime Python object graphs.
 """
 
+from sparkrun.api._wire import object_schema
+
+_REGISTRY_MUTATION_RESULT = {
+    "type": "object",
+    "properties": {
+        "registries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "visible": {"type": "boolean"},
+                    "trusted": {"type": "boolean"},
+                    "cached": {"type": "boolean"},
+                },
+                "required": ["cached", "trusted", "name", "visible", "enabled"],
+                "additionalProperties": True,
+            },
+        }
+    },
+    "required": ["registries"],
+    "additionalProperties": True,
+}
+
+_DISCOVERY_ENDPOINTS = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "cluster_id": {"type": "string"},
+            "model": {"type": "string"},
+            "served_model_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "host": {"type": "string"},
+            "port": {"type": "integer"},
+            "healthy": {"type": "boolean"},
+            "actual_models": {"type": "array", "items": {"type": "string"}},
+            "recipe_name": {"type": "string"},
+            "tensor_parallel": {"type": "integer"},
+            "max_model_len": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+            "cluster_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "recipe_revision": {"type": "string"},
+            "native_protocols": {"type": "array", "items": {"type": "string"}},
+            "capabilities": {"type": "array", "items": {"type": "string"}},
+            "runtime": {"type": "string"},
+        },
+        "required": [
+            "cluster_id",
+            "model",
+            "served_model_name",
+            "host",
+            "port",
+            "healthy",
+            "actual_models",
+            "recipe_name",
+            "tensor_parallel",
+            "max_model_len",
+            "cluster_name",
+            "recipe_revision",
+            "native_protocols",
+            "capabilities",
+            "runtime",
+        ],
+        "additionalProperties": True,
+    },
+}
+
 RESULT_SCHEMAS = {
     "catalog.recipes": {
         "type": "object",
@@ -311,29 +378,7 @@ RESULT_SCHEMAS = {
         "required": ["updated", "failed"],
         "additionalProperties": True,
     },
-    "catalog.registry": {
-        "type": "object",
-        "properties": {
-            "registries": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "enabled": {"type": "boolean"},
-                        "visible": {"type": "boolean"},
-                        "trusted": {"type": "boolean"},
-                        "cached": {"type": "boolean"},
-                    },
-                    "required": ["cached", "trusted", "name", "visible", "enabled"],
-                    "additionalProperties": True,
-                },
-            }
-        },
-        "required": ["registries"],
-        "additionalProperties": True,
-    },
-    "list_jobs": {
+    "workloads.list": {
         "type": "array",
         "items": {
             "type": "object",
@@ -351,7 +396,7 @@ RESULT_SCHEMAS = {
             "additionalProperties": True,
         },
     },
-    "status": {
+    "cluster.observe": {
         "type": "object",
         "properties": {
             "hosts": {
@@ -523,7 +568,7 @@ RESULT_SCHEMAS = {
         "required": ["hosts", "queried_at", "executor", "errors", "coverage"],
         "additionalProperties": True,
     },
-    "status_report": {
+    "cluster.report": {
         "type": "object",
         "required": ["groups", "solo_entries", "idle_hosts"],
         "properties": {
@@ -533,8 +578,8 @@ RESULT_SCHEMAS = {
         },
         "additionalProperties": True,
     },
-    "find_running_intent": {"anyOf": [{}, {"type": "null"}]},
-    "search_recipes": {
+    "workloads.find_intent": {"anyOf": [{}, {"type": "null"}]},
+    "catalog.search": {
         "type": "array",
         "items": {
             "type": "object",
@@ -543,7 +588,7 @@ RESULT_SCHEMAS = {
             "additionalProperties": True,
         },
     },
-    "stop": {
+    "workloads.stop_matching": {
         "type": "object",
         "properties": {
             "cluster_id": {"type": "string"},
@@ -555,7 +600,7 @@ RESULT_SCHEMAS = {
         "required": ["cluster_id", "hosts_targeted", "containers_removed", "errors", "hosts_failed"],
         "additionalProperties": True,
     },
-    "stop_all": {
+    "workloads.stop_all": {
         "type": "object",
         "properties": {
             "discovered": {
@@ -643,48 +688,7 @@ RESULT_SCHEMAS = {
         "required": ["discovered", "jobs_stopped", "containers_removed", "hosts_stopped", "hosts_failed", "discovery_errors", "dry_run"],
         "additionalProperties": True,
     },
-    "discover_endpoints": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "cluster_id": {"type": "string"},
-                "model": {"type": "string"},
-                "served_model_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "host": {"type": "string"},
-                "port": {"type": "integer"},
-                "healthy": {"type": "boolean"},
-                "actual_models": {"type": "array", "items": {"type": "string"}},
-                "recipe_name": {"type": "string"},
-                "tensor_parallel": {"type": "integer"},
-                "max_model_len": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-                "cluster_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "recipe_revision": {"type": "string"},
-                "native_protocols": {"type": "array", "items": {"type": "string"}},
-                "capabilities": {"type": "array", "items": {"type": "string"}},
-                "runtime": {"type": "string"},
-            },
-            "required": [
-                "cluster_id",
-                "model",
-                "served_model_name",
-                "host",
-                "port",
-                "healthy",
-                "actual_models",
-                "recipe_name",
-                "tensor_parallel",
-                "max_model_len",
-                "cluster_name",
-                "recipe_revision",
-                "native_protocols",
-                "capabilities",
-                "runtime",
-            ],
-            "additionalProperties": True,
-        },
-    },
-    "resume_benchmark": {
+    "benchmarks.resume": {
         "type": "object",
         "properties": {
             "success": {"type": "boolean"},
@@ -1308,7 +1312,7 @@ RESULT_SCHEMAS = {
         "required": ["public_keys", "collect_failures", "install_failures"],
         "additionalProperties": True,
     },
-    "run": {
+    "workloads.run": {
         "type": "object",
         "properties": {
             "cluster_id": {"type": "string"},
@@ -1382,7 +1386,7 @@ RESULT_SCHEMAS = {
         ],
         "additionalProperties": True,
     },
-    "plan": {
+    "workloads.plan": {
         "type": "object",
         "properties": {
             "candidate_hosts": {"type": "array", "items": {"type": "string"}},
@@ -1480,7 +1484,7 @@ RESULT_SCHEMAS = {
         ],
         "additionalProperties": True,
     },
-    "materialize": {
+    "workloads.materialize": {
         "type": "object",
         "properties": {
             "format": {"type": "integer"},
@@ -1599,7 +1603,7 @@ RESULT_SCHEMAS = {
         ],
         "additionalProperties": True,
     },
-    "realize_recipe": {
+    "recipes.realize": {
         "type": "object",
         "properties": {
             "recipe": {"type": "object", "additionalProperties": {}},
@@ -1721,7 +1725,7 @@ RESULT_SCHEMAS = {
         "required": ["recipe", "plan", "dropped_keys", "pins", "unpinned"],
         "additionalProperties": True,
     },
-    "build": {
+    "recipes.build": {
         "type": "object",
         "properties": {
             "host_list": {"type": "array", "items": {"type": "string"}},
@@ -1749,7 +1753,7 @@ RESULT_SCHEMAS = {
         ],
         "additionalProperties": True,
     },
-    "plan_build": {
+    "recipes.plan_build": {
         "type": "object",
         "properties": {
             "host_list": {"type": "array", "items": {"type": "string"}},
@@ -1776,7 +1780,7 @@ RESULT_SCHEMAS = {
         "required": ["host_list", "needs_image", "issues", "recipe", "runtime", "cluster"],
         "additionalProperties": True,
     },
-    "benchmark": {
+    "benchmarks.run": {
         "type": "object",
         "properties": {
             "success": {"type": "boolean"},
@@ -2026,7 +2030,7 @@ RESULT_SCHEMAS = {
         ],
         "additionalProperties": True,
     },
-    "validate_recipe": {
+    "recipes.validate": {
         "type": "array",
         "items": {
             "type": "object",
@@ -3113,3 +3117,119 @@ RESULT_SCHEMAS = {
     },
     "k8s.stop_jobset": {"type": "boolean"},
 }
+
+
+# Gateway discovery carries explicit coverage, never credential-bearing endpoint objects.
+RESULT_SCHEMAS["discovery.snapshot"] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "sweep_id": {"type": "string"},
+        "observed_at": {"type": "number"},
+        "mode": {"type": "string", "enum": ["metadata", "live"]},
+        "complete": {"type": "boolean"},
+        "hosts": {"type": "array", "items": {"type": "string"}},
+        "covered_hosts": {"type": "array", "items": {"type": "string"}},
+        "errors": {"type": "object", "additionalProperties": {"type": "string"}},
+        "endpoints": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    **{k: v for k, v in _DISCOVERY_ENDPOINTS["items"]["properties"].items() if k not in {"recipe_name", "tensor_parallel"}},
+                    "owner": {"type": "string"},
+                },
+            },
+        },
+    },
+    "required": ["sweep_id", "observed_at", "mode", "complete", "hosts", "covered_hosts", "errors", "endpoints"],
+}
+RESULT_SCHEMAS["proxy.status"]["properties"]["discovery_status"] = {"type": "object"}
+RESULT_SCHEMAS["proxy.start"]["properties"]["discovery_backend"] = {"type": "string", "enum": ["process", "daemon"]}
+
+for _name in ("catalog.recipe", "catalog.import"):
+    RESULT_SCHEMAS[_name]["properties"].update(
+        {
+            "source_kind": {"type": "string", "enum": ["imported", "registry", "local"]},
+            "normalized_overrides": {"type": "object"},
+        }
+    )
+
+
+# Shared workload contracts used by core daemon adapters. Provider-specific
+# payloads never cross this interface; exact identity and state are projected.
+_workload_string = {"type": "string"}
+_workload_nullable = {"type": ["string", "null"]}
+_workload_strings = {"type": "array", "items": _workload_string}
+_workload_endpoint = RESULT_SCHEMAS["discovery.snapshot"]["properties"]["endpoints"]["items"]
+_workload_row = object_schema(
+    {
+        "cluster_id": _workload_string,
+        "cluster_name": _workload_nullable,
+        "recipe_revision": _workload_string,
+        "owner": _workload_string,
+        "owned": {"type": "boolean"},
+        "provider": _workload_nullable,
+        "actions": _workload_strings,
+        "state": _workload_string,
+        "observation": {"enum": ["recorded"], "type": "string"},
+    },
+    ["cluster_id", "cluster_name", "recipe_revision", "owner", "owned", "provider", "actions", "state", "observation"],
+)
+RESULT_SCHEMAS.update(
+    {
+        "workloads.ensure_ready": object_schema(
+            {
+                "state": {"type": "string", "enum": ["ready"]},
+                "cluster_id": _workload_string,
+                "endpoint": _workload_endpoint,
+                "adopted": {"type": "boolean"},
+                "workload": _workload_row,
+                "observed_at": {"type": "number"},
+            },
+            ["state", "cluster_id", "endpoint", "adopted", "observed_at", "workload"],
+        ),
+        "workloads.stop": object_schema(
+            {"state": {"type": "string", "enum": ["offline"]}, "cluster_ids": _workload_strings}, ["state", "cluster_ids"]
+        ),
+        "workloads.control": _workload_row,
+        "workloads.reconcile": object_schema(
+            {"cluster_id": _workload_string, "state": _workload_string, "receipts": {"type": "integer"}},
+            ["cluster_id", "state", "receipts"],
+        ),
+        "workloads.inventory": object_schema(
+            {
+                "workloads": {"type": "array", "items": _workload_row},
+                "providers": {
+                    "type": "array",
+                    "items": object_schema({"name": _workload_string, "version": {"type": "integer"}}, ["name", "version"]),
+                },
+            },
+            ["workloads", "providers"],
+        ),
+        "workloads.plugins": object_schema(
+            {
+                "plugins": {
+                    "type": "array",
+                    "items": object_schema(
+                        {
+                            "name": _workload_string,
+                            "plugin_id": _workload_nullable,
+                            "enabled": {"type": "boolean"},
+                            "loaded": {"type": "boolean"},
+                            "version": _workload_nullable,
+                            "lifecycle": {"type": "boolean"},
+                        },
+                        ["name", "plugin_id", "enabled", "loaded", "version", "lifecycle"],
+                    ),
+                }
+            },
+            ["plugins"],
+        ),
+    }
+)
+
+
+for _action in ("add", "remove", "enable", "disable", "trust", "untrust"):
+    RESULT_SCHEMAS["catalog.registries." + _action] = _REGISTRY_MUTATION_RESULT

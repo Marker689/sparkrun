@@ -1005,7 +1005,7 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json, c
     if output_json:
         from sparkrun.daemon.passthrough import query as daemon_query
 
-        handled, out = daemon_query("status_report", {"hosts": host_list, "cluster": hctx.cluster_name})
+        handled, out = daemon_query("cluster.report", {"hosts": host_list, "cluster": hctx.cluster_name})
         if handled:
             for cid, group_data in out["groups"].items():
                 group_data["label"] = format_job_label(group_data["meta"], cid)

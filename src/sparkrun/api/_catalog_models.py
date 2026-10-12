@@ -89,6 +89,8 @@ class CatalogRecipeDetails(TypedDict):
 
     reference: str
     source_path: str
+    source_kind: str
+    normalized_overrides: dict[str, Any]
     name: str
     registry: str | None
     model: str

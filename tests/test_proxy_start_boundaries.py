@@ -135,3 +135,30 @@ def test_invalid_preview_does_not_stop_a_working_gateway(gateway, monkeypatch):
     assert isinstance(caught.value.__cause__, GatewayOperationError)
     wait.assert_not_called()
     assert generated_files(context, engine) == before
+
+
+def test_daemon_foreground_releases_start_reservation_before_wait(gateway, monkeypatch):
+    from sparkrun.core.coordination import reservations
+    from sparkrun.daemon import management, proxy as services
+
+    name, context, engine, events = gateway
+    monkeypatch.setattr(context.config, "is_feature_enabled", lambda name: True)
+    monkeypatch.setattr(type(engine), "is_running", lambda self: False)
+    monkeypatch.setattr(management, "ensure_daemon", lambda binding: {})
+
+    def launch(*args, **kwargs):
+        assert reservations(context.config.config_path.parent), "startup must stay guarded"
+        events.append("daemon start")
+
+    def wait(sctx):
+        assert not reservations(sctx.config.config_path.parent), "foreground wait must not block workload activation"
+        events.append("foreground wait")
+        return 0
+
+    monkeypatch.setattr(services, "launch_gateway", launch)
+    monkeypatch.setattr(services, "wait_gateway", wait)
+    result = api.proxy.start(
+        api.proxy.ProxyStartOptions(gateway=name, discovery_backend="daemon", foreground=True, persist=False), sctx=context
+    )
+    assert result.started and result.foreground_rc == 0
+    assert events == ["preview", "write", "daemon start", "foreground wait"]

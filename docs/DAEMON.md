@@ -8,8 +8,9 @@ plan through approval, execution, readiness, and post-launch hooks.
 The local daemon supports HTTP/TCP on Linux, macOS, and Windows. This is a
 single-user controller, bound to one OS account, application profile, and canonical
 config file. It controls Linux/Spark targets over SSH; local Linux setup and GPU
-workloads retain their existing platform requirements. SparkRoute and ColdSnap
-migration is not included. Native macOS/Windows execution is covered by the
+workloads retain their existing platform requirements. Optional gateway discovery
+and workload lifecycle integrations are described below. The full operation and
+route inventory is in [DAEMON_API.md](DAEMON_API.md). Native macOS/Windows execution is covered by the
 portable-daemon CI matrix; those results must pass before releasing platform support.
 
 ## Starting and connecting
@@ -145,7 +146,7 @@ health/protocol; `/v1/info` requires auth.
 ```bash
 sparkrun daemon call cluster.create \
   --data '{"name":"lab","hosts":["spark-a","spark-b"]}' --wait
-sparkrun daemon call run \
+sparkrun daemon call workloads.run \
   --data '{"recipe":"registry/recipe","cluster":"lab","confirm":true}' \
   --idempotency-key launch-lab-001 --wait
 sparkrun daemon jobs list
@@ -172,7 +173,7 @@ JSON body and dispatcher as `/v1/ops/{name}` on both TCP and Unix sockets:
 | `POST /v1/cluster/update` | `cluster.update` | 202, job acknowledgement |
 | `POST /v1/cluster/delete` | `cluster.delete` | 202, job acknowledgement |
 | `POST /v1/catalog/clusters` | `catalog.clusters` | 200, cluster listing |
-| `POST /v1/run` | `run` | 202, job acknowledgement |
+| `POST /v1/workloads/run` | `workloads.run` | 202, job acknowledgement |
 | `POST /v1/plugins/k8s/ops/list_nodes` | `plugins.k8s.list_nodes` | 202, job acknowledgement |
 
 For example, with a daemon URL and admin token in your environment:
@@ -255,6 +256,7 @@ Storage has not been migrated wholesale to SQLite:
 
 | State | Storage | Callers |
 | --- | --- | --- |
+| Workload placement, post-launch effect and lifecycle receipts | `<config-root>/workload-receipts.sqlite3` | Shared workload APIs and plugin adapters |
 | Durable operation jobs, events, results, prompts, retry keys | `<config-root>/daemon/<binding>/jobs.sqlite3` | Daemon and its workers |
 | Resource reservations and owner identities | `<config-root>/operations.sqlite3` | Shared by daemon and standalone mutating API/CLI operations |
 | Workload metadata (recipe, hosts, deployment identity) | `<cache-root>/jobs/*.yaml` | Existing shared workload APIs, including daemon calls |
@@ -262,9 +264,9 @@ Storage has not been migrated wholesale to SQLite:
 
 A daemon `job_id` identifies an operation invocation. A workload `cluster_id`
 identifies the deployment produced or affected by an operation. For example,
-a daemon `run` job may finish successfully while the deployed inference service
+a daemon `workloads.run` job may finish successfully while the deployed inference service
 keeps running; its result includes the workload identity. `daemon jobs list`
-shows operation history, whereas `daemon call list_jobs` and Python
+shows operation history, whereas `daemon call workloads.list` and Python
 `sparkrun.api.list_jobs()` list saved workload metadata. Ordinary standalone CLI
 operations do not create daemon job-history rows. The daemon reuses core workload
 storage; its durable operation journal is additional state, not a replacement
@@ -332,7 +334,8 @@ changing admission/retention settings.
 
 | Key | Default | Meaning |
 | --- | ---: | --- |
-| `max_jobs` | 4 | Concurrent worker jobs, including waiting prompts/watchers |
+| `max_services` | 2 | Separate capacity for gateway/discovery service jobs; use at least 2 for both |
+| `max_jobs` | 4 | Concurrent ordinary jobs, including waiting prompts; service workers have a separate budget |
 | `max_queued_jobs` | 128 | Accepted queued jobs |
 | `max_query_threads` | 8 | Audited query threads |
 | `max_queued_queries` | 32 | Total admitted active/waiting queries |
@@ -347,7 +350,6 @@ changing admission/retention settings.
 | `job_retention_days` | 7 | Terminal result/event retention |
 | `retained_jobs` | 1000 | Maximum retained terminal jobs |
 | `discovery_interval` | 0 | Opt-in endpoint snapshots; 0 disables, minimum 5 seconds |
-| `proxy_autodiscover` | false | Opt-in durable proxy watcher |
 
 Results have a 2 MiB cap and individual events a 256 KiB cap. Log subscription
 queues hold 128 lines and emit gaps on overflow. Query caches hold 128 entries
@@ -359,7 +361,7 @@ retry an older uncertain mutation after its retry window expires.
 
 ## Anonymous usage telemetry
 
-Daemon `run` and `benchmark` operations retain the existing core API telemetry
+Daemon `workloads.run` and `benchmarks.run` operations retain the existing core API telemetry
 emitters and payloads. All usage events now include `via_daemon`: `true` when
 emitted inside daemon-managed operation execution, `false` for direct CLI/Python
 execution. Attribution follows nested API work, worker processes, query threads,
@@ -405,11 +407,12 @@ submission; submitted operations are not retried locally. Normal CLI behavior
 remains the default.
 
 `daemon.discovery_interval` enables advisory endpoint snapshots at
-`/v1/snapshots/discover_endpoints`. With `proxy_autodiscover: true`, the daemon can
-supervise one durable watcher for an already-running proxy. It reuses existing
-endpoint removal grace, does not compete with standalone autodiscovery, and skips
-gateways that manage their own desired state. It consumes one worker slot and
-survives API restart. It does not start the proxy or alter SparkRoute/ColdSnap.
+`/v1/snapshots/discovery.snapshot`; it defaults to zero to avoid an unused duplicate
+sweep. Gateway discovery instead uses `proxy.discovery_backend: daemon` and the
+proxy's own scope, interval and removal grace. The gateway and watcher run as
+separate service jobs, share the ordinary job/event machinery, and survive an
+API-process restart. See [gateway discovery and workload transport](#gateway-discovery-and-workload-recovery)
+below. The old `daemon.proxy_autodiscover` switch no longer schedules a watcher.
 
 MCP support is disabled. Its adapter implementation is retained for possible
 future reuse, but no MCP command or service entry point is registered.
@@ -552,3 +555,117 @@ Job event streams include versioned `type: "feedback"` events from the public
 messages. Both expose a top-level `message`; structured feedback also identifies
 activities, stages, hosts, counters, and metrics. These describe the operation
 (e.g. image transfer or ColdSnap restore), not container log output.
+
+## Gateway discovery and workload recovery
+
+Both LiteLLM and the external SparkRoute engine use the same discovery session,
+coverage/removal-grace logic, and owner fencing. Keep the existing standalone
+process backend, or select daemon discovery explicitly:
+
+```bash
+sparkrun proxy start --discovery-backend daemon --cluster lab
+sparkrun proxy status
+sparkrun daemon call proxy.discovery.status
+```
+
+The daemon feature must already be enabled. Startup attaches to or starts the
+matching local controller binding; dry runs do neither. A private session pins the
+effective host/cluster selection, SSH context, interval and removal grace. A changed
+default cluster is picked up on the next explicit start, not midway through a
+sweep. `proxy.auto_discover: false` disables periodic discovery for either backend.
+
+Daemon mode uses a dedicated `proxy.serve` job for the gateway lifetime and a
+separate `proxy.watch` job for discovery. Configure at least two service slots
+when both are selected. Foreground attachment waits after its startup reservation
+has been released. LiteLLM replacements are performed by its own supervisor;
+SparkRoute keeps its admin-API configuration reconciliation. Finishing/cancelling
+discovery does not own the gateway process. Stopping the proxy stops its matching
+discovery session even if the gateway has already exited.
+
+Discovery status includes backend, generation/job, scope, last attempt,
+last complete successful observation, last application and sanitized error.
+`running` means the loop is active; with metadata-only scope, `last_success` may
+remain null because there is no complete host inventory. Partial/failed coverage
+never counts as absence on an unobserved host. Failed or fenced configuration
+application never commits removal-grace changes. An uncertain/dead owner requires
+explicit stop/restart; it is not replaced merely because the API process restarted.
+Do not repeatedly submit raw `proxy.watch` jobs; lifecycle controls manage ownership.
+
+For the new SparkRoute HTTP/SSE client, configure `proxy.yaml` explicitly:
+
+```yaml
+proxy:
+  gateway: sparkroute
+  gateway_transport: daemon
+  discovery_backend: daemon
+  discover_interval: 30
+  discover_removal_grace_sweeps: 2
+```
+
+`gateway_transport` defaults to `bridge`. Selecting daemon transport defaults
+discovery to daemon unless a discovery backend was explicitly saved. The managed
+plugin verifies that both its daemon operations and the gateway binary support
+this transport. Use coordinated host/plugin/gateway builds; older release pins do
+not implement it. There is no automatic fallback after an uncertain mutation.
+The Go lifecycle, admin catalog and profile-refresh clients all use the selected
+transport. Managed startup writes a private connection descriptor containing local
+binding/state/credential-file references; tokens stay out of gateway arguments
+and exports. Local TCP token rotation is followed without per-request Python.
+
+A separately managed Go gateway can use `-sparkrun-daemon-connection /private/client.json`
+(or `SPARKROUTE_SPARKRUN_DAEMON_CONNECTION`) with an explicit remote descriptor:
+
+```json
+{
+  "protocol": 1,
+  "binding": "BINDING_FROM_DAEMON_INFO",
+  "profile": "sparkrun",
+  "manager": "sparkroute",
+  "url": "https://controller:8443",
+  "token_file": "/private/daemon.token",
+  "ca_file": "/private/controller-ca.pem",
+  "action_directory": "/private/gateway-actions"
+}
+```
+
+The descriptor/token/action directory must be private. Omit `ca_file` for normal
+system trust. An HTTP URL is explicit plaintext; the remote server still requires
+its `--allow-insecure` opt-in. Remote connections attach only; they do not start a
+remote daemon or make that controller own a locally spawned gateway. Verify the
+binding/profile via the existing authenticated daemon tooling before provisioning
+the descriptor.
+
+Public `sparkrun.api.workloads` provides binding resolution, live endpoint
+observations, inventory, ensure-ready, guarded stop/provider controls, and explicit
+receipt reconciliation. A launch records placement before effects and uses the
+same context through readiness and hooks. Healthy external workloads can be
+adopted; automatic stop/sleep/wake require the integration's exact saved owner,
+workload ID and recipe revision. The owner comes from the credential’s stable
+manager identity, is persisted at job admission, and is never accepted from HTTP arguments or client labels.
+`/v1/info` reports the current `manager`. Locally issue a remote gateway credential
+with `daemon token create gateway --scope admin --manager sparkroute`; keep its
+secret in a private token file. Token scope and management ownership are separate.
+The local integration provisions/rotates this credential automatically and uses
+it over both UDS and TCP. Ordinary local admin calls default to manager `daemon`.
+ColdSnap registers the public version-1 lifecycle provider for its existing exact capture/activation receipt checks.
+
+Interrupted effects are kept in `<config-root>/workload-receipts.sqlite3`, separate
+from daemon job retention. A failed/lost job does not authorize a duplicate launch
+or replay of uncertain post-launch hooks. Inspect the workload first. Release any
+verified-dead execution reservations using `daemon resources reconcile`, then use
+`workloads.reconcile` with a credential for the workload’s manager. For SparkRoute,
+use its private token file and the controller URL (or `--socket` in place of `--url`):
+
+```bash
+sparkrun daemon --url http://127.0.0.1:8376 --token-file /private/sparkroute.token \
+  call workloads.reconcile --data \
+  '{"recipe":"@registry/recipe","recipe_revision":"REVISION","cluster_id":"WORKLOAD_ID","acknowledge_effects":true}' --wait
+```
+
+Reconciliation checks complete placement evidence and matching live identity; it
+does not execute hooks again. Stopping a confirmed exact workload also resolves its
+old activation receipts. Switching SparkRoute transports refuses active legacy
+workers or active daemon jobs admitted under manager `sparkroute`. Legacy
+placement/provider records remain readable and are conservatively imported on daemon cutover; an uncertain old
+placement requires reconciliation. Switching back to the bridge checks jobs and revokes SparkRoute credentials under
+the same lock used for daemon admission, closing the cutover/submission race.

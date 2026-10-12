@@ -62,9 +62,10 @@ def launch(binding, job, *, systemd=False):
 
 
 class Coordinator:
-    def __init__(self, binding, store, *, systemd=False, max_active=4, cancel_grace: float = 15, start_timeout: float = 60):
+    def __init__(self, binding, store, *, systemd=False, max_active=4, max_services=2, cancel_grace: float = 15, start_timeout: float = 60):
         self.binding, self.store = binding, store
         self.systemd, self.max_active, self.cancel_grace = systemd, max_active, cancel_grace
+        self.max_services = max_services
         self.start_timeout = start_timeout
         self.children = {}
         self.maintenance = False
@@ -120,7 +121,7 @@ class Coordinator:
                 continue
         if self.maintenance:
             return
-        while job := self.store.claim(max_active=self.max_active):
+        while job := self.store.claim(max_active=self.max_active, max_services=self.max_services):
             if job["runtime"] != runtime:
                 self.store.finish(
                     job["id"], "failed", error={"detail": "Runtime changed before this queued job started; resubmit after restart"}

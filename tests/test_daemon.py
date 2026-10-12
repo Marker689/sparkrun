@@ -135,21 +135,21 @@ def test_auth_scopes_body_limits_and_ownership(binding):
         assert client.get("/v1/info", headers={"X-Sparkrun-Client": "uid:0"}).status_code == 401
         headers = {"Authorization": "Bearer " + reader}
         assert client.get("/v1/ops", headers=headers).status_code == 200
-        assert client.post("/v1/ops/stop", headers=headers, json={}).status_code == 403
+        assert client.post("/v1/ops/workloads.stop_matching", headers=headers, json={}).status_code == 403
         headers = {"Authorization": "Bearer " + operator}
-        response = client.post("/v1/ops/stop", headers=headers, json={"cluster_id": "example"})
+        response = client.post("/v1/ops/workloads.stop_matching", headers=headers, json={"cluster_id": "example"})
         assert response.status_code == 202, response.text
         job = response.json()["job_id"]
         assert "nonce" not in client.get("/v1/jobs/" + job, headers=headers).json()
         assert (
             client.get("/v1/jobs/" + job, headers={"Authorization": "Bearer " + other, "X-Sparkrun-Client": "operator"}).status_code == 403
         )
-        assert client.post("/v1/ops/run", headers=headers, json={"recipe": "x", "trust": True}).status_code == 403
-        assert client.post("/v1/ops/stop", headers=headers, content=b"x" * (1024 * 1024 + 1)).status_code == 413
-        assert client.post("/v1/ops/stop", headers=headers, json={"unknown": 1}).status_code == 422
+        assert client.post("/v1/ops/workloads.run", headers=headers, json={"recipe": "x", "trust": True}).status_code == 403
+        assert client.post("/v1/ops/workloads.stop_matching", headers=headers, content=b"x" * (1024 * 1024 + 1)).status_code == 413
+        assert client.post("/v1/ops/workloads.stop_matching", headers=headers, json={"unknown": 1}).status_code == 422
         assert client.get("/openapi.json").status_code == 401
         schema = client.get("/openapi.json", headers=headers).json()
-        assert "runRequest" in schema["components"]["schemas"]
+        assert "workloads.runRequest" in schema["components"]["schemas"]
 
 
 def test_binding_uses_config_file_and_short_worker_paths(tmp_path, monkeypatch):

@@ -1,30 +1,17 @@
 """Reviewed mapping of public library functions to wire operations or exclusions."""
 
-from sparkrun.daemon.ops import SPECS
+from sparkrun.daemon.ops import SPECS, OPTION_SPECS
+from sparkrun.daemon.registry_ops import REGISTRY_ACTIONS
 
 API_OPERATIONS = {target: name for name, target, *_ in SPECS}
+API_OPERATIONS.update({target: name for name, target, *_ in OPTION_SPECS})
+API_OPERATIONS["validate_recipe"] = "recipes.validate"
+API_OPERATIONS["configure_registry"] = " / ".join("catalog.registries." + action for action in REGISTRY_ACTIONS)
 API_OPERATIONS.update(
     {
-        name: name
-        for name in (
-            "run",
-            "plan",
-            "materialize",
-            "realize_recipe",
-            "build",
-            "plan_build",
-            "benchmark",
-            "proxy.start",
-            "proxy.install_service",
-            "validate_recipe",
-        )
-    }
-)
-API_OPERATIONS.update(
-    {
-        "wait_ready": "run",
-        "post_launch": "run",
-        "schedule": "plan",
+        "wait_ready": "workloads.run",
+        "post_launch": "workloads.run",
+        "schedule": "workloads.plan",
         "logs": "/v1/streams/logs",
         "open_telemetry": "/v1/streams/monitor",
         "open_live_monitor": "/v1/streams/monitor",
@@ -49,9 +36,10 @@ API_OPERATIONS.update(
     }
 )
 EXCLUSIONS = {
+    "discover_endpoints": "List-only Python API; use discovery.snapshot for scoped endpoints and observation coverage.",
     "default_sctx": "Python application binding; daemon creates an operation-local context.",
     "resolve_catalog_recipe": "Returns a live Recipe; catalog.recipe exposes a bounded preview and run resolves it server-side.",
-    "resolve_recipe_filter": "Python filter helper; catalog.recipes and search_recipes accept the same filter inputs.",
+    "resolve_recipe_filter": "Python filter helper; catalog.recipes and catalog.search accept the same filter inputs.",
     "proxy.admin_token": "Credential issuance is interactive/local; secrets are not persisted in job results.",
     "proxy.ui": "May issue a credential-bearing URL; use the local proxy ui command.",
     "setup.install_public_key_interactive": "Requires a terminal-owned ssh-copy-id/password conversation; use setup in a terminal.",
@@ -73,9 +61,24 @@ K8S_OPERATIONS = {
         "jobset_status",
     )
 }
-K8S_OPERATIONS.update({"logs": "/v1/streams/logs", "launch_jobset": "run", "check_feasibility": "plan"})
+K8S_OPERATIONS.update({"logs": "/v1/streams/logs", "launch_jobset": "workloads.run", "check_feasibility": "workloads.plan"})
 K8S_EXCLUSIONS = {
     "make_client": "Returns an executable Python client, not JSON.",
     "probe_nodes_fallback": "Internal hardware fallback covered by list_nodes.",
-    "run_launcher_job": "Low-level arbitrary launcher specification; submit a recipe through run/build instead.",
+    "run_launcher_job": "Low-level arbitrary launcher specification; submit a recipe through workloads.run/recipes.build instead.",
 }
+
+
+WORKLOAD_OPERATIONS = {
+    name: "workloads." + name
+    for name in (
+        "ensure_ready",
+        "stop",
+        "endpoints",
+        "inventory",
+        "plugins",
+        "reconcile",
+    )
+}
+WORKLOAD_OPERATIONS["control"] = "workloads.status / workloads.sleep / workloads.wake"
+WORKLOAD_EXCLUSIONS = {"resolve_binding": "Returns a live Recipe; catalog.recipe exposes its normalized public details."}

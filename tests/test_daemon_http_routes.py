@@ -64,7 +64,7 @@ def test_query_alias_returns_same_result_and_enforces_shared_controls(binding, a
         assert not app.state.store.list()
         assert client.get(paths[0], headers=auth["read"]).status_code == 405
         assert client.post("/v1/catalog/missing", json={}, headers=auth["admin"]).status_code == 404
-        for path in ("/v1/run", "/v1/ops/run"):
+        for path in ("/v1/workloads/run", "/v1/ops/workloads.run"):
             assert client.post(path, json={"recipe": "example", "trust": True}, headers=auth["admin"]).status_code == 403
         app.state.coordinator.maintenance = True
         for path in paths:

@@ -78,7 +78,7 @@ class _EndpointRemovalGrace:
         self.required_misses = max(1, int(required_misses))
         self._tracked: dict[tuple[Any, ...], _TrackedEndpoint] = {}
 
-    def reconcile(self, current: list[Any]) -> tuple[list[Any], int]:
+    def reconcile(self, current: list[Any], *, covered_hosts: set[str] | None = None) -> tuple[list[Any], int]:
         """Return ``(effective_endpoints, deferred_removal_count)``."""
         next_tracked: dict[tuple[Any, ...], _TrackedEndpoint] = {}
         effective: list[Any] = []
@@ -92,6 +92,11 @@ class _EndpointRemovalGrace:
         for identity, tracked in self._tracked.items():
             if identity in next_tracked:
                 continue
+            if covered_hosts is not None and tracked.endpoint.host not in covered_hosts:
+                next_tracked[identity] = tracked
+                effective.append(tracked.endpoint)
+                deferred += 1
+                continue
             missed_sweeps = tracked.missed_sweeps + 1
             if missed_sweeps < self.required_misses:
                 next_tracked[identity] = _TrackedEndpoint(tracked.endpoint, missed_sweeps)
@@ -102,13 +107,19 @@ class _EndpointRemovalGrace:
         return effective, deferred
 
 
-def sync_discovered(endpoints, removal_grace, sctx):
+def sync_discovered(endpoints, removal_grace, sctx, *, covered_hosts=None, discovery_token=None):
     """One shared reconciliation, retaining credentials only in process memory."""
     from sparkrun import api
 
-    effective, deferred = removal_grace.reconcile([ep for ep in endpoints if ep.healthy])
+    from copy import deepcopy
+
+    candidate = deepcopy(removal_grace)
+    effective, deferred = candidate.reconcile([ep for ep in endpoints if ep.healthy], covered_hosts=covered_hosts)
     sctx.proxy_config._load()
-    result = api.proxy.sync(endpoints=effective, aliases=sctx.proxy_config.aliases, require_running=True, sctx=sctx)
+    kwargs = {"discovery_token": discovery_token} if discovery_token else {}
+    result = api.proxy.sync(endpoints=effective, aliases=sctx.proxy_config.aliases, require_running=True, sctx=sctx, **kwargs)
+    if result.proxy_running:
+        removal_grace._tracked = candidate._tracked
     return result, deferred
 
 
@@ -147,6 +158,18 @@ def run_autodiscover(config_path: str) -> None:
 
     with open(path) as f:
         cfg = yaml.safe_load(f)
+
+    if cfg.get("generation"):
+        from sparkrun.api._context import default_sctx
+        from sparkrun.proxy.discovery_service import DiscoverySession, run_session
+
+        def wait(seconds):
+            deadline = time.monotonic() + seconds
+            while not _SHUTDOWN and time.monotonic() < deadline:
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+        run_session(DiscoverySession(cfg["state_dir"]), cfg["generation"], default_sctx(), cancelled=lambda: _SHUTDOWN, wait=wait)
+        return
 
     proxy_pid = cfg["proxy_pid"]
     interval = cfg.get("interval", 30)

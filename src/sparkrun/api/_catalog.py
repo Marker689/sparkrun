@@ -300,7 +300,7 @@ def _resolve_selected_recipe(
 
 
 def get_recipe_details(
-    reference: str, overrides: dict[str, Any] | None = None, *, sctx: SparkrunContext | None = None
+    reference: str, overrides: dict[str, Any] | None = None, *, expected_revision: str | None = None, sctx: SparkrunContext | None = None
 ) -> CatalogRecipeDetails:
     """Resolve a selection into a safe model-configuration preview, without launching."""
     from sparkrun.api._resolve import resolve_runtime
@@ -376,7 +376,12 @@ def get_recipe_details(
         )
         if key in recipe.defaults
     }
+    revision = derive_recipe_fingerprint(recipe, normalized)
+    if expected_revision and revision != expected_revision:
+        raise SparkrunError("Recipe revision changed; refresh the selected recipe")
     return {
+        "source_kind": "imported" if imported else "registry" if registry else "local",
+        "normalized_overrides": normalized,
         "reference": _reference(path, registry, sctx, imported=imported),
         "name": recipe.qualified_name,
         "source_path": str(path),
@@ -388,7 +393,7 @@ def get_recipe_details(
         "min_nodes": recipe.min_nodes,
         "defaults": defaults,
         "metadata": _declared_facets(path),
-        "recipe_revision": derive_recipe_fingerprint(recipe, normalized),
+        "recipe_revision": revision,
         "plugin_items": recipe.export_plugin_items(),
         "native_api_options": runtime.native_api_options(),
         "native_protocols": list(runtime.native_protocols(recipe) or ("openai",)),

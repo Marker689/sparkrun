@@ -246,6 +246,21 @@ class ProxyConfig:
         return bool(self._data.get("proxy", {}).get("auto_discover", True))
 
     @property
+    def discovery_backend(self) -> str:
+        value = self._data.get("proxy", {}).get("discovery_backend", "daemon" if self.gateway_transport == "daemon" else "process")
+        if value not in {"process", "daemon"}:
+            raise ValueError("proxy.discovery_backend must be process or daemon")
+        return value
+
+    @property
+    def gateway_transport(self) -> str:
+        """Explicit SparkRoute control-plane transport; never auto-detect."""
+        value = self._data.get("proxy", {}).get("gateway_transport", "bridge")
+        if value not in {"bridge", "daemon"}:
+            raise ValueError("proxy.gateway_transport must be bridge or daemon")
+        return value
+
+    @property
     def discover_interval(self) -> int:
         return int(self._data.get("proxy", {}).get("discover_interval", DEFAULT_DISCOVER_INTERVAL))
 

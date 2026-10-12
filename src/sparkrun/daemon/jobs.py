@@ -10,6 +10,7 @@ import time
 import uuid
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled", "lost"})
+SERVICE_OPERATIONS = frozenset({"proxy.watch", "proxy.serve"})
 ACTIVE = frozenset({"starting", "running", "waiting_input", "cancelling"})
 
 
@@ -34,7 +35,7 @@ class JobStore:
         self.max_event_bytes = max(1024, max_event_bytes)
         with self.transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError("Job database was written by a newer daemon; upgrade before opening it")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -53,9 +54,13 @@ class JobStore:
                     job TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(principal, key)
                 );
                 CREATE TABLE IF NOT EXISTS prompts (job TEXT, id TEXT, metadata TEXT, PRIMARY KEY(job,id));
-                PRAGMA user_version=1;
                 CREATE INDEX IF NOT EXISTS events_created ON events(created);
             """)
+            if not db.in_transaction:
+                db.execute("BEGIN IMMEDIATE")
+            if "manager" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN manager TEXT NOT NULL DEFAULT 'daemon'")
+            db.execute("PRAGMA user_version=2")
         self.path.chmod(0o600)
 
     @classmethod
@@ -106,8 +111,10 @@ class JobStore:
         with self.transaction() as db:
             return self._event(db, job, payload)
 
-    def submit(self, op, arguments, principal, client, runtime, *, key=None):
-        request = json.dumps({"op": op.name, "version": op.version, "arguments": arguments}, sort_keys=True, allow_nan=False)
+    def submit(self, op, arguments, principal, client, runtime, *, key=None, manager="daemon"):
+        request = json.dumps(
+            {"op": op.name, "version": op.version, "arguments": arguments, "manager": manager}, sort_keys=True, allow_nan=False
+        )
         digest = hashlib.sha256(request.encode()).hexdigest()
         with self.transaction() as db:
             if key:
@@ -125,8 +132,8 @@ class JobStore:
             job = uuid.uuid4().hex
             now = time.time()
             db.execute(
-                "INSERT INTO jobs(id,operation,version,arguments,principal,client,scope,runtime,state,created,updated) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs(id,operation,version,arguments,principal,client,scope,runtime,state,created,updated,manager) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     job,
                     op.name,
@@ -139,6 +146,7 @@ class JobStore:
                     "queued",
                     now,
                     now,
+                    manager,
                 ),
             )
             if key:
@@ -183,15 +191,18 @@ class JobStore:
                 )
             ]
 
-    def claim(self, *, max_active=4):
+    def claim(self, *, max_active=4, max_services=2):
         with self.transaction() as db:
-            if (
-                db.execute("SELECT count(*) FROM jobs WHERE state IN ('starting','running','waiting_input','cancelling')").fetchone()[0]
-                >= max_active
-            ):
-                return None
-            row = db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY created LIMIT 1").fetchone()
-            if not row:
+            counts = {False: 0, True: 0}
+            for active in db.execute("SELECT operation FROM jobs WHERE state IN ('starting','running','waiting_input','cancelling')"):
+                counts[active[0] in SERVICE_OPERATIONS] += 1
+            row = None
+            for queued in db.execute("SELECT id,operation FROM jobs WHERE state='queued' ORDER BY created"):
+                service = queued["operation"] in SERVICE_OPERATIONS
+                if counts[service] < (max_services if service else max_active):
+                    row = queued
+                    break
+            if row is None:
                 return None
             job, nonce = row[0], uuid.uuid4().hex + uuid.uuid4().hex
             db.execute("UPDATE jobs SET state='starting', nonce=? WHERE id=?", (nonce, job))

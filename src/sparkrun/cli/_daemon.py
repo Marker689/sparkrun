@@ -51,8 +51,12 @@ class DaemonGroup(click.Group):
 @click.option("--config", "config_path", type=click.Path(dir_okay=False), help="Configuration file binding for this daemon instance.")
 @click.option("--url", help="HTTP(S) daemon origin for call, status, and jobs (e.g. https://controller:8443).")
 @click.option("--socket", "socket_path", type=click.Path(dir_okay=False), help="Explicit local Unix socket for call, status, and jobs.")
-@click.option("--token", help="Bearer token for --url; defaults to SPARKRUN_DAEMON_TOKEN. Prefer --token-file to avoid shell history.")
-@click.option("--token-file", type=click.Path(exists=True, dir_okay=False), help="Read the bearer token for --url from a plain-text file.")
+@click.option(
+    "--token", help="Bearer token for --url or --socket; defaults to SPARKRUN_DAEMON_TOKEN. Prefer --token-file to avoid shell history."
+)
+@click.option(
+    "--token-file", type=click.Path(exists=True, dir_okay=False), help="Read the bearer token for --url or --socket from a plain-text file."
+)
 @click.option(
     "--ca-cert", type=click.Path(exists=True, dir_okay=False), help="CA certificate bundle for an HTTPS --url; verification stays enabled."
 )
@@ -70,8 +74,10 @@ def daemon(ctx, config_path, url, socket_path, token, token_file, ca_cert):
             raise click.UsageError("Choose either --config for local discovery or an explicit --url/--socket.")
         if token is not None and token_file is not None:
             raise click.UsageError("Choose either --token or --token-file.")
-        if url is None and any(value is not None for value in (token, token_file, ca_cert)):
-            raise click.UsageError("--token, --token-file, and --ca-cert require --url.")
+        if url is None and socket_path is None and any(value is not None for value in (token, token_file)):
+            raise click.UsageError("--token and --token-file require --url or --socket.")
+        if ca_cert is not None and url is None:
+            raise click.UsageError("--ca-cert requires --url.")
         if token_file is not None:
             from pathlib import Path
 
@@ -155,65 +161,9 @@ def serve(ctx, tcp, unix, tls_cert, tls_key, conn_file, parent_pid, worker_super
 @daemon.command(help="Start a background API for this configuration binding.")
 @click.pass_context
 def start(ctx, launch_options=None):
-    import os
-    import subprocess
-    import sys
-    import time
-    from sparkrun.core.application_profile import child_environment
-    from sparkrun.core.process_identity import alive, detached_process_options
+    from sparkrun.daemon.management import ensure_daemon
 
-    binding = _binding(ctx).prepare()
-    _enabled(binding)
-    state = binding.read_state()
-    if state and alive(state.get("process")):
-        _json(_client(ctx).info())
-        return
-    from sparkrun.daemon.supervisor import installed_service, unit_name
-
-    if installed_service(binding):
-        subprocess.run(["systemctl", "--user", "start", unit_name(binding)], check=True, timeout=30)
-        for _ in range(100):
-            try:
-                _json(_client(ctx).info())
-                return
-            except (OSError, ValueError):
-                time.sleep(0.1)
-        raise click.ClickException("Service started but API is not ready; inspect daemon systemd status")
-    options = launch_options or {}
-    extra = ["--unix" if options["unix"] else "--no-unix"] if "unix" in options else []
-    if options.get("tcp"):
-        host, port = options["tcp"]
-        extra += ["--tcp", f"[{host}]:{port}" if ":" in host else f"{host}:{port}"]
-    for key, flag in (
-        ("cert", "--tls-cert"),
-        ("key", "--tls-key"),
-        ("conn_file", "--conn-file"),
-        ("parent_pid", "--parent-pid"),
-        ("worker_supervisor", "--worker-supervisor"),
-    ):
-        if options.get(key):
-            extra += [flag, str(options[key])]
-    if options.get("allow_request_trust"):
-        extra += ["--allow-request-trust"]
-    if options.get("allow_insecure"):
-        extra += ["--allow-insecure"]
-    child = subprocess.Popen(
-        [sys.executable, "-m", "sparkrun.daemon", "--config", str(binding.config_path), "serve", *extra],
-        env={**os.environ, **child_environment(config_path=binding.config_path)},
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **detached_process_options(),
-    )
-    for _ in range(100):
-        if child.poll() is not None:
-            raise click.ClickException("Daemon failed to start; run 'daemon serve' for diagnostics")
-        try:
-            _json(_client(ctx).info())
-            return
-        except (OSError, ValueError):
-            time.sleep(0.1)
-    raise click.ClickException("Daemon startup timed out; inspect 'daemon status'")
+    _json(ensure_daemon(_binding(ctx), launch_options))
 
 
 @daemon.command(help="Inspect identity and runtime state without loading plugins.")
@@ -375,14 +325,25 @@ def token():
 )
 @click.option("--secret", is_flag=True, help="Allow answers to credential prompts as well as ordinary operations.")
 @click.option("--expires-in", type=click.FloatRange(min=1), help="Expire the credential after this many seconds; omit for no time limit.")
+@click.option(
+    "--manager",
+    default="daemon",
+    show_default=True,
+    help="Stable workload management identity granted to this credential; use sparkroute for a gateway client.",
+)
 @click.pass_context
-def token_create(ctx, name, scope, secret, expires_in):
+def token_create(ctx, name, scope, secret, expires_in, manager):
     from sparkrun.daemon.auth import TokenStore
 
     import time
 
     identifier, value = TokenStore(_binding(ctx)).create(
-        name, scope=scope, secret=secret, expires=time.time() + expires_in if expires_in else None
+        name,
+        scope=scope,
+        secret=secret,
+        expires=time.time() + expires_in if expires_in else None,
+        manager=manager,
+        principal_id="manager:" + manager if manager != "daemon" else None,
     )
     _json({"id": identifier, "token": value})
 

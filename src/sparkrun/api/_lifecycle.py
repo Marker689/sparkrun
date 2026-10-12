@@ -7,7 +7,7 @@ from sparkrun.api._errors import SparkrunError, TrustRejected
 from sparkrun.core.operation import operation_scope
 
 
-def wait_ready(result, *, sctx=None):
+def wait_ready(result, *, timeout=None, sctx=None):
     from sparkrun.core.launcher import wait_for_serve_ready
     from sparkrun.orchestration.primitives import build_ssh_kwargs
 
@@ -21,7 +21,7 @@ def wait_ready(result, *, sctx=None):
             launch,
             ssh_kwargs=build_ssh_kwargs(launch.config),
             timeline=sctx.timing,
-            cancel=operation.cancel,
+            cancel=operation.cancel if timeout is None else _ReadinessCancellation(operation.cancel, timeout),
             dry_run=getattr(result, "dry_run", False),
         )
 
@@ -58,3 +58,49 @@ def discover_endpoints(*, sctx=None):
 
     sctx = resolve_sctx(sctx)
     return discover(sctx=sctx, ssh_kwargs=build_ssh_kwargs(sctx.config))
+
+
+def discovery_snapshot(*, hosts=None, cluster=None, cluster_ids=None, sctx=None):
+    """Public credential-free endpoint observation with explicit live coverage."""
+    from sparkrun.proxy.discovery import discover_snapshot
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    sctx = resolve_sctx(sctx)
+    definition = sctx.cluster_manager.get(cluster) if cluster else None
+    if cluster and definition is None:
+        raise ValueError("Unknown discovery cluster")
+    selected = list(hosts or (definition.hosts if definition else ()))
+    ssh = build_ssh_kwargs(sctx.config)
+    if definition and definition.user:
+        ssh = dict(ssh, ssh_user=definition.user)
+    return discover_snapshot(
+        host_list=selected,
+        host_filter=selected or None,
+        cluster_def=definition,
+        cluster_ids=set(cluster_ids) if cluster_ids is not None else None,
+        ssh_kwargs=ssh,
+        sctx=sctx,
+    ).to_dict()
+
+
+class _ReadinessCancellation:
+    """Readiness budget plus operation cancellation without cancelling its owner."""
+
+    def __init__(self, parent, timeout):
+        import time
+
+        if timeout <= 0:
+            raise ValueError("Readiness timeout must be positive")
+        self.parent, self.deadline = parent, time.monotonic() + timeout
+
+    def is_set(self):
+        import time
+
+        return self.parent.is_set() or time.monotonic() >= self.deadline
+
+    def wait(self, timeout=None):
+        import time
+
+        remaining = max(0, self.deadline - time.monotonic())
+        self.parent.wait(remaining if timeout is None else min(timeout, remaining))
+        return self.is_set()

@@ -58,6 +58,12 @@ def proxy():
 @host_options
 @click.option("--foreground", is_flag=True, help="Run in foreground (default: daemonize)")
 @click.option("--no-auto-discover", is_flag=True, help="Disable periodic endpoint re-scanning")
+@click.option(
+    "--discovery-backend",
+    type=click.Choice(["process", "daemon"]),
+    default=None,
+    help="Discovery worker backend; daemon requires the daemon feature.",
+)
 @click.option("--discover-interval", type=int, default=None, help="Seconds between discovery sweeps (default: 30)")
 @click.option(
     "--discover-removal-grace-sweeps",
@@ -93,6 +99,7 @@ def start(
     hosts_file,
     foreground,
     no_auto_discover,
+    discovery_backend,
     discover_interval,
     discover_removal_grace_sweeps,
     gateway_name,
@@ -134,6 +141,7 @@ def start(
         # --no-auto-discover forces off; absent, proxy.yaml decides.
         auto_discover=False if no_auto_discover else None,
         discover_interval=discover_interval,
+        discovery_backend=discovery_backend,
         discover_removal_grace_sweeps=discover_removal_grace_sweeps,
         foreground=foreground,
         restart=restart,
@@ -311,7 +319,12 @@ def status(output_json):
     if result.managed_by:
         click.echo("  Managed by: systemd (%s)" % result.managed_by)
 
-    if result.autodiscover_pid:
+    if result.discovery_status and result.discovery_status.get("backend"):
+        discovery = result.discovery_status
+        click.echo("  Discovery: %s (%s)" % (discovery["state"], discovery["backend"]))
+        if discovery.get("last_error"):
+            click.echo("    Last error: %s" % discovery["last_error"])
+    elif result.autodiscover_pid:
         if result.autodiscover_running:
             click.echo("  Auto-discover: running (PID %s)" % result.autodiscover_pid)
         else:

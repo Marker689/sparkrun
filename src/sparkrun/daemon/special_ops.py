@@ -22,7 +22,7 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
     if cluster is not None:
         sctx = sctx.for_cluster(cluster)
     ssh = build_ssh_kwargs(sctx.config)
-    if name == "validate_recipe":
+    if name == "recipes.validate":
         from sparkrun.api._resolve import resolve_recipe
 
         return to_wire(
@@ -115,7 +115,7 @@ def register_special_ops():
     from sparkrun.daemon.ops import fields, B
 
     specs = [
-        ("validate_recipe", "read", "recipe overrides", "recipe"),
+        ("recipes.validate", "read", "recipe overrides", "recipe"),
         ("setup.probe_hosts", "read", "hosts cluster", ""),
         ("setup.plan", "read", "hosts cluster", ""),
         ("setup.run_steps", "admin", "hosts cluster dry_run only_steps", ""),

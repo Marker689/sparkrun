@@ -48,6 +48,12 @@ from sparkrun.core.recipe_items import (
 from sparkrun.core.registry import RegistryEntry
 from sparkrun.core.registry_defaults import register_default_registry
 
+from sparkrun.core.workload_lifecycle import (
+    WORKLOAD_LIFECYCLE_API_VERSION,
+    WorkloadLifecycleProvider,
+    register_workload_lifecycle,
+)
+
 __all__ = [
     "FEEDBACK_API_VERSION",
     "FeedbackEvent",
@@ -102,3 +108,6 @@ __all__ += [
     "register_plugin_daemon_route",
     "application_daemon_registration",
 ]
+
+
+__all__ += ["WORKLOAD_LIFECYCLE_API_VERSION", "WorkloadLifecycleProvider", "register_workload_lifecycle"]

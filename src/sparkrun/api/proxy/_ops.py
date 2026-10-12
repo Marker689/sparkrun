@@ -25,7 +25,7 @@ import os
 import signal
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from sparkrun.api._context import resolve_sctx
@@ -88,6 +88,7 @@ class ProxyStatus:
     started_at: str | None = None
     autodiscover_pid: int | None = None
     autodiscover_running: bool = False
+    discovery_status: dict[str, Any] = field(default_factory=dict)
     models: tuple[ProxyModel, ...] = ()
     #: Non-secret diagnostic when model enumeration failed.  Empty means the
     #: management query succeeded, *including* a legitimately empty model list —
@@ -120,6 +121,8 @@ class ProxyStatus:
             data["autodiscover"] = {"pid": self.autodiscover_pid, "running": self.autodiscover_running}
         if self.model_query_error:
             data["model_query_error"] = self.model_query_error
+        if self.discovery_status:
+            data["discovery"] = self.discovery_status
         if self.managed_by:
             data["managed_by"] = self.managed_by
         return data
@@ -146,6 +149,7 @@ class ProxyStartOptions:
     clear_cluster: bool = False
     ssh_kwargs: dict | None = None
     auto_discover: bool | None = None
+    discovery_backend: str | None = None
     discover_interval: int | None = None
     discover_removal_grace_sweeps: int | None = None
     foreground: bool = False
@@ -171,6 +175,7 @@ class ProxyStartResult:
     aliases_applied: tuple[str, ...] = ()
     aliases_pending: tuple[str, ...] = ()
     auto_discover: bool = False
+    discovery_backend: str = "process"
     discover_interval: int = 0
     discover_removal_grace_sweeps: int = 0
     #: Generated configuration file; None for fileless gateways and dry runs.
@@ -383,7 +388,7 @@ def _engine_config_kwargs(gateway: str, sctx: "SparkrunContext | None") -> dict[
 # --------------------------------------------------------------------------
 
 
-@operation_boundary(mutation=True)
+@operation_boundary()
 def start(options: ProxyStartOptions | None = None, *, sctx: "SparkrunContext | None" = None) -> ProxyStartResult:
     """Discover endpoints, write the gateway config, and start the gateway.
 
@@ -396,16 +401,33 @@ def start(options: ProxyStartOptions | None = None, *, sctx: "SparkrunContext | 
     from sparkrun.proxy.gateway import GatewayError
 
     try:
-        return _start(options or ProxyStartOptions(), sctx=resolve_sctx(sctx))
+        from dataclasses import replace
+
+        sctx = resolve_sctx(sctx)
+        options = options or ProxyStartOptions()
+        backend = options.discovery_backend or sctx.proxy_config.discovery_backend
+        daemon_foreground = options.foreground and backend == "daemon" and not options.dry_run
+        result = _start(options, sctx=sctx, daemon_attach=daemon_foreground)
+        if daemon_foreground:
+            from sparkrun.daemon.proxy import wait_gateway
+
+            return replace(result, foreground_rc=wait_gateway(sctx))
+        return result
     except GatewayError as exc:
         raise _as_gateway_unavailable(exc) from exc
     except GatewayOperationError as exc:
         raise ProxyStartFailed(str(exc)) from exc
 
 
-def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext") -> ProxyStartResult:
+@operation_boundary(mutation=True)
+def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext", daemon_attach: bool = False) -> ProxyStartResult:
     """Execute the lifecycle inside the public operational-error boundary."""
     proxy_cfg = sctx.proxy_config
+    backend = options.discovery_backend or proxy_cfg.discovery_backend
+    if backend not in {"process", "daemon"}:
+        raise ProxyStartFailed("Discovery backend must be process or daemon")
+    if backend == "daemon" and not sctx.config.is_feature_enabled("daemon"):
+        raise ProxyStartFailed("Daemon discovery requires the daemon feature; enable it explicitly first")
 
     gateway = resolve_gateway(options.gateway, sctx=sctx)
 
@@ -486,6 +508,14 @@ def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext") -> ProxyStart
     config_path, applied, pending = engine.prepare_config(healthy, aliases, write=False)
 
     restarted = False
+    if not options.dry_run and backend == "daemon" and auto_discover:
+        from sparkrun.daemon.management import ensure_daemon
+        from sparkrun.daemon.state import Binding
+
+        try:
+            ensure_daemon(Binding.from_config(sctx.config))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ProxyStartFailed("Could not prepare gateway daemon: %s" % exc) from exc
     if not options.dry_run:
         if engine.is_running():
             pid = engine.current_pid()
@@ -510,6 +540,7 @@ def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext") -> ProxyStart
         "aliases_pending": tuple(sorted(pending)),
         "auto_discover": auto_discover,
         "discover_interval": interval,
+        "discovery_backend": backend,
         "discover_removal_grace_sweeps": removal_grace_sweeps,
         "persisted": persisted,
         "warnings": tuple(warnings),
@@ -529,8 +560,27 @@ def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext") -> ProxyStart
             "ssh_kwargs": ssh_kwargs,
             "cluster": scope.cluster,
             "application_config_path": sctx.config.config_path,
+            "backend": backend,
+            "scope_source": scope.source,
+            # Keep endpoint credentials referenced by workload metadata rather
+            # than copying them into the discovery descriptor.
+            "initial_endpoints": [
+                {**{k: v for k, v in asdict(ep).items() if k != "api_key"}, "credential_required": bool(ep.api_key)} for ep in healthy
+            ],
         }
 
+    from sparkrun.core.operation import CURRENT
+
+    operation = CURRENT.get()
+    if (backend == "daemon" and (daemon_attach or not options.foreground)) or (operation and operation.via_daemon):
+        from sparkrun.daemon.proxy import launch_gateway
+
+        try:
+            launch_gateway(engine, config_path, ad_kwargs, sctx)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ProxyStartFailed("Could not start daemon gateway service: %s" % exc) from exc
+        return ProxyStartResult(started=True, restarted=restarted, **common)
+    engine._discovery_control = backend == "daemon" and auto_discover
     rc = engine.start(config_path=config_path, foreground=options.foreground, autodiscover_kwargs=ad_kwargs)
 
     if options.foreground:
@@ -555,6 +605,8 @@ def stop(*, dry_run: bool = False, sctx: "SparkrunContext | None" = None) -> Pro
         pid = engine.current_pid()
 
         if not engine.is_running():
+            if not dry_run:
+                engine.stop_autodiscover()
             return ProxyStopResult(stopped=False, was_running=False, pid=pid, dry_run=dry_run)
 
         # A unit-supervised proxy is stopped through the unit, so systemd
@@ -582,8 +634,11 @@ def status(*, sctx: "SparkrunContext | None" = None) -> ProxyStatus:
     engine = _running_engine(sctx)
     state = engine.get_state()
 
+    from sparkrun.proxy.discovery_service import DiscoverySession
+
+    discovery_status = DiscoverySession(engine.state_dir).status()
     if not state:
-        return ProxyStatus(running=False, known=False)
+        return ProxyStatus(running=False, known=False, discovery_status=discovery_status)
 
     running = engine.is_running()
 
@@ -609,7 +664,8 @@ def status(*, sctx: "SparkrunContext | None" = None) -> ProxyStatus:
         port=state.get("port"),
         started_at=state.get("started_at"),
         autodiscover_pid=ad_pid,
-        autodiscover_running=_pid_alive(ad_pid),
+        autodiscover_running=_pid_alive(ad_pid) or discovery_status["state"] in {"running", "degraded"},
+        discovery_status=discovery_status,
         models=served_models,
         model_query_error=model_query_error,
         managed_by=_managed_by(state),
@@ -637,13 +693,14 @@ def _gateway_update_errors():
         raise ProxyUpdateFailed(str(exc)) from exc
 
 
-@operation_boundary(mutation=True)
+@operation_boundary()
 def sync(
     *,
     endpoints: "list[DiscoveredEndpoint] | None" = None,
     aliases: dict[str, str] | None = None,
     host_filter: list[str] | None = None,
     require_running: bool = False,
+    discovery_token=None,
     sctx: "SparkrunContext | None" = None,
 ) -> ProxySyncResult:
     """Reconcile the gateway's model list with what is actually running.
@@ -678,7 +735,14 @@ def sync(
             discovered = _discover(host_filter=host_filter, sctx=sctx)
             endpoints = [ep for ep in discovered if ep.healthy]
 
-        added, removed = engine.sync_models(endpoints, aliases)
+        from sparkrun.proxy.discovery_service import DiscoverySession
+
+        session = DiscoverySession(engine.state_dir)
+        guard = session.applying(discovery_token[1]) if discovery_token else session.lock()
+        with guard:
+            if require_running and not engine.is_running():
+                return ProxySyncResult(proxy_running=False)
+            added, removed = engine.sync_models(endpoints, aliases)
 
         return ProxySyncResult(added=added, removed=removed, proxy_running=running)
 
@@ -943,6 +1007,7 @@ def _persist_overrides(proxy_cfg, options: ProxyStartOptions) -> list[str]:
             proxy_cfg.discover_removal_grace_sweeps,
         ),
         ("discover_interval", options.discover_interval, proxy_cfg.discover_interval),
+        ("discovery_backend", options.discovery_backend, proxy_cfg.discovery_backend),
         ("gateway", options.gateway, proxy_cfg.gateway),
         # With --hosts the cluster only supplies the SSH user for that one-off
         # scope, so it is not made the saved discovery cluster.
@@ -1064,6 +1129,7 @@ def _foreground_exit_status(rc: int | None) -> int:
 def _stop_and_wait(engine) -> bool:
     """Wait for the original process, independently of state-file cleanup."""
     pid = engine.current_pid()
+    instance = (engine.get_state() or {}).get("instance_id")
     engine.stop()
     if pid is None:
         return True
@@ -1073,8 +1139,7 @@ def _stop_and_wait(engine) -> bool:
         return False
     # An asynchronous stop retains state until exit; do not clear a concurrent
     # replacement's record if another command has already written a new PID.
-    if engine.current_pid() == pid:
-        engine._clear_state()
+    engine._clear_state(expected_pid=pid, expected_instance=instance)
     return True
 
 

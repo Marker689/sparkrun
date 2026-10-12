@@ -134,6 +134,8 @@ from sparkrun.api._catalog import (
     resolve_catalog_recipe,
 )
 
+from sparkrun.api import workloads
+
 __all__ = [
     # Catalog payload types
     "CatalogBenchmarkContext",
@@ -246,7 +248,7 @@ __all__ = [
 ]
 
 from sparkrun.api import model_cache
-from sparkrun.api._lifecycle import wait_ready, post_launch, discover_endpoints
+from sparkrun.api._lifecycle import wait_ready, post_launch, discover_endpoints, discovery_snapshot
 from sparkrun.api._clusters import create_cluster, update_cluster, delete_cluster, set_default_cluster
 
 __all__ += [
@@ -254,8 +256,11 @@ __all__ += [
     "wait_ready",
     "post_launch",
     "discover_endpoints",
+    "discovery_snapshot",
     "create_cluster",
     "update_cluster",
     "delete_cluster",
     "set_default_cluster",
 ]
+
+__all__ += ["workloads"]

@@ -159,7 +159,6 @@ def test_protocol_mismatch_stops_before_operation(command, incompatible_server, 
         (["--url", "http://host", "--socket", "api.sock"], ["status"], "Choose either --url or --socket"),
         (["--url", "http://host", "--config", "config.yaml"], ["status"], "Choose either --config"),
         (["--token", "dummy"], ["status"], "require --url"),
-        (["--socket", "api.sock", "--token", "dummy"], ["status"], "require --url"),
         *[
             (["--url", "http://host"], command, "apply only to call, status, and jobs")
             for command in (
@@ -261,3 +260,16 @@ def test_token_environment_does_not_change_local_discovery(binding, monkeypatch)
     monkeypatch.setenv("SPARKRUN_DAEMON_TOKEN", "ignored")
     with real_server(binding, extra=("--no-unix", "--tcp", "127.0.0.1:0")):
         assert json.loads(invoke("--config", str(binding.config_path), "status"))["binding"] == binding.key
+
+
+def test_explicit_socket_accepts_manager_token(monkeypatch, no_local_binding):
+    seen = []
+
+    def info(client):
+        seen.append((client.socket_path, client.token))
+        return {"protocol": 1, "manager": "sparkroute"}
+
+    monkeypatch.setattr("sparkrun.daemon.client.Client.info", info)
+    result = CliRunner().invoke(daemon, ["--socket", "api.sock", "--token", "manager-token", "status"])
+    assert result.exit_code == 0, result.output
+    assert seen == [("api.sock", "manager-token")]

@@ -630,6 +630,27 @@ class ProxyEngine(GatewaySupervisor):
             arrived mid-restart, which wins).
         """
         state = self.get_state() or {}
+        from sparkrun.core.process_identity import alive, process_identity
+
+        controller = state.get("controller")
+        if controller and controller != process_identity():
+            if not alive(controller):
+                raise ProxyRestartError("Gateway supervisor is unavailable; restart the proxy explicitly")
+            import uuid
+
+            request = uuid.uuid4().hex
+            self._mark_state(restart_requested=request)
+            deadline = time.monotonic() + RESTART_EXIT_TIMEOUT + 30
+            while time.monotonic() < deadline:
+                current = self.get_state() or {}
+                if not current or current.get("stop_requested"):
+                    return None
+                if current.get("restart_completed") == request:
+                    if current.get("restart_error"):
+                        raise ProxyRestartError(current["restart_error"])
+                    return current.get("pid")
+                time.sleep(0.1)
+            raise ProxyRestartError("Gateway supervisor restart timed out; inspect proxy status before retrying")
         supervisor = state.get("supervisor") or None
         if supervisor and os.environ.get(SUPERVISOR_ENV) != _supervisor_value(supervisor):
             pid = self._restart_through_unit(supervisor)

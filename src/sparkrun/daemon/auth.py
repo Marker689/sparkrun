@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import re
 import hashlib
 import hmac
 import json
@@ -19,6 +21,7 @@ class Principal:
     secret: bool = False
     local: bool = False
     credential_id: str | None = None
+    manager: str = "daemon"
 
     def allows(self, scope, *, secret=False):
         levels = {"read": 0, "operate": 1, "admin": 2}
@@ -37,7 +40,9 @@ class TokenStore:
     def _read(self):
         return json.loads(self.path.read_text()) if self.path.exists() else {}
 
-    def create(self, name, *, scope="operate", secret=False, expires=None, owner_process=None, principal_id=None):
+    def create(self, name, *, scope="operate", secret=False, expires=None, owner_process=None, principal_id=None, manager="daemon"):
+        if not isinstance(manager, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", manager):
+            raise ValueError("Manager must be a lowercase identifier of at most 64 characters")
         if scope not in {"read", "operate", "admin"}:
             raise ValueError("Invalid token scope")
         token = secrets.token_urlsafe(32)
@@ -56,6 +61,7 @@ class TokenStore:
                 "created": time.time(),
                 "owner_process": owner_process,
                 "principal_id": principal_id,
+                "manager": manager,
             }
             atomic_private_write(self.path, json.dumps(records))
         return identifier, token
@@ -80,7 +86,13 @@ class TokenStore:
             or (record.get("owner_process") and not alive(record["owner_process"]))
         ):
             raise PermissionError("Token was revoked or expired")
-        return Principal(record.get("principal_id") or credential, record["scope"], record["secret"], credential_id=credential)
+        return Principal(
+            record.get("principal_id") or credential,
+            record["scope"],
+            record["secret"],
+            credential_id=credential,
+            manager=record.get("manager", "daemon"),
+        )
 
     def list(self):
         return [{"id": key, **{k: v for k, v in value.items() if k != "hash"}} for key, value in self._read().items()]
@@ -91,4 +103,25 @@ class TokenStore:
             if identifier not in records:
                 raise KeyError(identifier)
             del records[identifier]
+            atomic_private_write(self.path, json.dumps(records))
+
+    @contextmanager
+    def admission(self, principal):
+        """Fence credential retirement against accepting another durable job."""
+        with file_lock(self.lock):
+            yield self.validate_principal(principal)
+
+    @contextmanager
+    def retire_manager(self, manager):
+        """Drain under the admission lock, then revoke this manager's credentials.
+
+        The caller checks its active jobs and commits the integration cutover in
+        this block. Failure leaves credentials intact. This is local provisioning,
+        not an HTTP operation or a grant supplied by a request.
+        """
+        if manager == "daemon":
+            raise ValueError("Cannot retire the default daemon manager")
+        with file_lock(self.lock):
+            yield
+            records = {key: row for key, row in self._read().items() if row.get("manager", "daemon") != manager}
             atomic_private_write(self.path, json.dumps(records))

@@ -19,6 +19,8 @@ class OperationState:
     deadline: float | None = None
     hub: Any = None
     via_daemon: bool = False
+    # Set at daemon admission, never from operation arguments or client labels.
+    manager: str = "daemon"
     _feedback_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     _feedback_local: threading.local = field(default_factory=threading.local, repr=False, compare=False)

@@ -26,6 +26,8 @@ from sparkrun.core.operation import submit as _operation_submit
 
 import json
 import logging
+import time
+import uuid
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -58,6 +60,7 @@ class DiscoveredEndpoint:
     actual_models: list[str] = field(default_factory=list)
     recipe_name: str = ""
     tensor_parallel: int = 1
+    owner: str = ""
     api_key: str | None = None
     #: Max context length (tokens) of the served model, captured from the
     #: backend's ``/v1/models`` ``max_model_len`` during the health probe.
@@ -72,6 +75,65 @@ class DiscoveredEndpoint:
     plugin_items: dict = field(default_factory=dict)
 
 
+@dataclass
+class DiscoverySnapshot:
+    """A bounded observation, with coverage separate from endpoint health.
+
+    Endpoints retain credentials for local application only. ``to_dict`` is the
+    public projection; credentials and arbitrary recipe/plugin payloads are not
+    part of the discovery wire contract.
+    """
+
+    endpoints: list[DiscoveredEndpoint] = field(default_factory=list)
+    observed_at: float = field(default_factory=time.time)
+    sweep_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    hosts: list[str] = field(default_factory=list)
+    covered_hosts: list[str] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)
+    mode: str = "metadata"
+
+    @property
+    def complete(self) -> bool:
+        return self.mode == "live" and not self.errors and set(self.hosts) <= set(self.covered_hosts)
+
+    def to_dict(self) -> dict:
+        return {
+            "sweep_id": self.sweep_id,
+            "observed_at": self.observed_at,
+            "hosts": self.hosts,
+            "covered_hosts": self.covered_hosts,
+            "complete": self.complete,
+            "mode": self.mode,
+            "errors": self.errors,
+            "endpoints": [
+                {
+                    "cluster_id": ep.cluster_id,
+                    "cluster_name": ep.cluster_name,
+                    "recipe_revision": ep.recipe_revision,
+                    "owner": ep.owner,
+                    "model": ep.model,
+                    "served_model_name": ep.served_model_name,
+                    "actual_models": ep.actual_models,
+                    "runtime": ep.runtime,
+                    "host": ep.host,
+                    "port": ep.port,
+                    "healthy": ep.healthy,
+                    "native_protocols": ep.native_protocols,
+                    "capabilities": ep.capabilities,
+                    "max_model_len": ep.max_model_len,
+                }
+                for ep in self.endpoints
+            ],
+        }
+
+
+def discover_snapshot(**kwargs) -> DiscoverySnapshot:
+    """Observe endpoints without confusing failed coverage with absence."""
+    snapshot = DiscoverySnapshot(hosts=list(kwargs.get("host_list") or ()))
+    snapshot.endpoints = discover_endpoints(**kwargs, _observation=snapshot)
+    return snapshot
+
+
 def discover_endpoints(
     host_filter: list[str] | None = None,
     cache_dir: str | None = None,
@@ -82,6 +144,7 @@ def discover_endpoints(
     cluster_ids: "set[str] | frozenset[str] | None" = None,
     cluster_def: "ClusterDefinition | None" = None,
     sctx: "SparkrunContext | None" = None,
+    _observation: DiscoverySnapshot | None = None,
 ) -> list[DiscoveredEndpoint]:
     """Discover running inference endpoints via :mod:`sparkrun.api`.
 
@@ -122,12 +185,23 @@ def discover_endpoints(
                 sctx=sctx,
             )
             running_ids = set(snapshot.running_cluster_ids())
+            if _observation is not None:
+                _observation.mode = "live"
+                # Never expose executor errors verbatim: SSH diagnostics can
+                # include connection arguments and credentials.
+                failed = snapshot.observation_errors
+                _observation.covered_hosts = [entry.host for entry in snapshot.hosts if entry.host not in failed]
+                _observation.errors = {
+                    host: "Host status was not completely observed" for host in host_list if host not in _observation.covered_hosts
+                }
         except Exception:
             logger.warning(
                 "api.status query failed, falling back to metadata-only discovery",
                 exc_info=True,
             )
             running_ids = None
+            if _observation is not None:
+                _observation.errors = {host: "Host status query failed" for host in host_list}
 
     # Build IB→mgmt reverse map from every metadata entry, used to
     # normalize IB IPs to management IPs for consistent display/dedup.
@@ -164,6 +238,12 @@ def discover_endpoints(
 
     if check_health and endpoints:
         _check_health_parallel(endpoints)
+        if _observation is not None:
+            for ep in endpoints:
+                if not ep.healthy:
+                    _observation.errors[ep.host] = "Endpoint health was not verified"
+                    if ep.host in _observation.covered_hosts:
+                        _observation.covered_hosts.remove(ep.host)
         endpoints = [ep for ep in endpoints if ep.healthy]
         # Collapse entries that turn out to serve the same models on the
         # same port via different network interfaces.
@@ -234,6 +314,7 @@ def _endpoint_from_job(
         healthy=False,
         recipe_name=(job.recipe or meta.get("recipe") or meta.get("recipe_ref") or "") or "",
         tensor_parallel=int(meta.get("tensor_parallel", 1) or 1),
+        owner=str(meta.get("owner") or ""),
         api_key=meta.get("api_key") or None,
     )
 

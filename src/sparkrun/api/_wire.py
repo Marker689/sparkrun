@@ -47,6 +47,8 @@ def validate(value, schema, *, path="request", depth=0):
             raise ValueError(f"{path}: expected one of {kind}")
     elif kind and not matches.get(kind, False):
         raise ValueError(f"{path}: expected {kind}")
+    if isinstance(value, str) and len(value) < schema.get("minLength", 0):
+        raise ValueError(f"{path}: string too short")
     if isinstance(value, str) and len(value) > schema.get("maxLength", 65536):
         raise ValueError(f"{path}: string too long")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -134,12 +136,14 @@ def error_body(exc):
     from sparkrun.daemon.jobs import Conflict
 
     known = isinstance(exc, (SparkrunError, ValueError, LookupError, TimeoutError, ResourceBusy, Conflict))
-    attrs = {key: to_wire(getattr(exc, key)) for key in ("hosts", "required", "reasons", "reason", "available") if hasattr(exc, key)}
+    attrs = {
+        key: to_wire(getattr(exc, key)) for key in ("hosts", "required", "reasons", "reason", "available", "code") if hasattr(exc, key)
+    }
     return {
         "detail": str(exc) if known else "Operation failed; see daemon diagnostics",
         "error": {
             "type": type(exc).__name__ if known else "InternalError",
-            "retryable": isinstance(exc, (ResourceBusy, TimeoutError)),
+            "retryable": isinstance(exc, (ResourceBusy, TimeoutError)) or (known and getattr(exc, "retryable", False) is True),
             "attrs": attrs,
         },
     }

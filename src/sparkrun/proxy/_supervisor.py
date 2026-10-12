@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ except ImportError:  # pragma: no cover - Windows control node
 from contextlib import contextmanager
 
 from sparkrun.proxy.contracts import ProxyModel, GatewayOperationError, GatewayQueryError
-from sparkrun.utils.fs import open_private_write, atomic_private_write
+from sparkrun.utils.fs import open_private_write, atomic_private_write, file_lock
 from sparkrun.core.application_profile import get_application_profile
 from sparkrun.utils.process import process_exists
 
@@ -303,7 +304,13 @@ class GatewayState:
             state = self.get_state()
             if not state or "pid" not in state or _from_previous_boot(state):
                 return None
-            return int(state["pid"])
+            pid = int(state["pid"])
+            if state.get("process"):
+                from sparkrun.core.process_identity import alive
+
+                if state["process"].get("pid") != pid or not alive(state["process"]):
+                    return None
+            return pid
         except Exception:
             return None
 
@@ -326,24 +333,10 @@ class GatewayState:
 
     @contextmanager
     def _state_lock(self):
-        """Serialize read-modify-write of ``state.yaml`` across processes.
-
-        A stop records its intent while the auto-discover daemon may be
-        recording a replacement; unlocked, the stop could rewrite the old PID
-        over the new one and leave a live gateway nothing can see.  A stable
-        sidecar is locked because the state file is replaced by rename.
-        Degrades to no locking without ``fcntl`` (the daemon is POSIX-only).
-        """
-        if fcntl is None:
-            yield
-            return
+        """Serialize state transactions on POSIX and Windows."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.state_dir / ".state.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        with file_lock(self.state_dir / ".state.lock"):
             yield
-        finally:
-            os.close(fd)
 
 
 class GatewaySupervisor(GatewayState):
@@ -627,6 +620,8 @@ class GatewaySupervisor(GatewayState):
         Returns:
             The exit status for the foreground command.
         """
+        if getattr(self, "_discovery_control", False):
+            self._mark_state(service_ready=True)
         supervised = {proc.pid}
         watched = proc.pid
         child: subprocess.Popen | None = proc
@@ -636,7 +631,38 @@ class GatewaySupervisor(GatewayState):
         interrupted = False
         try:
             while True:
-                if child is not None:
+                if getattr(self, "_discovery_control", False):
+                    from sparkrun.core.operation import CURRENT
+
+                    operation = CURRENT.get()
+                    if operation and operation.cancel.is_set():
+                        raise KeyboardInterrupt
+                    state = self.get_state() or {}
+                    if state.get("restart_requested") and not state.get("stop_requested"):
+                        request = state["restart_requested"]
+                        try:
+                            replacement = self._restart_proxy()
+                            self._mark_state(
+                                restart_requested=None,
+                                restart_completed=request,
+                                restart_error=None if replacement else "Gateway restart failed",
+                            )
+                            if replacement:
+                                watched = replacement
+                                supervised.add(replacement)
+                                child = self._proc
+                        except Exception:
+                            self._mark_state(restart_requested=None, restart_completed=request, restart_error="Gateway restart failed")
+                    if child is not None:
+                        try:
+                            rc = child.wait(timeout=0.2)
+                        except subprocess.TimeoutExpired:
+                            continue
+                    elif _alive(watched):
+                        time.sleep(0.2)
+                        continue
+                    child = None
+                elif child is not None:
                     rc = child.wait()
                     child = None
                 else:
@@ -747,6 +773,9 @@ class GatewaySupervisor(GatewayState):
         cache_dir: str | None = None,
         application_config_path: str | Path | None = None,
         cluster: str | None = None,
+        backend: str = "process",
+        scope_source: str = "session",
+        initial_endpoints: list[dict] | None = None,
     ) -> int | None:
         """Spawn the gateway-neutral endpoint-discovery sidecar.
 
@@ -763,7 +792,10 @@ class GatewaySupervisor(GatewayState):
         from sparkrun.core.application_profile import child_environment
         from sparkrun.core.config import resolve_config_path
 
-        child_env = child_environment(config_path=application_config_path or resolve_config_path())
+        from sparkrun.proxy.discovery_service import DiscoverySession
+
+        application_config_path = application_config_path or resolve_config_path()
+        child_env = child_environment(config_path=application_config_path)
         cfg: dict[str, Any] = {
             "proxy_pid": proxy_pid,
             "gateway": self.gateway_name,
@@ -791,6 +823,36 @@ class GatewaySupervisor(GatewayState):
             yaml.safe_dump(cfg, stream, default_flow_style=False)
         _restrict_file_permissions(self._autodiscover_config_path)
 
+        cfg.update(
+            backend=backend,
+            scope_source=scope_source,
+            initial_endpoints=initial_endpoints or [],
+            instance_id=(self.get_state() or {}).get("instance_id"),
+            application_config_path=str(application_config_path),
+        )
+        session = DiscoverySession(self.state_dir)
+        record = session.prepare(cfg)
+        cfg["generation"] = record["generation"]
+        atomic_private_write(self._autodiscover_config_path, yaml.safe_dump(cfg))
+        if backend == "daemon":
+            from sparkrun.core.config import SparkrunConfig
+            from sparkrun.daemon.state import Binding
+            from sparkrun.daemon.client import Client
+            from sparkrun.daemon.management import ensure_daemon
+
+            binding = Binding.from_config(SparkrunConfig(application_config_path))
+            try:
+                ensure_daemon(binding)
+                Client(binding=binding).call("proxy.discovery.ensure", {"generation": record["generation"]})
+            except BaseException:
+                session.stop(generation=record["generation"])
+                raise
+            self._discovery_control = True
+            from sparkrun.core.process_identity import process_identity
+
+            self._mark_state(controller=process_identity())
+            return None
+
         log_path = self.state_dir / "autodiscover.log"
         log_file = open(log_path, "w")
         try:
@@ -802,6 +864,7 @@ class GatewaySupervisor(GatewayState):
                 start_new_session=True,
             )
         except Exception:
+            session.stop(generation=record["generation"])
             logger.warning("Failed to start auto-discover process", exc_info=True)
             return None
         finally:
@@ -818,7 +881,22 @@ class GatewaySupervisor(GatewayState):
 
     def stop_autodiscover(self) -> None:
         """Stop the background auto-discovery process if running."""
-        autodiscover_pid = self._read_autodiscover_pid()
+        from sparkrun.proxy.discovery_service import DiscoverySession
+        from sparkrun.core.process_identity import alive
+
+        record = DiscoverySession(self.state_dir).stop()
+        if record and record["descriptor"]["backend"] == "daemon":
+            from sparkrun.core.config import SparkrunConfig
+            from sparkrun.daemon.state import Binding
+            from sparkrun.daemon.jobs import JobStore
+            from sparkrun.daemon.proxy import cancel_job
+
+            config = SparkrunConfig(record["descriptor"]["application_config_path"])
+            cancel_job(JobStore.from_config(Binding.from_config(config).directory, config), record["job_id"])
+            return
+        if record and record["process"] and not alive(record["process"]):
+            return
+        autodiscover_pid = (record["process"] or {}).get("pid") if record else self._read_autodiscover_pid()
         if autodiscover_pid is None:
             return
         try:
@@ -926,6 +1004,9 @@ class GatewaySupervisor(GatewayState):
             current = self.get_state()
             if current is None or current.get("stop_requested"):
                 return False
+            for key in ("instance_id", "controller", "service_job", "service_ready"):
+                if key in current:
+                    state[key] = current[key]
             atomic_private_write(self.state_file, yaml.safe_dump(state, default_flow_style=False))
             return True
 
@@ -935,7 +1016,15 @@ class GatewaySupervisor(GatewayState):
         self.claim_state_directory()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         _restrict_dir_permissions(self.state_dir)
-        state: dict[str, Any] = {"pid": pid}
+        from sparkrun.core.process_identity import process_identity
+        from sparkrun.core.operation import CURRENT
+
+        state: dict[str, Any] = {"pid": pid, "process": process_identity(pid), "instance_id": uuid.uuid4().hex}
+        operation = CURRENT.get()
+        if getattr(self, "_discovery_control", False):
+            state["controller"] = process_identity()
+            if operation and operation.via_daemon:
+                state["service_job"] = operation.id
         state.update(self._state_payload())
         # Which gateway implementation owns this process.  Management paths
         # (stop / status / sync) read it back so they act on what is *running*
@@ -971,16 +1060,19 @@ class GatewaySupervisor(GatewayState):
 
     def update_autodiscover_pid(self, autodiscover_pid: int) -> None:
         """Record the auto-discover PID in state (call after start)."""
-        pid = self._read_pid()
-        if pid is not None:
-            supervisor = (self.get_state() or {}).get("supervisor")
-            self._save_state(pid, autodiscover_pid=autodiscover_pid, supervisor=supervisor or "env")
+        self._mark_state(autodiscover_pid=autodiscover_pid)
 
-    def _clear_state(self) -> None:
-        """Remove state file."""
+    def _clear_state(self, *, expected_pid=None, expected_instance=None) -> None:
+        """Remove state, optionally only for the generation a caller stopped."""
         with self._state_lock():
-            if self.get_state() is not None:
-                self.state_file.unlink(missing_ok=True)
+            state = self.get_state()
+            if state is None:
+                return
+            if expected_pid is not None and _state_pid(state) != expected_pid:
+                return
+            if expected_instance is not None and state.get("instance_id") != expected_instance:
+                return
+            self.state_file.unlink(missing_ok=True)
 
 
 __all__ = [

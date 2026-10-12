@@ -21,7 +21,7 @@ def query(name, arguments=None) -> tuple[bool, Any]:
     except (OSError, ValueError):
         return False, None
     # Only explicit read operations are eligible; never duplicate mutations.
-    if name not in {"catalog.recipes", "catalog.clusters", "catalog.registries", "list_jobs", "status_report", "search_recipes"}:
+    if name not in {"catalog.recipes", "catalog.clusters", "catalog.registries", "workloads.list", "cluster.report", "catalog.search"}:
         raise ValueError("Operation is not eligible for CLI passthrough")
     value = client.call(name, arguments or {})
     if isinstance(value, dict) and "job_id" in value:

@@ -547,9 +547,10 @@ def test_stop_ignores_a_record_naming_someone_elses_unit(host, context, monkeypa
     engine.stop.assert_called_once()
 
 
-def test_status_names_the_unit(monkeypatch, context):
+def test_status_names_the_unit(monkeypatch, context, tmp_path):
     engine = _running_engine_with(monkeypatch, dict(SUPERVISED, gateway="litellm"))
     engine.query_models.return_value = ()
+    engine.state_dir = tmp_path
     status = _ops.status(sctx=context)
     assert status.managed_by == "sparkrun-proxy.service"
     assert status.to_dict()["managed_by"] == "sparkrun-proxy.service"

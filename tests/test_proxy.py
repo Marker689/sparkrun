@@ -1848,6 +1848,7 @@ class TestCLI:
             patch("sparkrun.proxy.config.ProxyConfig.gateway", new_callable=lambda: property(lambda s: None)),
             patch("sparkrun.proxy.config.ProxyConfig.cluster", new_callable=lambda: property(lambda s: None)),
             patch("sparkrun.proxy.config.ProxyConfig.auto_discover", new_callable=lambda: property(lambda s: True)),
+            patch("sparkrun.proxy.config.ProxyConfig.discovery_backend", new_callable=lambda: property(lambda s: "process")),
             patch(
                 "sparkrun.proxy.config.ProxyConfig.discover_interval",
                 new_callable=lambda: property(lambda s: 30),
