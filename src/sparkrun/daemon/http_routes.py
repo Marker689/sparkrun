@@ -5,7 +5,6 @@ from sparkrun.core.daemon_registry import (
     registered_daemon_ops,
     registered_daemon_routes,
     get_daemon_op,
-    legacy_operation_names,
 )
 
 
@@ -64,7 +63,6 @@ def _extra(op):
             "name": op.name,
             "owner": op.owner,
             "local_name": op.local_name,
-            "legacy_names": legacy_operation_names(op),
             "kind": op.kind,
             "scope": op.scope,
             "version": op.version,
@@ -181,7 +179,6 @@ def add_operation_schemas(schema, paths):
             "http_path": paths.get(op.name),
             "owner": op.owner,
             "local_name": op.local_name,
-            "legacy_names": legacy_operation_names(op),
         }
         for op in operations
     }

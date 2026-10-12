@@ -137,7 +137,7 @@ local commands and reject client connection options.
 ## Operations, jobs, and prompts
 
 Authenticated `GET /v1/ops` publishes operation names, permissions, execution
-classes, ownership (`owner`, `local_name`), legacy names, HTTP alias paths
+classes, ownership (`owner`, `local_name`), HTTP alias paths
 (`http_path`), and closed request/result schemas.
 `/openapi.json` and `/docs` describe the wire API. `/v1/health` reveals only
 health/protocol; `/v1/info` requires auth.
@@ -528,21 +528,16 @@ daemon restart. Discovery and OpenAPI use canonical operation names and separate
 schema components/tags for each owner; clients should use the advertised
 `http_path` rather than constructing it themselves.
 
-### Existing Kubernetes clients and jobs
+### Kubernetes operations
 
-The bundled Kubernetes operations now have canonical names such as
-`plugins.k8s.list_nodes`. Existing generic calls to `k8s.list_nodes` continue to
-resolve through an explicit compatibility mapping; `/v1/ops` advertises these
-as `legacy_names`. New jobs persist canonical names. The newly introduced HTTP
-aliases use `/v1/plugins/k8s/ops/...`; no `/v1/k8s/...` alias is mounted.
+The bundled Kubernetes plugin uses the same canonical naming convention:
 
-Retained jobs keep their original operation names and results. A matching retry
-through a legacy or canonical name returns the same job when the principal,
-arguments, and operation version agree. Expired idempotency records still reject
-resubmission. Existing runtime/generation checks remain in effect for queued and
-running jobs; namespace migration does not upgrade their runtime or rerun them.
-The explicit `k8s.*` compatibility mappings remain supported in daemon protocol
-v1; removing them requires a separately announced migration.
+```bash
+sparkrun daemon call plugins.k8s.list_nodes --data '{"context":"lab"}' --wait
+```
+
+This dispatches the same operation as `POST /v1/plugins/k8s/ops/list_nodes`.
+Discovery, persisted jobs, and retries all use `plugins.k8s.list_nodes`.
 
 `daemon/coverage.py` accounts for public callable API entry points. Exclusions
 include live Python/session helpers, TTY `ssh-copy-id`, arbitrary low-level k8s

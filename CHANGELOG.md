@@ -16,8 +16,8 @@ first tagged release containing them, regardless of their original commit date.
   endpoints under `/v1/plugins/<id>/ops/...`, with custom JSON adapters under
   `/routes/...`. Bind ownership during plugin loading, reject duplicate source
   identities before import, and publish owner-specific discovery and OpenAPI.
-  Preserve generic Kubernetes `k8s.*` calls and retained-job idempotency while
-  leaving core operation names and URLs unchanged.
+  Use canonical plugin names for dispatch, persisted jobs, and idempotency;
+  core operation names and URLs stay unchanged.
 
 - Add named daemon HTTP aliases such as `POST /v1/cluster/create` for registered
   operations, sharing permissions, validation, idempotency, and job dispatch with

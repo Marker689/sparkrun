@@ -51,7 +51,7 @@ def test_public_api_coverage_and_closed_schemas(binding):
         check_request(get_daemon_op("run"), {"recipe": None})
     assert check_request(get_daemon_op("proxy.start"), {"auto_discover": False, "restart": True})
     assert check_request(get_daemon_op("model_cache.inspect"), {"model": "org/model", "cache_dir": "/tmp/cache", "file_selection": "all"})
-    assert check_request(get_daemon_op("k8s.configure_service_account"), {"token_duration": "1h"})
+    assert check_request(get_daemon_op("plugins.k8s.configure_service_account"), {"token_duration": "1h"})
 
 
 def test_plugin_route_uses_selected_operation_authorization(binding, monkeypatch):

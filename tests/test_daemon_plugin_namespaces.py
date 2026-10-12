@@ -1,4 +1,4 @@
-"""Plugin ownership, independent local names, adapter policy and legacy retries."""
+"""Plugin ownership, independent local names, adapter policy and canonical retries."""
 
 from dataclasses import replace
 import importlib
@@ -19,7 +19,6 @@ from sparkrun.core.daemon_registry import (
     get_daemon_op,
     registered_daemon_ops,
     registered_daemon_routes,
-    legacy_operation_names,
 )
 from sparkrun.core.plugin_identity import (
     PluginIdentity,
@@ -191,7 +190,7 @@ def test_plugin_adapter_paths_are_literal(path):
         DaemonRoute(path, lambda: None, ("status",), {"type": "object", "additionalProperties": False})
 
 
-def test_failed_import_rolls_back_operations_routes_aliases_and_identity(binding):
+def test_failed_import_rolls_back_operations_routes_and_identity(binding):
     import sparkrun.core.plugin_identity as identities
 
     owner = identity("k8s")
@@ -208,7 +207,7 @@ def test_failed_import_rolls_back_operations_routes_aliases_and_identity(binding
     assert "k8s" not in identities._IDENTITIES
     assert current_registration_owner() is None
     with pytest.raises(LookupError):
-        get_daemon_op("k8s.list_nodes")
+        get_daemon_op("plugins.k8s.list_nodes")
 
 
 def test_application_context_is_profile_bound_and_conflicts_with_plugin_claims(binding):
@@ -220,42 +219,51 @@ def test_application_context_is_profile_bound_and_conflicts_with_plugin_claims(b
         preflight_identities([identity("app-sparkrun")])
 
 
-def test_legacy_k8s_jobs_and_retries_resolve_only_the_verified_owner(binding):
-    store = JobStore(binding.directory)
-    args = {"context": "lab"}
-    old = DaemonOp("k8s.list_nodes", lambda: None, scope="operate")
-    job = store.submit(old, args, "alice", "old", {}, key="retry")
-    store.finish(job, "succeeded", result={"nodes": []})
-    with plugin_registration(identity("k8s")):
-        current = register_plugin_daemon_op(DaemonOp("list_nodes", lambda: None, scope="operate"))
-    assert get_daemon_op("k8s.list_nodes") is current
-    assert legacy_operation_names(current) == ("k8s.list_nodes",)
-    assert store.submit(current, args, "alice", "new", {}, key="retry") == job
-    assert store.submit(current, args, "alice", "again", {}, key="retry") == job
-    assert store.get(job)["operation"] == "k8s.list_nodes"
-    assert store.get(job)["result"] == {"nodes": []}
-    with pytest.raises(Conflict, match="different arguments"):
-        store.submit(current, {"context": "other"}, "alice", "", {}, key="retry")
-    with core_registration(), pytest.raises(ValueError, match="legacy alias"):
-        register_daemon_op(old)
-    store.prune(age=0, count=0)
-    with pytest.raises(Conflict, match="expired"):
-        store.submit(current, args, "alice", "", {}, key="retry")
+def test_k8s_discovery_and_dispatch_only_expose_canonical_names(binding):
+    from sparkrun.plugins.k8s.daemon import register
+
+    with plugin_registration(PluginIdentity("k8s", "sparkrun.plugins.k8s", ("in-tree", "sparkrun.plugins.k8s", None))):
+        register()
+    with pytest.raises(LookupError, match="Unknown operation"):
+        get_daemon_op("k8s.list_nodes")
+    headers = {"Authorization": "Bearer " + TokenStore(binding).create("admin", scope="admin")[1]}
+    path = "/v1/plugins/k8s/ops/list_nodes"
+    canonical = "plugins.k8s.list_nodes"
+    with TestClient(create_app(binding, start_workers=False)) as client:
+        operations = client.get("/v1/ops", headers=headers).json()
+        assert all("legacy_names" not in op for op in operations)
+        assert "k8s.list_nodes" not in {op["name"] for op in operations}
+        assert next(op for op in operations if op["name"] == canonical)["http_path"] == path
+        for old_path in ("/v1/ops/k8s.list_nodes", "/v1/k8s/list_nodes"):
+            assert client.post(old_path, json={}, headers=headers).status_code == 404
+        retry_headers = {**headers, "Idempotency-Key": "canonical"}
+        accepted = client.post(path, json={}, headers=retry_headers)
+        retry = client.post("/v1/ops/" + canonical, json={}, headers=retry_headers)
+        assert accepted.status_code == retry.status_code == 202
+        assert accepted.json() == retry.json()
+        job = JobStore(binding.directory).get(accepted.json()["job_id"])
+        assert job["operation"] == canonical
+        schema = client.get("/openapi.json", headers=headers).json()
+        assert all("legacy_names" not in op for op in schema["x-sparkrun-operations"].values())
+        assert "legacy_names" not in schema["paths"][path]["post"]["x-sparkrun-operation"]
 
 
-def test_legacy_retry_does_not_cross_operation_version_or_owner(binding):
+def test_canonical_retry_does_not_cross_operation_version_or_owner(binding):
     store = JobStore(binding.directory)
-    old = DaemonOp("k8s.list_nodes", lambda: None, version=1)
-    job = store.submit(old, {}, "alice", "", {}, key="retry")
     with plugin_registration(identity("k8s")):
-        current = register_plugin_daemon_op(DaemonOp("list_nodes", lambda: None, version=2))
+        op = register_plugin_daemon_op(DaemonOp("list_nodes", lambda: None))
+    job = store.submit(op, {}, "alice", "", {}, key="retry")
     with pytest.raises(Conflict, match="different arguments"):
-        store.submit(current, {}, "alice", "", {}, key="retry")
+        store.submit(replace(op, version=2), {}, "alice", "", {}, key="retry")
     with plugin_registration(identity("other")):
         other = register_plugin_daemon_op(DaemonOp("list_nodes", lambda: None))
     with pytest.raises(Conflict, match="different arguments"):
         store.submit(other, {}, "alice", "", {}, key="retry")
-    assert store.get(job)["state"] == "queued"
+    assert store.submit(op, {}, "alice", "again", {}, key="retry") == job
+    store.finish(job, "succeeded")
+    store.prune(age=0, count=0)
+    with pytest.raises(Conflict, match="expired"):
+        store.submit(op, {}, "alice", "", {}, key="retry")
 
 
 def test_adapter_openapi_ids_preserve_distinct_literal_paths(binding):

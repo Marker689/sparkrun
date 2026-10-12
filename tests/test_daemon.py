@@ -24,7 +24,6 @@ def binding(daemon_test_directory, monkeypatch):
     from sparkrun.core import daemon_registry
 
     monkeypatch.setattr(daemon_registry, "_OPERATIONS", {})
-    monkeypatch.setattr(daemon_registry, "_ALIASES", {})
     monkeypatch.setattr(daemon_registry, "_ROUTES", {})
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     config = tmp_path / "config.yaml"

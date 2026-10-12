@@ -115,24 +115,10 @@ class JobStore:
                     raise ValueError("Idempotency key exceeds 200 characters")
                 previous = db.execute("SELECT * FROM submissions WHERE principal=? AND key=?", (principal, key)).fetchone()
                 if previous:
-                    old_job = db.execute("SELECT * FROM jobs WHERE id=?", (previous["job"],)).fetchone()
-                    if not old_job:
-                        raise Conflict("The previous result expired; this idempotency key cannot execute again")
                     if previous["fingerprint"] != digest:
-                        from sparkrun.core.daemon_registry import legacy_operation_names
-
-                        legacy = json.dumps(
-                            {"op": old_job["operation"], "version": op.version, "arguments": arguments}, sort_keys=True, allow_nan=False
-                        )
-                        if (
-                            old_job["operation"] not in legacy_operation_names(op)
-                            or old_job["version"] != op.version
-                            or json.loads(old_job["arguments"]) != arguments
-                            or previous["fingerprint"] != hashlib.sha256(legacy.encode()).hexdigest()
-                        ):
-                            raise Conflict("Idempotency key was already used for different arguments")
-                        # Preserve the original job/runtime. Only normalize its retry fingerprint.
-                        db.execute("UPDATE submissions SET fingerprint=? WHERE principal=? AND key=?", (digest, principal, key))
+                        raise Conflict("Idempotency key was already used for different arguments")
+                    if not db.execute("SELECT 1 FROM jobs WHERE id=?", (previous["job"],)).fetchone():
+                        raise Conflict("The previous result expired; this idempotency key cannot execute again")
                     return previous["job"]
             if db.execute("SELECT count(*) FROM jobs WHERE state='queued'").fetchone()[0] >= self.max_queued:
                 raise Conflict("Job queue is full")

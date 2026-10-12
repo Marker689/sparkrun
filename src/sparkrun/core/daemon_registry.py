@@ -15,19 +15,6 @@ _PLUGIN_ID = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
 _RESERVED_ROUTE_ROOTS = frozenset(
     {"health", "info", "ops", "jobs", "events", "streams", "maintenance", "shutdown", "snapshots", "reservations", "plugins"}
 )
-# Reviewed compatibility only. New plugins never reserve global legacy names.
-_K8S_LEGACY = frozenset(
-    {
-        "ensure_kubectl",
-        "cluster_info",
-        "list_nodes",
-        "kueue_status",
-        "setup_kueue",
-        "configure_service_account",
-        "jobset_status",
-        "stop_jobset",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -62,9 +49,8 @@ class DaemonOp:
 
 
 _OPERATIONS = {}
-_ALIASES = {}
 _ROUTES = {}
-enlist_registry_state(globals(), "_OPERATIONS", "_ALIASES", "_ROUTES")
+enlist_registry_state(globals(), "_OPERATIONS", "_ROUTES")
 
 
 def _owner(declared):
@@ -106,9 +92,6 @@ def register_daemon_op(op):
         raise ValueError("Register a local declaration, not an already bound daemon operation")
     name = op.name
     if isinstance(owner, PluginIdentity):
-        # Only the reviewed Kubernetes migration accepts an old global spelling.
-        if owner.plugin_id == "k8s" and owner.module == "sparkrun.plugins.k8s" and name.startswith("k8s.") and name[4:] in _K8S_LEGACY:
-            name = name[4:]
         if name.split(".")[0] == "plugins" or not re.fullmatch(_LOCAL_NAME, name):
             raise ValueError("Plugins must declare local operation names")
         bound = replace(op, name=f"plugins.{owner_name}.{name}", owner=owner_name, local_name=name)
@@ -116,15 +99,7 @@ def register_daemon_op(op):
         if name.split(".")[0] in _RESERVED_ROUTE_ROOTS:
             raise ValueError("Reserved core operation namespace: %s" % name)
         bound = replace(op, owner="core", local_name=name)
-    if bound.name in _ALIASES:
-        raise ValueError("Operation name is reserved by a legacy alias: " + bound.name)
-    bound = _register(_OPERATIONS, bound.name, bound, "handler_loader")
-    if isinstance(owner, PluginIdentity) and owner.plugin_id == "k8s" and owner.module == "sparkrun.plugins.k8s" and name in _K8S_LEGACY:
-        alias = "k8s." + name
-        if alias in _OPERATIONS or (alias in _ALIASES and _ALIASES[alias] != bound.name):
-            raise ValueError("Conflicting legacy daemon operation: " + alias)
-        _ALIASES[alias] = bound.name
-    return bound
+    return _register(_OPERATIONS, bound.name, bound, "handler_loader")
 
 
 def register_plugin_daemon_op(op):
@@ -139,13 +114,9 @@ def registered_daemon_ops():
 
 def get_daemon_op(name):
     try:
-        return _OPERATIONS[_ALIASES.get(name, name)]
+        return _OPERATIONS[name]
     except KeyError:
         raise LookupError(f"Unknown operation: {name}") from None
-
-
-def legacy_operation_names(op):
-    return tuple(sorted(name for name, target in _ALIASES.items() if target == op.name and _OPERATIONS.get(target) is op))
 
 
 def operation_http_path(op: DaemonOp) -> str | None:

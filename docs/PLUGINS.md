@@ -845,7 +845,7 @@ All URLs dispatch through the same operation policies and job machinery, includi
 permissions, prompts, feedback, and idempotency. Only metadata and lazy handlers
 belong in plugin registration; keep server frameworks out of scanned modules.
 See [extending the daemon API](DAEMON.md#extending-the-api) for complete operation
-and adapter examples, ID rules, and Kubernetes legacy-call compatibility.
+and adapter examples, ID rules, and Kubernetes operations.
 
 ## Kubernetes plugin and executor-owned launches
 
