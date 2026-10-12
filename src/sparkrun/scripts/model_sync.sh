@@ -66,10 +66,14 @@ else
 fi
 
 echo "Downloading model: $MODEL_ID..."
+# Older hosts may ship both names with the legacy argument parser. Keep its
+# existing invocation; Hub 1.x/2.x installations provide the modern hf CLI.
 if command -v huggingface-cli &>/dev/null; then
     huggingface-cli download "$MODEL_ID" "$@" --cache-dir "{cache}/hub"
+elif command -v hf &>/dev/null; then
+    hf download "$MODEL_ID" "$@" --cache-dir "{cache}/hub"
 elif command -v uvx &>/dev/null; then
-    uvx hf download "$MODEL_ID" "$@" --cache-dir "{cache}/hub"
+    uvx --from "huggingface-hub=={hub_version}" hf download "$MODEL_ID" "$@" --cache-dir "{cache}/hub"
 else
     # No HuggingFace client. The installer URL is version-pinned in
     # sparkrun.core.tooling — never the unversioned one, which is whatever
@@ -79,12 +83,12 @@ else
         export PATH="{uv_bin_dir}:$PATH"
     fi
     if command -v uvx &>/dev/null; then
-        uvx hf download "$MODEL_ID" "$@" --cache-dir "{cache}/hub"
+        uvx --from "huggingface-hub=={hub_version}" hf download "$MODEL_ID" "$@" --cache-dir "{cache}/hub"
     else
         echo "ERROR: no HuggingFace client on $(hostname), and uv {uv_version} could not be installed." >&2
         echo "       This host may have no outbound network access." >&2
         echo "  Fix by any of:" >&2
-        echo "    - install 'huggingface-cli' or 'uv' on this host" >&2
+        echo "    - install 'hf' or 'uv' on this host" >&2
         echo "    - download on the control machine instead: transfer_mode 'local' or 'push'" >&2
         echo "    - pre-place the weights in {cache}/hub (they are detected and reused)" >&2
         exit 1

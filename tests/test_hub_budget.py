@@ -36,7 +36,7 @@ def _config(timeout_s=None, budget_s=None):
 
 
 def test_configure_hub_client_installs_a_bounded_client(monkeypatch):
-    """huggingface_hub ships ``httpx.Client(timeout=None)``; we must replace it.
+    """huggingface_hub ships an unbounded HTTP client; we must replace it.
 
     This is the defect that made ``model_info`` / ``list_repo_tree`` able to
     block forever — neither accepts a usable per-call timeout, so the shared

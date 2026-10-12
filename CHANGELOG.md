@@ -12,6 +12,11 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Upgrade Hugging Face Hub to 2.2.0 and Click to 8.4.2. Use Hub's active HTTP
+  transport for bounded clients and controller/remote inventory errors, preserve
+  Xet-first weight downloads and offline cache reuse, and support the modern `hf`
+  CLI with a pinned remote `uvx` fallback. Add real HTTP adapter regression tests.
+
 - Upgrade tool-eval-bench's default to v2.8.0 and display live scenario progress
   and verdict tables from its JSONL stream. Preserve saved refs and suite-level
   resume, reconcile final artifacts, and keep multi-trial totals indeterminate.

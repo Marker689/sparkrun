@@ -4,7 +4,7 @@ from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import httpx
+from huggingface_hub.utils import httpx
 import pytest
 
 from sparkrun.core import model_distribution as md

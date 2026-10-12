@@ -30,10 +30,10 @@ dependencies = [
     "six==1.17.0", # transitive dependency of vpd but we pin the version for security reasons
     "idna==3.15", # transitive (requests/huggingface-hub) pinned to the CVE-2026-45409 fix
     "pygments==2.20.0", # transitive (rich/textual) pinned to the CVE-2026-4539 fix
-    "click==8.3.3",
+    "click==8.4.2",
     "pyyaml==6.0.3",
     "packaging==26.0", # PEP 440 comparison for recipe minimum core versions
-    "huggingface-hub==1.8.0",
+    "huggingface-hub==2.2.0",
     "textual==8.2.5",
     "fastapi==0.143.0",
     "uvicorn==0.54.0",
@@ -113,7 +113,7 @@ dev = [
     "pytest-timeout>=2.4",
     "ruff==0.16.6",
     "pyright[nodejs]==1.1.414",
-    "httpx>=0.28.1",
+    "httpx2>=2.0.0",
 ]
 
 [tool.pyright]

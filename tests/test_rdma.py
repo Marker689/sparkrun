@@ -1275,5 +1275,5 @@ def test_cli_advertises_full_and_removes_quick_option(runner, v, patched_cluster
     with mock.patch("sparkrun.api.setup.rdma_test") as call:
         result = runner.invoke(main, ["setup", "rdma-test", "--hosts", "h1,h2", "--quick"])
     assert result.exit_code == 2, result.output
-    assert "No such option: --quick" in result.output
+    assert "No such option" in result.output and "--quick" in result.output
     call.assert_not_called()

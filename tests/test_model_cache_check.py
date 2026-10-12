@@ -428,3 +428,66 @@ class TestSharedBlobSkeleton:
         assert "already cached" in proc.stdout
         assert "STUB-DOWNLOAD" not in proc.stdout
         assert is_model_cached(model_id, cache_dir=str(tmp_path)) is True
+
+
+@needs_bash
+@pytest.mark.parametrize("model", ["org/model", "org/model:Q4_K_M"])
+@pytest.mark.parametrize(
+    "available,selected",
+    [
+        (("hf", "huggingface-cli", "uvx"), "huggingface-cli"),
+        (("huggingface-cli", "uvx"), "huggingface-cli"),
+        (("hf", "uvx"), "hf"),
+        (("uvx",), "uvx"),
+    ],
+)
+def test_download_client_selection_and_pinned_fallback(tmp_path, monkeypatch, model, available, selected):
+    from sparkrun.models.manifest import HUB_ADAPTER_VERSION
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in available:
+        stub = bindir / name
+        stub.write_text('#!/bin/bash\nprintf "CLIENT=%s\\n" "${0##*/}"\nprintf "ARG=%s\\n" "$@"\n')
+        stub.chmod(0o755)
+    cache = tmp_path / "model cache"
+    result = _run(_render(model, str(cache), revision="release/v1"), bindir=bindir)
+    assert result.returncode == 0, result.stderr
+    assert "CLIENT=" + selected in result.stdout
+    args = [line.removeprefix("ARG=") for line in result.stdout.splitlines() if line.startswith("ARG=")]
+    expected = ["--from", "huggingface-hub==" + HUB_ADAPTER_VERSION, "hf"] if selected == "uvx" else []
+    expected += ["download", "org/model"]
+    if ":" in model:
+        expected += ["--include", "*Q4_K_M*"]
+        if selected != "huggingface-cli":
+            expected += ["--include"]
+        expected += ["*mmproj*"]
+    expected += ["--revision", "release/v1", "--cache-dir", str(cache / "hub")]
+    assert args == expected
+
+    if selected != "huggingface-cli":
+        # Exercise the installed CLI parser too: modern hf requires one --include
+        # per pattern; otherwise mmproj is a positional filename and the quant
+        # filter is silently ignored.
+        from click.testing import CliRunner
+        from huggingface_hub.cli import download
+        from huggingface_hub.cli.hf import app
+
+        downloaded = []
+
+        def snapshot_download(**kwargs):
+            downloaded.append(kwargs)
+            return str(cache)
+
+        def unexpected_file_download(**kwargs):
+            pytest.fail("GGUF filters must select a snapshot, not a literal filename")
+
+        monkeypatch.setattr(download, "snapshot_download", snapshot_download)
+        monkeypatch.setattr(download, "hf_hub_download", unexpected_file_download)
+        parsed = CliRunner().invoke(app, args[3:] if selected == "uvx" else args)
+        assert parsed.exit_code == 0, parsed.output
+        assert len(downloaded) == 1
+        assert downloaded[0]["repo_id"] == "org/model"
+        assert downloaded[0]["allow_patterns"] == (["*Q4_K_M*", "*mmproj*"] if ":" in model else None)
+        assert downloaded[0]["revision"] == "release/v1"
+        assert downloaded[0]["cache_dir"] == str(cache / "hub")

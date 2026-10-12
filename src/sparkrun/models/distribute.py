@@ -346,6 +346,7 @@ def _build_model_ensure_script(
     """
     from sparkrun.core.tooling import UV_INSTALL_BIN_DIR, UV_INSTALL_URL, UV_VERSION
     from sparkrun.models.download import is_gguf_model, parse_gguf_model_spec
+    from sparkrun.models.manifest import HUB_ADAPTER_VERSION
     from sparkrun.utils.shell import quote
 
     revision_arg = quote(revision or "")
@@ -355,6 +356,7 @@ def _build_model_ensure_script(
     cache = validate_interpolated_path(cache, field_name="cache_dir")
     cache_path = validate_interpolated_path(model_cache_path(model_id, cache), field_name="model cache path")
     uv = {
+        "hub_version": HUB_ADAPTER_VERSION,
         "uv_version": UV_VERSION,
         "uv_install_url": UV_INSTALL_URL,
         "uv_bin_dir": UV_INSTALL_BIN_DIR,

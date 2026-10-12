@@ -130,13 +130,41 @@ directory. For a pre-placed GGUF file, use
 including under the default policy; missing inventories produce an explicit unverified
 migration warning. Core does not acquire or repair pre-placed paths automatically.
 
+## Hugging Face transports
+
+Weight downloads prefer Xet when the repository supports it and `hf_xet` is
+available; the pinned Hub dependency installs it on supported architectures.
+Xet handles chunk-based transfers, and cache-backed downloads can share blobs
+across repositories. Snapshot repair uses a private staging directory and
+still verifies the selected files before launch.
+
+Hub uses HTTP when Xet is unavailable, when the file is not Xet-backed, or when
+`HF_HUB_DISABLE_XET=1` is set in the downloading process. It does not silently
+retry every failed Xet transfer over HTTP: authentication, access, integrity,
+and transfer failures remain failures. Set the override on the controller or
+remote downloading host as appropriate. An offline run does not try either
+network transport.
+
+Advisory metadata reads deliberately use bounded HTTP instead of Xet's separate
+Rust transport. The overall metadata deadline remains in force even when the
+HTTP library retries a request. Hub 2.x uses `httpx2`; Sparkrun takes its timeout
+and exception types from `huggingface_hub.utils.httpx` and preserves Hub's client
+factory, redirect policy, and event hooks. HTTPS uses the OS trust store by
+default; `SSL_CERT_FILE` / `SSL_CERT_DIR` can supply custom trust on the process
+performing the download. Certificate verification remains enabled.
+
+Legacy remote cache acquisition supports both `hf` and `huggingface-cli`. It
+retains the older command when both are installed, preserving its argument
+format, and pins its isolated `uvx` fallback to the same Hub version as the
+manifest adapter.
+
 ## Transfer and launch guarantees
 
 Local, push, delegated and per-node pull share preparation. Delegated acquisition
 runs on the designated head and need not contact the Hub from the controller.
 Each distribution entry has its own revision, including speculative draft models.
 Required metadata failures are separate from advisory metadata budgets. Remote
-acquisition uses the pinned `huggingface_hub==1.8.0` adapter; offline observation
+acquisition uses the pinned `huggingface_hub==2.2.0` adapter; offline observation
 requires only Bash and ordinary Linux utilities, not Python or uv on targets.
 
 Copies enumerate selected snapshot entries and dereference them into regular

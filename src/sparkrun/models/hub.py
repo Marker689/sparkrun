@@ -12,11 +12,11 @@ Three defects made that phase unbounded, and each needs a different lever:
 
 1. **The library's shared HTTP client has no timeout at all.**
    ``huggingface_hub.utils._http.default_client_factory`` builds
-   ``httpx.Client(..., timeout=None)``, so ``model_info``, ``list_repo_tree``
+   ``httpx2.Client(..., timeout=None)``, so ``model_info``, ``list_repo_tree``
    and ``paginate`` block forever on a half-closed socket.  Per-call ``timeout=``
    arguments cannot fix this: ``list_repo_tree`` does not accept one.  The lever
    is :func:`configure_hub_client`, which installs a bounded client through the
-   library's public ``set_client_factory`` hook — one place, every httpx call.
+   library's public ``set_client_factory`` hook — one place, every Hub HTTP call.
 
 2. **``hf_xet`` bypasses that client entirely.**  On a Xet-backed repo,
    ``hf_hub_download`` hands the transfer to a Rust HTTP stack
@@ -211,8 +211,10 @@ def configure_hub_client(config: Any = None) -> None:
         _STATE.client_configured = True  # one attempt per process, success or not
 
         try:
-            import httpx
             from huggingface_hub import set_client_factory
+
+            # Public export follows Hub's transport (httpx in 1.x, httpx2 in 2.x).
+            from huggingface_hub.utils import httpx
 
             # Private, but the only way to inherit the library's own event hooks
             # and redirect policy; building a bare client would silently drop the

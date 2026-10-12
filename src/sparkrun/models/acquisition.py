@@ -95,7 +95,9 @@ print('SPARKRUN_MODEL_RESULT=' + json.dumps(result, separators=(',', ':')))
     # Neither payload acquisition nor a malformed inventory may use the
     # compatibility fallback merely because the subprocess exited nonzero.
     program = (
-        "import sys, httpx\ntry:\n" + indent(program, "    ") + "\nexcept (httpx.HTTPError, OSError) as error:\n"
+        "import sys\nfrom huggingface_hub.utils import httpx\ntry:\n"
+        + indent(program, "    ")
+        + "\nexcept (httpx.HTTPError, OSError) as error:\n"
         "    print('SPARKRUN_MODEL_ERROR=unavailable')\n"
         "    print(str(error), file=sys.stderr)\n    sys.exit(1)\n"
         "except Exception as error:\n"
@@ -112,7 +114,7 @@ print('SPARKRUN_MODEL_RESULT=' + json.dumps(result, separators=(',', ':')))
     script += f"  runner=(uv run --no-project --with huggingface-hub=={HUB_ADAPTER_VERSION} python)\nfi\n"
     # Bootstrap failure is eligible for compatibility fallback; an unexpected
     # adapter failure after this point is not an unavailable-inventory result.
-    script += "\"${runner[@]}\" -c 'import huggingface_hub, httpx'\n"
+    script += "\"${runner[@]}\" -c 'from huggingface_hub.utils import httpx'\n"
     script += "printf '%s\\n' SPARKRUN_MODEL_ADAPTER_READY\n"
     script += "\"${runner[@]}\" - <<'SPARKRUN_HUB_ADAPTER'\n" + program + "\nSPARKRUN_HUB_ADAPTER\n"
     return script

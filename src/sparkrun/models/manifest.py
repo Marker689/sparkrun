@@ -15,7 +15,7 @@ from sparkrun.models.artifacts import (
     ModelInventoryUnavailable,
 )
 
-HUB_ADAPTER_VERSION = "1.8.0"
+HUB_ADAPTER_VERSION = "2.2.0"
 STATE_DIRECTORY = ".sparkrun-model-artifacts"
 
 
@@ -110,7 +110,7 @@ def is_alternative_weight(path: str) -> bool:
 def fetch_inventory(request: ModelArtifactRequest, *, token: str | None = None, cache: str | None = None) -> dict:
     """Required metadata: failures propagate, independent of advisory budgets."""
     from huggingface_hub import HfApi
-    from httpx import HTTPError
+    from huggingface_hub.utils import httpx
     from sparkrun.models.hub import configure_hub_client
 
     configure_hub_client()
@@ -118,7 +118,7 @@ def fetch_inventory(request: ModelArtifactRequest, *, token: str | None = None, 
         info = HfApi(endpoint=request.endpoint, token=token).model_info(
             request.repo, revision=request.revision, files_metadata=True, timeout=30
         )
-    except (HTTPError, OSError) as exc:
+    except (httpx.HTTPError, OSError) as exc:
         raise ModelInventoryUnavailable("Hugging Face inventory is unavailable for " + request.repo) from exc
     result = inventory_from_info(info)
     index = next((f for f in info.siblings or () if f.rfilename == "model.safetensors.index.json"), None)
@@ -128,7 +128,7 @@ def fetch_inventory(request: ModelArtifactRequest, *, token: str | None = None, 
         entry = next(f for f in result["files"] if f["path"] == index.rfilename)
         try:
             result["weight_map"] = read_weight_index(request.repo, info.sha, request.endpoint, token, entry)
-        except (HTTPError, OSError) as exc:
+        except (httpx.HTTPError, OSError) as exc:
             raise ModelInventoryUnavailable("Hugging Face weight index is unavailable for " + request.repo) from exc
         except (ValueError, KeyError, TypeError) as exc:
             raise ModelArtifactError("invalid authoritative weight index for " + request.repo + ": " + str(exc)) from exc
