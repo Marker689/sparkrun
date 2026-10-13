@@ -985,12 +985,8 @@ class LogView(ScrollView):
         self.refresh()
         self.scroll_to_end()  # no-op unless following
         parent = self.parent
-        if parent is not None:
-            pf = getattr(parent, "_pf", None)
-            if pf is not None:
-                pf["paints"] += 1
-            if hasattr(parent, "_update_status"):
-                parent._update_status()  # status rides the same gate
+        if parent is not None and hasattr(parent, "_update_status"):
+            parent._update_status()  # status rides the same gate
 
     def _writer_queue_depth(self) -> int:
         if not self.is_mounted:
@@ -1275,15 +1271,6 @@ class LogView(ScrollView):
         super()._on_scroll_to(message)
 
     def render_line(self, y: int) -> Strip:
-        start = time.monotonic()
-        try:
-            return self._render_line_inner(y)
-        finally:
-            pf = getattr(self.parent, "_pf", None)
-            if pf is not None:
-                pf["render_ms"] += (time.monotonic() - start) * 1000.0
-
-    def _render_line_inner(self, y: int) -> Strip:
         scroll_x, scroll_y = self.scroll_offset
         virtual_y = int(scroll_y + y)
         width = self.scrollable_content_region.width or 80
@@ -1366,13 +1353,6 @@ class LogPane(Vertical):
     """Log viewer pane filling the node body below node stats."""
 
     CAP: int = 50_000
-
-    #: When SPARKRUN_MONITOR_PROFILE=1, append per-second streaming stats to
-    #: <cache_dir>/monitor-profile.log; zero cost otherwise.
-    PROFILE: bool = os.environ.get("SPARKRUN_MONITOR_PROFILE") == "1"
-
-    #: With PROFILE, also append a cProfile top-30 to the same log every ~5 s.
-    DUMP: bool = os.environ.get("SPARKRUN_MONITOR_PROFILE_DUMP") == "1"
 
     DEFAULT_CSS = """
     LogPane {
@@ -1488,11 +1468,6 @@ class LogPane(Vertical):
         self._incoming_cv: threading.Condition = threading.Condition(self._incoming_lock)
         self._incoming_lines: deque[tuple[LogLine, int]] = deque()
         self._flush_scheduled: bool = False
-        self._pf: dict[str, float] | None = {"lines": 0.0, "turns": 0.0, "flush_ms": 0.0, "paints": 0.0} if self.PROFILE else None
-        if self._pf is not None:
-            self._pf.update(stall_ms_max=0.0, last_beat=time.monotonic(), render_ms=0.0, depth_max=0.0)
-        self._pf_ticks: int = 0
-        self._profiler: Any = None
 
         self.log_view: LogView = LogView(self.buffer, view_state=self.view_state)
 
@@ -1522,88 +1497,6 @@ class LogPane(Vertical):
         self._update_status()
         self.log_view.focus()
         self._start_follow_worker(self.scope)
-        if self._pf is not None:
-            self.set_interval(1.0, self._profile_tick)
-            # Kick the chain from the loop: is_mounted is still False inside on_mount.
-            asyncio.get_running_loop().call_later(0.02, self._pf_heartbeat)
-
-        if self.PROFILE and self.DUMP:
-            import cProfile
-
-            self._profiler = cProfile.Profile()
-            self._profiler.enable()
-
-    def _profile_tick(self) -> None:
-        pf = self._pf
-        if pf is None:
-            return
-        cache_root = self.cache_dir or "~/.cache/sparkrun"
-        path = os.path.join(os.path.expanduser(cache_root), "monitor-profile.log")
-        writer_q = -1
-        writer = getattr(getattr(self.app._driver, "_writer_thread", None), "_queue", None)
-        if writer is not None:
-            writer_q = writer.qsize()
-        keys = getattr(self.app, "_key_events", -1)
-        keys_total = getattr(self.app, "_key_events_total", -1)
-        key_gap = getattr(self.app, "_key_gap_max", -1.0)
-        if hasattr(self.app, "_key_events"):
-            self.app._key_events = 0
-            self.app._key_gap_max = 0.0
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                if f.tell() == 0:
-                    f.write(
-                        "ts,lines_in,flush_turns,flush_ms_total,paints,stall_ms_max,render_ms,incoming_depth_max,writer_q,keys,key_gap_ms,keys_total\n"
-                    )
-                f.write(
-                    f"{datetime.now().isoformat(timespec='seconds')},{int(pf['lines'])},"
-                    f"{int(pf['turns'])},{pf['flush_ms']:.1f},{int(pf['paints'])},"
-                    f"{pf['stall_ms_max']:.1f},{pf['render_ms']:.1f},{int(pf['depth_max'])},{writer_q},{keys},{key_gap:.0f},{keys_total}\n"
-                )
-        except OSError:
-            logger.debug("Failed writing monitor profile row", exc_info=True)
-        pf["lines"] = pf["turns"] = 0.0
-        pf["flush_ms"] = 0.0
-        pf["paints"] = 0.0
-        pf["stall_ms_max"] = 0.0
-        pf["render_ms"] = 0.0
-        pf["depth_max"] = 0.0
-
-        self._pf_ticks += 1
-        if self._profiler is not None and self._pf_ticks % 5 == 0:
-            self._profile_dump(path)
-
-    def _pf_heartbeat(self) -> None:
-        pf = self._pf
-        if pf is None or not self.is_mounted:
-            return
-        now = time.monotonic()
-        gap = (now - pf["last_beat"]) * 1000.0
-        pf["last_beat"] = now
-        if gap > pf["stall_ms_max"]:
-            pf["stall_ms_max"] = gap
-        asyncio.get_running_loop().call_later(0.02, self._pf_heartbeat)
-
-    def _profile_dump(self, path: str) -> None:
-        import io
-        import pstats
-
-        profiler = self._profiler
-        if profiler is None:
-            return
-        profiler.disable()
-        buf = io.StringIO()
-        try:
-            stats = pstats.Stats(profiler, stream=buf)
-            stats.sort_stats("cumulative").print_stats(30)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(f"## cProfile top-30 @{datetime.now().isoformat(timespec='seconds')}\n")
-                f.write(buf.getvalue())
-        except OSError:
-            logger.debug("Failed writing monitor profile dump", exc_info=True)
-        finally:
-            profiler.enable()
 
     def _update_title(self) -> None:
         meta = load_job_metadata(self.cluster_id, cache_dir=self.cache_dir) or {}
@@ -1754,16 +1647,10 @@ class LogPane(Vertical):
         if not self.is_mounted or self._cancel.is_set() or gen != self._generation:
             return
 
-        pf = self._pf
-        pf_start = time.monotonic() if pf is not None else 0.0
-        lines_seen = 0
-        turns = 0
         batch_count = 0
         start_time = time.monotonic()
         while self.is_mounted and not self._cancel.is_set() and gen == self._generation:
             with self._incoming_lock:
-                if pf is not None and len(self._incoming_lines) > pf["depth_max"]:
-                    pf["depth_max"] = float(len(self._incoming_lines))
                 batch: list[LogLine] = []
                 while self._incoming_lines and len(batch) < 50:
                     item_line, item_gen = self._incoming_lines.popleft()
@@ -1775,8 +1662,6 @@ class LogPane(Vertical):
                 self._incoming_cv.notify_all()
 
             if batch:
-                lines_seen += len(batch)
-                turns += 1
                 self._on_lines(batch, gen, from_follow=True)
 
             if not has_more:
@@ -1793,11 +1678,6 @@ class LogPane(Vertical):
                 break
 
             await asyncio.sleep(0)
-
-        if pf is not None:
-            pf["lines"] += lines_seen
-            pf["turns"] += turns
-            pf["flush_ms"] += (time.monotonic() - pf_start) * 1000.0
 
     def _on_target_ready(self, target: LogTarget, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():

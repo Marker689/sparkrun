@@ -9,7 +9,6 @@ not just the docker containers the old telemetry-embedded ``docker ps`` saw.
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 from collections.abc import Callable
 
@@ -269,32 +268,6 @@ class ClusterMonitorApp(App):
         self._selected_host: str | None = self._hosts[0] if self._hosts else None
         self._pinned_host: str | None = None
         self._frame: MonitorFrame | None = None
-        #: Input-side profile counters (SPARKRUN_MONITOR_PROFILE=1 only): every Key
-        #: event reaches the App before any pane binding can consume it, so these
-        #: see all keys — press-rate vs action-effect separates input arrival
-        #: from output rendering without touching the pane.
-        if os.environ.get("SPARKRUN_MONITOR_PROFILE") == "1":
-            self._key_events: int = 0
-            self._key_events_total: int = 0
-            self._key_last: float | None = None
-            self._key_gap_max: float = 0.0
-
-    async def on_event(self, event: events.Event) -> None:
-        # Input-side profile hook. Textual routes Key events through App.on_event
-        # BEFORE _check_bindings consumes bound keys (space/c/1-3 are priority
-        # bindings and never reach on_key handlers), so this is the only point
-        # that sees every keypress — press-rate vs action-effect separates input
-        # arrival from output rendering without touching the pane.
-        if hasattr(self, "_key_events") and isinstance(event, events.Key) and not event.is_forwarded:
-            import time as _time
-
-            now = _time.monotonic()
-            self._key_events += 1
-            self._key_events_total += 1
-            if self._key_last is not None:
-                self._key_gap_max = max(self._key_gap_max, (now - self._key_last) * 1000.0)
-            self._key_last = now
-        await super().on_event(event)
 
     # -- layout -------------------------------------------------------------
 
