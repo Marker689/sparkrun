@@ -946,3 +946,32 @@ class TestDumpLogSources:
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
             dump_log_sources(ex, [source], fh)
         assert exc_info.value.returncode == 3
+
+
+def test_spawn_never_inherits_stdin(monkeypatch):
+    """Log readers must not inherit the terminal's stdin.
+
+    Cluster-scope reads spawn ``ssh`` children on the remote hosts; an inherited
+    stdin lets a running ``ssh`` consume the monitor TUI's keystrokes (which is why
+    only cluster tailing appeared to drop key presses, idle or busy). ``_spawn``
+    must point every child's stdin at ``/dev/null``.
+    """
+    import subprocess
+
+    from sparkrun.orchestration import logs
+
+    captured: dict = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        proc = mock.Mock()
+        proc.stdout = mock.Mock()
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    logs._spawn(["ssh", "host", "docker logs -f c0"])
+
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stdout"] is subprocess.PIPE
+    assert captured["stderr"] is subprocess.STDOUT

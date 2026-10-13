@@ -36,6 +36,7 @@ from sparkrun.cli._monitor_logs import (
     canonical_scope,
     default_dump_path,
     distinct_scopes,
+    entry_plain_text,
     format_prefix,
     render_text,
     target_args,
@@ -261,6 +262,22 @@ def test_render_text_color_and_strip():
     assert isinstance(t_plain, Text)
     assert t_plain.plain == "Success: details"
     assert len(t_plain.spans) == 0  # ANSI stripped
+
+
+def test_entry_plain_text_no_ansi_passthrough():
+    """No-ANSI text passes through unchanged; ANSI/control-char text still takes from_ansi."""
+    line = LogLine(host="h1", container="c1", role="head", rank=0, text="Avg prefill throughput: 150.0 tokens/s")
+    assert entry_plain_text(line) == line.text
+    assert entry_plain_text(line) == line.text  # memo returns the same value
+
+    ansi = LogLine(host="h1", container="c1", role="head", rank=0, text="\x1b[32mok\x1b[0m: 12 tokens/s")
+    assert entry_plain_text(ansi) == "ok: 12 tokens/s"
+
+    # Control rewrites must match Text.from_ansi exactly (guard does not take the
+    # fast path): CR, and the splitlines breaks NEL / U+2028 / U+2029.
+    for sep in ("\r", "\x85", "\u2028", "\u2029"):
+        line = LogLine(host="h1", container="c1", role="head", rank=0, text=f"a{sep}b")
+        assert entry_plain_text(line) == Text.from_ansi(f"a{sep}b").plain
 
 
 def test_render_text_search_highlights():
@@ -1256,6 +1273,90 @@ def test_log_pane_live_stream_end_key_resumes_following_under_load(monkeypatch, 
             assert pane.view_state.state == FollowState.PAUSED
             assert pane.log_view.scroll_y == paused_landed_y
             assert pane.view_state.pending_lines > 0
+
+    asyncio.run(_run())
+
+
+def test_log_pane_cluster_scope_stream_responsive_under_load(monkeypatch):
+    """CLUSTER scope under sustained multi-host streaming keeps keys responsive and follow intact."""
+    import asyncio
+    import time
+
+    sources = [
+        LogSource(host="h1", container="c0", role="node_0", rank=0),
+        LogSource(host="h1", container="c1", role="node_1", rank=1),
+        LogSource(host="h2", container="c2", role="node_2", rank=2),
+        LogSource(host="h2", container="c3", role="node_3", rank=3),
+    ]
+
+    class ClusterStreamingTarget(FakeLogTarget):
+        def __init__(self, stream_rate: int):
+            lines = [
+                LogLine(host=s.host, container=s.container, role=s.role, rank=s.rank, text=f"initial {s.container} {i}")
+                for i in range(200)
+                for s in sources
+            ]
+            super().__init__(sources=sources, lines=lines, windowing_supported=False, runtime="vllm-distributed")
+            self.stream_rate = stream_rate
+
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            yield from super().follow(tail=tail, cancel=cancel)
+            delay = 1.0 / self.stream_rate
+            i = 0
+            while cancel and not cancel.is_set():
+                i += 1
+                s = sources[i % len(sources)]
+                yield LogLine(host=s.host, container=s.container, role=s.role, rank=s.rank, text=f"live {i}")
+                time.sleep(delay)
+
+    target = ClusterStreamingTarget(stream_rate=600)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c0",
+            scope=LogScope.CLUSTER,
+            summary=ScopeSummary(node_containers=2, cluster_containers=4, cluster_hosts=2),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.multi_source and pane.log_view.multi_host
+
+            # Space pauses under load, measured with a bounded poll
+            t0 = time.time()
+            app.simulate_key("space")
+            paused = False
+            for _ in range(150):
+                if pane.view_state.state == FollowState.PAUSED:
+                    paused = True
+                    break
+                await asyncio.sleep(0.002)
+            assert paused, "Space press must register under cluster-scope load"
+            latency = (time.time() - t0) * 1000
+            assert latency < 300, f"Pause latency was {latency:.1f}ms, expected < 300ms"
+
+            # Space resumes following
+            app.simulate_key("space")
+            resumed = False
+            for _ in range(150):
+                if pane.view_state.state == FollowState.FOLLOWING:
+                    resumed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert resumed
+
+            # View stays anchored at the live bottom while lines keep arriving
+            await asyncio.sleep(0.15)
+            assert pane.view_state.state == FollowState.FOLLOWING
+            assert pane.log_view.scroll_y == pane.log_view.max_scroll_y
+
+            # The cluster scope streamed from every source
+            seen = {(e.host, e.container) for e in pane.buffer._entries if isinstance(e, LogLine)}
+            assert seen == {(s.host, s.container) for s in sources}
 
     asyncio.run(_run())
 
@@ -3584,6 +3685,165 @@ def test_log_pane_unthrottled_stream_bounded_deque_and_latency(monkeypatch):
     asyncio.run(_run())
 
 
+def test_log_pane_cluster_scope_unthrottled_burst_bounded(monkeypatch):
+    """CLUSTER scope under unthrottled multi-source streaming: queue bounded, keys register."""
+    import asyncio
+    import time
+
+    sources = [LogSource(host=f"h{1 + i // 4}", container=f"c{i}", role=f"node_{i % 4}", rank=i % 4) for i in range(8)]
+
+    class ClusterUnthrottledTarget(FakeLogTarget):
+        def __init__(self):
+            super().__init__(sources=sources, windowing_supported=False, runtime="vllm-distributed")
+
+        def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
+            i = 0
+            while cancel and not cancel.is_set():
+                i += 1
+                s = sources[i % len(sources)]
+                yield LogLine(host=s.host, container=s.container, role=s.role, rank=s.rank, text=f"unthrottled line {i}")
+
+    target = ClusterUnthrottledTarget()
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(
+            host="h1",
+            cluster_id="cid1",
+            container="c0",
+            scope=LogScope.CLUSTER,
+            summary=ScopeSummary(node_containers=4, cluster_containers=8, cluster_hosts=2),
+        )
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+
+            # Ingress queue must be strictly bounded <= MAX_INCOMING_LINES
+            with pane._incoming_lock:
+                assert len(pane._incoming_lines) <= pane.MAX_INCOMING_LINES
+
+            t0 = time.time()
+            app.simulate_key("space")
+            paused = False
+            for _ in range(150):
+                if pane.view_state.state == FollowState.PAUSED:
+                    paused = True
+                    break
+                await asyncio.sleep(0.002)
+            assert paused, "Space press must register during unthrottled cluster burst"
+            latency = (time.time() - t0) * 1000
+            assert latency < 300, f"Pause latency was {latency:.1f}ms, expected < 300ms"
+
+            app.simulate_key("space")
+            resumed = False
+            for _ in range(150):
+                if pane.view_state.state == FollowState.FOLLOWING:
+                    resumed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert resumed
+
+            app.simulate_key("up")
+            scrolled = False
+            for _ in range(150):
+                if pane.view_state.state == FollowState.SCROLLED:
+                    scrolled = True
+                    break
+                await asyncio.sleep(0.002)
+            assert scrolled, "Up press must decouple during unthrottled cluster burst"
+
+            app.simulate_key("escape")
+            closed = False
+            for _ in range(150):
+                if app.closed:
+                    closed = True
+                    break
+                await asyncio.sleep(0.002)
+            assert closed, "Escape must close pane during unthrottled cluster burst"
+
+            # Queue remains bounded
+            with pane._incoming_lock:
+                assert len(pane._incoming_lines) <= pane.MAX_INCOMING_LINES
+
+    asyncio.run(_run())
+
+
+def test_log_pane_stream_paint_gate(monkeypatch):
+    """Streaming repaints are rate-limited: immediate after idle, one paint per gate window."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            pane.buffer._entries.clear()
+            gen = pane._generation
+            view = pane.log_view
+
+            # 1) Arrival after an idle gap paints immediately (gate clock backdated).
+            view._stream_paint_at = time.monotonic() - 1.0
+            pane._on_line(LogLine(host="h1", container="c1", text="first"), gen=gen, from_follow=True)
+            assert view._stream_paint_armed is False
+            stamped = view._stream_paint_at
+            assert view.virtual_size.height == len(pane.buffer)
+
+            # 2) Arrivals inside the window are deferred: gate armed, no repaint yet.
+            batch = [LogLine(host="h1", container="c1", text=f"burst {i}") for i in range(100)]
+            pane._on_lines(batch, gen=gen, from_follow=True)
+            assert view._stream_paint_armed is True
+            assert view._stream_paint_at == stamped
+            assert view.virtual_size.height == len(pane.buffer) - 100
+
+            # 3) Window elapses: exactly one deferred paint accounts for every line.
+            await asyncio.sleep(0.15)
+            assert view._stream_paint_armed is False
+            assert view._stream_paint_at > stamped
+            assert view.virtual_size.height == len(pane.buffer)
+
+    asyncio.run(_run())
+
+
+def test_log_pane_stream_paint_drops_when_writer_backlogged(monkeypatch):
+    """A saturated writer queue drops the paint (current state only is lost) and retries."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)):
+            await asyncio.sleep(0.05)
+            gen = pane._generation
+            view = pane.log_view
+
+            # Baseline paint works (headless writer depth is 0).
+            view._stream_paint_at = 0.0
+            pane._on_line(LogLine(host="h1", container="c1", text="x"), gen=gen, from_follow=True)
+            assert view.virtual_size.height == len(pane.buffer)
+            assert view._stream_paint_armed is False
+
+            # Saturated queue: the paint is dropped, a retry is armed, geometry stays stale.
+            monkeypatch.setattr(type(view), "_writer_queue_depth", lambda self: 30)
+            view._stream_paint_at = 0.0
+            pane._on_line(LogLine(host="h1", container="c1", text="y"), gen=gen, from_follow=True)
+            assert view._stream_paint_armed is True
+            assert view.virtual_size.height == len(pane.buffer) - 1
+
+            # Queue drains: the armed retry paints the current state.
+            monkeypatch.setattr(type(view), "_writer_queue_depth", lambda self: 0)
+            await asyncio.sleep(0.15)
+            assert view._stream_paint_armed is False
+            assert view.virtual_size.height == len(pane.buffer)
+
+    asyncio.run(_run())
+
+
 def test_log_pane_on_lines_batch_eviction_wrap_correctness(monkeypatch):
     """Batch eviction with bottom eviction > batch size clamps slices and preserves wrap rows."""
     import asyncio
@@ -3727,7 +3987,9 @@ def test_log_pane_short_log_windowing_up_and_home_stay_scrolled(monkeypatch):
         pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
         app = _LogPaneTestApp(pane)
         async with app.run_test(size=(80, 20)) as pilot:
-            await asyncio.sleep(0.05)
+            # Wait past the stream-paint gate (100 ms) so the press lands on a painted
+            # view: the scroll-position guarantee is asserted against painted geometry.
+            await asyncio.sleep(0.15)
             assert pane.view_state.state == FollowState.FOLLOWING
             await pilot.press(key)
             await asyncio.sleep(0.3)

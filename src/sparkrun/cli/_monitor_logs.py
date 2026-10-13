@@ -168,12 +168,22 @@ def format_prefix(line: LogLine, multi_host: bool = False, multi_source: bool = 
     return f"[{'/'.join(parts)}]"
 
 
+#: Text.from_ansi() rewrites these characters as well as ESC sequences: bell and
+#: backspace erase, VT/FF/CR and FS-GS-RS become newlines, and NEL / U+2028 /
+#: U+2029 are str.splitlines() breaks it rejoins as \n. A line matching this
+#: pattern must take the full from_ansi path to stay equivalent.
+_FROM_ANSI_NEEDED_RE = re.compile(r"[\x07\x08\x0b\x0c\r\x1b\x1c-\x1e\x85\u2028\u2029]")
+
+
 def entry_plain_text(entry: LogLine | Marker | str) -> str:
     """Return the plain text of *entry* with ANSI escape sequences stripped, cached per entry."""
     if isinstance(entry, LogLine):
         plain = getattr(entry, "_plain_text", None)
         if plain is None:
-            plain = Text.from_ansi(entry.text).plain
+            text = entry.text
+            # The fast path is the norm for sparkrun's log readers; Text.from_ansi
+            # costs ~27µs/line there vs ~1µs for the passthrough.
+            plain = Text.from_ansi(text).plain if _FROM_ANSI_NEEDED_RE.search(text) else text
             try:
                 object.__setattr__(entry, "_plain_text", plain)
             except Exception:
@@ -212,7 +222,11 @@ def render_text(
             prefix = ""
 
     if color:
-        body = Text.from_ansi(raw_text)
+        # from_ansi re-parses every rendered line; skip it for the plain lines
+        # sparkrun's log readers mostly emit (see _FROM_ANSI_NEEDED_RE).
+        # Text(raw_text).plain == raw_text, which is all the colorizer and dim
+        # logic key on.
+        body = Text.from_ansi(raw_text) if _FROM_ANSI_NEEDED_RE.search(raw_text) else Text(raw_text)
         for start, end, style in colorize_log_spans(body.plain, runtime=runtime):
             body.stylize(style, start, end)
     else:
@@ -804,6 +818,15 @@ class LogView(ScrollView):
     class NearTop(events.Message):
         """Posted when scroll position comes within one page of top of loaded buffer."""
 
+    #: Max repaint rate while streaming (seconds). The gate is a rate limiter,
+    #: not a deferrer: the first paint after an idle gap fires immediately.
+    STREAM_PAINT_INTERVAL: float = 0.1
+
+    #: Textual's WriterThread drains a bounded Queue(30) to the terminal; when it is
+    #: this full the terminal is slower than we emit and a blocking put() would soon
+    #: stall the whole event loop. Drop paints at that depth and retry with headroom.
+    WRITER_QUEUE_SATURATED: int = 24
+
     def __init__(
         self,
         buffer: LogBuffer,
@@ -834,6 +857,9 @@ class LogView(ScrollView):
         #: None falls back to content sniffing (out-of-tree engines).
         self.runtime: str | None = runtime
         self.current_match_entry: int | None = None
+        self._stream_paint_at: float = 0.0
+        self._stream_paint_timer: asyncio.TimerHandle | None = None
+        self._stream_paint_armed: bool = False
 
         self._wrap_map: list[tuple[int, int]] = []
         self._wrap_base: int = 0
@@ -915,6 +941,69 @@ class LogView(ScrollView):
         finally:
             self._programmatic_scroll = False
 
+    def _arm_stream_paint(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._stream_paint_at
+        if elapsed >= self.STREAM_PAINT_INTERVAL:
+            self._stream_paint()
+            return
+        if self._stream_paint_armed:
+            return
+        self._stream_paint_armed = True
+        # A loop-level call_later, not Widget.set_timer: textual delivers set_timer
+        # callbacks through the widget's own message pump (call_next), which an idle
+        # LogView pump may never drain while the pane pump is saturated with flush
+        # messages — the trailing paint would never run.
+        self._stream_paint_timer = asyncio.get_running_loop().call_later(self.STREAM_PAINT_INTERVAL - elapsed, self._on_stream_paint_timer)
+
+    def _on_stream_paint_timer(self) -> None:
+        self._stream_paint_armed = False
+        self._stream_paint_timer = None
+        if self.is_mounted:
+            self._stream_paint()
+
+    def _stream_paint(self, force: bool = False) -> None:
+        if not force and self._writer_queue_depth() >= self.WRITER_QUEUE_SATURATED:
+            # Backpressure: painting now only deepens the writer queue until its
+            # blocking put() stalls the loop for seconds. Drop this paint — the next
+            # one renders current state, nothing is lost but staleness — and retry
+            # once the queue has headroom.
+            if not self._stream_paint_armed:
+                self._stream_paint_armed = True
+                if self._stream_paint_timer is not None:
+                    self._stream_paint_timer.cancel()
+                self._stream_paint_timer = asyncio.get_running_loop().call_later(0.05, self._on_stream_paint_timer)
+            return
+        self._stream_paint_at = time.monotonic()
+        self._stream_paint_armed = False
+        if self._stream_paint_timer is not None:
+            self._stream_paint_timer.cancel()
+            self._stream_paint_timer = None
+        if not self.is_mounted:
+            return
+        self.virtual_size = self._virtual_size_now()
+        self.refresh()
+        self.scroll_to_end()  # no-op unless following
+        parent = self.parent
+        if parent is not None:
+            pf = getattr(parent, "_pf", None)
+            if pf is not None:
+                pf["paints"] += 1
+            if hasattr(parent, "_update_status"):
+                parent._update_status()  # status rides the same gate
+
+    def _writer_queue_depth(self) -> int:
+        if not self.is_mounted:
+            return 0
+        writer = getattr(getattr(self.app._driver, "_writer_thread", None), "_queue", None)
+        return writer.qsize() if writer is not None else 0
+
+    def _virtual_size_now(self) -> Size:
+        content_width = self.scrollable_content_region.width or 80
+        if self.wrap:
+            return Size(content_width, self._wrap_row_count())
+        return Size(max(content_width, self._max_width), len(self.buffer))
+
     def scroll_to_line(self, line_idx: int, animate: bool = False) -> None:
         vy = self.entry_to_virtual_row(line_idx)
         self.scroll_to(y=vy, animate=animate)
@@ -966,7 +1055,7 @@ class LogView(ScrollView):
             )
 
     def on_entries_evicted(self, top_evicted: int = 0, bot_evicted: int = 0) -> None:
-        content_width = self.scrollable_content_region.width or 80
+        following = self.view_state is not None and self.view_state.is_following
         if self.wrap:
             if top_evicted > 0:
                 threshold = self._wrap_base + top_evicted
@@ -975,17 +1064,19 @@ class LogView(ScrollView):
                 self._wrap_origin = idx
                 self._wrap_base += top_evicted
                 self._compact_wrap_map()
-                self.compensate_scroll(-evicted_vrows)
+                if not following:
+                    self.compensate_scroll(-evicted_vrows)
             if bot_evicted > 0:
                 limit = len(self.buffer) + self._wrap_base
                 while self._wrap_map and self._wrap_map[-1][0] >= limit:
                     self._wrap_map.pop()
-            self.virtual_size = Size(content_width, self._wrap_row_count())
+            self._arm_stream_paint()
         else:
-            if top_evicted > 0:
+            # While following, the pending paint re-pins to the bottom anyway; compensating
+            # per batch would only churn scroll state (and repaint frames) for nothing.
+            if top_evicted > 0 and not following:
                 self.compensate_scroll(-top_evicted)
-            self.virtual_size = Size(max(content_width, self._max_width), len(self.buffer))
-        self.refresh()
+            self._arm_stream_paint()
 
     def on_entry_appended(self, entry: LogLine | Marker) -> None:
         self.on_entries_appended([entry])
@@ -1020,17 +1111,16 @@ class LogView(ScrollView):
                     count = max(1, len(split))
                     for sub in range(count):
                         self._wrap_map.append((stored, sub))
-            self.virtual_size = Size(content_width, self._wrap_row_count())
+            self._arm_stream_paint()
         else:
             for entry in entries:
                 plain_len = len(self._rendered_plain_line(entry))
                 if plain_len > self._max_width:
                     self._max_width = plain_len
-            w = max(content_width, self._max_width)
-            self.virtual_size = Size(w, total_len)
-        self.refresh()
+            self._arm_stream_paint()
 
     def refresh_buffer(self) -> None:
+        self._stream_paint_at = time.monotonic()
         content_width = self.scrollable_content_region.width or 80
         if self.wrap:
             wrap_map: list[tuple[int, int]] = []
@@ -1080,6 +1170,10 @@ class LogView(ScrollView):
     USER_SCROLL_WINDOW_S = 2.0
 
     def _notify_user_scroll_up(self) -> None:
+        # A user gesture is a user-driven paint: flush any pending gated paint so the
+        # scrollability decision and the scroll itself use fresh geometry.
+        if self.virtual_size != self._virtual_size_now():
+            self._stream_paint(force=True)
         if self.max_scroll_y <= 0:
             return
         self._user_scroll_until = time.monotonic() + self.USER_SCROLL_WINDOW_S
@@ -1181,6 +1275,15 @@ class LogView(ScrollView):
         super()._on_scroll_to(message)
 
     def render_line(self, y: int) -> Strip:
+        start = time.monotonic()
+        try:
+            return self._render_line_inner(y)
+        finally:
+            pf = getattr(self.parent, "_pf", None)
+            if pf is not None:
+                pf["render_ms"] += (time.monotonic() - start) * 1000.0
+
+    def _render_line_inner(self, y: int) -> Strip:
         scroll_x, scroll_y = self.scroll_offset
         virtual_y = int(scroll_y + y)
         width = self.scrollable_content_region.width or 80
@@ -1263,6 +1366,13 @@ class LogPane(Vertical):
     """Log viewer pane filling the node body below node stats."""
 
     CAP: int = 50_000
+
+    #: When SPARKRUN_MONITOR_PROFILE=1, append per-second streaming stats to
+    #: <cache_dir>/monitor-profile.log; zero cost otherwise.
+    PROFILE: bool = os.environ.get("SPARKRUN_MONITOR_PROFILE") == "1"
+
+    #: With PROFILE, also append a cProfile top-30 to the same log every ~5 s.
+    DUMP: bool = os.environ.get("SPARKRUN_MONITOR_PROFILE_DUMP") == "1"
 
     DEFAULT_CSS = """
     LogPane {
@@ -1378,6 +1488,11 @@ class LogPane(Vertical):
         self._incoming_cv: threading.Condition = threading.Condition(self._incoming_lock)
         self._incoming_lines: deque[tuple[LogLine, int]] = deque()
         self._flush_scheduled: bool = False
+        self._pf: dict[str, float] | None = {"lines": 0.0, "turns": 0.0, "flush_ms": 0.0, "paints": 0.0} if self.PROFILE else None
+        if self._pf is not None:
+            self._pf.update(stall_ms_max=0.0, last_beat=time.monotonic(), render_ms=0.0, depth_max=0.0)
+        self._pf_ticks: int = 0
+        self._profiler: Any = None
 
         self.log_view: LogView = LogView(self.buffer, view_state=self.view_state)
 
@@ -1407,6 +1522,88 @@ class LogPane(Vertical):
         self._update_status()
         self.log_view.focus()
         self._start_follow_worker(self.scope)
+        if self._pf is not None:
+            self.set_interval(1.0, self._profile_tick)
+            # Kick the chain from the loop: is_mounted is still False inside on_mount.
+            asyncio.get_running_loop().call_later(0.02, self._pf_heartbeat)
+
+        if self.PROFILE and self.DUMP:
+            import cProfile
+
+            self._profiler = cProfile.Profile()
+            self._profiler.enable()
+
+    def _profile_tick(self) -> None:
+        pf = self._pf
+        if pf is None:
+            return
+        cache_root = self.cache_dir or "~/.cache/sparkrun"
+        path = os.path.join(os.path.expanduser(cache_root), "monitor-profile.log")
+        writer_q = -1
+        writer = getattr(getattr(self.app._driver, "_writer_thread", None), "_queue", None)
+        if writer is not None:
+            writer_q = writer.qsize()
+        keys = getattr(self.app, "_key_events", -1)
+        keys_total = getattr(self.app, "_key_events_total", -1)
+        key_gap = getattr(self.app, "_key_gap_max", -1.0)
+        if hasattr(self.app, "_key_events"):
+            self.app._key_events = 0
+            self.app._key_gap_max = 0.0
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                if f.tell() == 0:
+                    f.write(
+                        "ts,lines_in,flush_turns,flush_ms_total,paints,stall_ms_max,render_ms,incoming_depth_max,writer_q,keys,key_gap_ms,keys_total\n"
+                    )
+                f.write(
+                    f"{datetime.now().isoformat(timespec='seconds')},{int(pf['lines'])},"
+                    f"{int(pf['turns'])},{pf['flush_ms']:.1f},{int(pf['paints'])},"
+                    f"{pf['stall_ms_max']:.1f},{pf['render_ms']:.1f},{int(pf['depth_max'])},{writer_q},{keys},{key_gap:.0f},{keys_total}\n"
+                )
+        except OSError:
+            logger.debug("Failed writing monitor profile row", exc_info=True)
+        pf["lines"] = pf["turns"] = 0.0
+        pf["flush_ms"] = 0.0
+        pf["paints"] = 0.0
+        pf["stall_ms_max"] = 0.0
+        pf["render_ms"] = 0.0
+        pf["depth_max"] = 0.0
+
+        self._pf_ticks += 1
+        if self._profiler is not None and self._pf_ticks % 5 == 0:
+            self._profile_dump(path)
+
+    def _pf_heartbeat(self) -> None:
+        pf = self._pf
+        if pf is None or not self.is_mounted:
+            return
+        now = time.monotonic()
+        gap = (now - pf["last_beat"]) * 1000.0
+        pf["last_beat"] = now
+        if gap > pf["stall_ms_max"]:
+            pf["stall_ms_max"] = gap
+        asyncio.get_running_loop().call_later(0.02, self._pf_heartbeat)
+
+    def _profile_dump(self, path: str) -> None:
+        import io
+        import pstats
+
+        profiler = self._profiler
+        if profiler is None:
+            return
+        profiler.disable()
+        buf = io.StringIO()
+        try:
+            stats = pstats.Stats(profiler, stream=buf)
+            stats.sort_stats("cumulative").print_stats(30)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"## cProfile top-30 @{datetime.now().isoformat(timespec='seconds')}\n")
+                f.write(buf.getvalue())
+        except OSError:
+            logger.debug("Failed writing monitor profile dump", exc_info=True)
+        finally:
+            profiler.enable()
 
     def _update_title(self) -> None:
         meta = load_job_metadata(self.cluster_id, cache_dir=self.cache_dir) or {}
@@ -1557,10 +1754,16 @@ class LogPane(Vertical):
         if not self.is_mounted or self._cancel.is_set() or gen != self._generation:
             return
 
+        pf = self._pf
+        pf_start = time.monotonic() if pf is not None else 0.0
+        lines_seen = 0
+        turns = 0
         batch_count = 0
         start_time = time.monotonic()
         while self.is_mounted and not self._cancel.is_set() and gen == self._generation:
             with self._incoming_lock:
+                if pf is not None and len(self._incoming_lines) > pf["depth_max"]:
+                    pf["depth_max"] = float(len(self._incoming_lines))
                 batch: list[LogLine] = []
                 while self._incoming_lines and len(batch) < 50:
                     item_line, item_gen = self._incoming_lines.popleft()
@@ -1572,6 +1775,8 @@ class LogPane(Vertical):
                 self._incoming_cv.notify_all()
 
             if batch:
+                lines_seen += len(batch)
+                turns += 1
                 self._on_lines(batch, gen, from_follow=True)
 
             if not has_more:
@@ -1588,6 +1793,11 @@ class LogPane(Vertical):
                 break
 
             await asyncio.sleep(0)
+
+        if pf is not None:
+            pf["lines"] += lines_seen
+            pf["turns"] += turns
+            pf["flush_ms"] += (time.monotonic() - pf_start) * 1000.0
 
     def _on_target_ready(self, target: LogTarget, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():
@@ -1617,7 +1827,10 @@ class LogPane(Vertical):
         appended_entries = self.buffer.append_batch(lines)
         if not appended_entries:
             self.view_state.on_new_line(len(lines))
-            self._update_status()
+            if from_follow:
+                self.log_view._arm_stream_paint()
+            else:
+                self._update_status()
             return
 
         if self.view_state.is_following:
@@ -1638,9 +1851,10 @@ class LogPane(Vertical):
         surviving = appended_entries[start:end]
         if surviving:
             self.log_view.on_entries_appended(surviving)
-        if self.view_state.is_following:
+        if not from_follow and self.view_state.is_following:
             self.log_view.scroll_to_end()
-        self._update_status()
+        if not from_follow:
+            self._update_status()
 
     def _on_stream_ended(self, gen: int) -> None:
         if not self.is_mounted or gen != self._generation or self._cancel.is_set():

@@ -107,7 +107,10 @@ def build_read_window_command(
 
 
 def _spawn(cmd: list[str], *, merge_stderr: bool = True) -> subprocess.Popen:
-    # Background SSH readers must not consume the CLI/TUI's keystrokes.
+    # stdin MUST be /dev/null. Log readers are spawned from the monitor TUI, whose
+    # fd 0 is the terminal; an inherited stdin lets the ssh children of cluster-scope
+    # reads (remote hosts) consume the user's keystrokes. Local readers never read
+    # stdin, but redirecting all of them is uniform and costs nothing.
     return subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
