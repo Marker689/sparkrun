@@ -1,6 +1,7 @@
 """Daemon capacity validation and exception-safe subscription admission."""
 
 import asyncio
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +13,95 @@ from sparkrun.daemon.server import create_app, Subscriptions
 from sparkrun.daemon.auth import TokenStore
 from sparkrun.daemon.jobs import Conflict
 from test_daemon import binding as binding
+
+
+def test_log_stream_forwards_source_filters_without_rewriting_hosts(binding, monkeypatch):
+    from sparkrun.api import LogLine
+
+    _, token = TokenStore(binding).create("reader", scope="read")
+    headers = {"Authorization": "Bearer " + token}
+    reader = Mock(side_effect=lambda **kw: iter([LogLine("user@worker", "workload_node_1", "ready", role="node_1", rank=1)]))
+    monkeypatch.setattr("sparkrun.api.logs", reader)
+    params = {
+        "cluster_id": "workload",
+        "hosts": "head,user@worker",
+        "host": "worker",
+        "container": "workload_node_1",
+        "follow": "false",
+        "tail": "10",
+    }
+    with TestClient(create_app(binding, start_workers=False)) as client:
+        response = client.get("/v1/streams/logs", params=params, headers=headers)
+    assert response.status_code == 200
+    records = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert records[0]["type"] == "log" and records[0]["rank"] == 1
+    args = reader.call_args.kwargs
+    assert args["hosts"] == ["head", "user@worker"]
+    assert (args["host"], args["container"], args["follow"], args["tail"]) == ("worker", "workload_node_1", False, 10)
+
+
+@pytest.mark.parametrize(
+    "query", ["host=", "host=%20", "container=", "container=%20", "scope=workers", "tail=-1", "tail=abc", "follow=yes", "unknown=value"]
+)
+def test_log_stream_rejects_bad_queries_before_opening_reader(binding, monkeypatch, query):
+    _, token = TokenStore(binding).create("reader", scope="read")
+    reader = Mock(side_effect=lambda **kw: iter(()))
+    monkeypatch.setattr("sparkrun.api.logs", reader)
+    with TestClient(create_app(binding, start_workers=False)) as client:
+        response = client.get("/v1/streams/logs?" + query, headers={"Authorization": "Bearer " + token})
+    assert response.status_code == 422, response.text
+    reader.assert_not_called()
+
+
+def test_log_stream_reports_failed_finite_reader(binding, monkeypatch):
+    import sys
+    from sparkrun import api
+    from sparkrun.orchestration import logs
+
+    def target(*args, **kwargs):
+        return api.LogTarget("cid", "sglang", (api.LogSource("h1", "c"),), Mock(), {}, kwargs["cancel"])
+
+    monkeypatch.setattr("sparkrun.api._logs.open_log_target", target)
+    monkeypatch.setattr(logs, "build_read_command", lambda *a, **kw: [sys.executable, "-c", "import sys; sys.exit(7)"])
+    _, token = TokenStore(binding).create("reader", scope="read")
+    with TestClient(create_app(binding, start_workers=False)) as client:
+        response = client.get("/v1/streams/logs?follow=false", headers={"Authorization": "Bearer " + token})
+    assert response.status_code == 200
+    records = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert records[-1]["type"] == "error"
+
+
+def test_closing_daemon_stream_cancels_silent_finite_reader(monkeypatch):
+    import sys
+    import threading
+    from sparkrun import api
+    from sparkrun.daemon.streams import LogStream
+    from sparkrun.orchestration import logs
+
+    def target(*args, **kwargs):
+        return api.LogTarget("cid", "sglang", (api.LogSource("h1", "c"),), Mock(), {}, kwargs["cancel"])
+
+    monkeypatch.setattr("sparkrun.api._logs.open_log_target", target)
+    monkeypatch.setattr(logs, "build_read_command", lambda *a, **kw: [sys.executable, "-c", "import time; time.sleep(60)"])
+    original = logs._spawn
+    started = threading.Event()
+    processes = []
+
+    def spawn(cmd):
+        process = original(cmd)
+        processes.append(process)
+        started.set()
+        return process
+
+    monkeypatch.setattr(logs, "_spawn", spawn)
+    stream = LogStream({"follow": False}, api.default_sctx())
+    try:
+        assert started.wait(5)
+    finally:
+        stream.close()
+    assert stream.done.is_set() and not stream.thread.is_alive()
+    assert stream.error is None
+    assert all(p.poll() is not None for p in processes)
 
 
 @pytest.mark.parametrize("kind", ["logs", "monitor"])

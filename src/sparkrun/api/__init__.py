@@ -18,13 +18,15 @@ party automation, the CLI itself) depend on.  Surfaces:
   :class:`NoResumableState`, :class:`CategoryNotFound`,
   :class:`AmbiguousCategoryError`,
   :class:`FrameworkCategoryMismatch`).
-- **Functions** — ``plan``, ``run``, ``stop``, ``logs``, ``status``,
+- **Functions** — ``plan``, ``run``, ``stop``, ``logs``, ``open_log_target``, ``status``,
   ``schedule``, ``list_jobs``, ``search_recipes``, ``benchmark``, and
   ``resume_benchmark``.
 
 The API never writes to ``stdout`` / ``stderr`` and never calls
-``sys.exit``. Operational failures use :class:`SparkrunError` subclasses;
-pure model/plan validation may raise ValueError or TypeError. Implicit bootstrap
+``sys.exit``. Operational failures generally use :class:`SparkrunError` subclasses;
+log readers also expose standard ``OSError`` / ``subprocess`` read failures
+(see ``docs/LOGGING_API.md``).
+Pure model/plan validation may raise ValueError or TypeError. Implicit bootstrap
 failures are wrapped with their original cause; interrupts propagate. Streaming
 surfaces (``logs``) return iterators of structured records that the CLI renders
 to the TTY.
@@ -89,7 +91,7 @@ from sparkrun.api._errors import (
 from sparkrun.core.context import SparkrunContext
 from sparkrun.api._intent import IntentMatch, find_running_intent
 from sparkrun.api._jobs import list_jobs
-from sparkrun.api._logs import logs
+from sparkrun.api._logs import LogTarget, logs, open_log_target
 from sparkrun.api._materialize import materialize
 from sparkrun.api._models import (
     JobInfo,
@@ -183,6 +185,7 @@ __all__ = [
     "StopAllResult",
     "LogLine",
     "LogSource",
+    "LogTarget",
     "JobInfo",
     "IntentMatch",
     "RecipeSummary",
@@ -230,6 +233,7 @@ __all__ = [
     "stop",
     "stop_all",
     "logs",
+    "open_log_target",
     "schedule",
     "status",
     "status_report",

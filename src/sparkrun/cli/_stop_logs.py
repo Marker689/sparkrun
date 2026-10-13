@@ -18,6 +18,7 @@ from __future__ import annotations
 from sparkrun.core.application_profile import render_identity_text
 
 import sys
+import subprocess
 
 import click
 
@@ -247,7 +248,7 @@ def _stop_all(hosts, hosts_file, cluster_name, config, dry_run, sctx=None):
     "--lines",
     "--tail",
     "lines",
-    type=int,
+    type=click.IntRange(min=0),
     default=None,
     help="Number of log lines to show (default: all). Use with -f to set scrollback before following.",
 )
@@ -349,10 +350,18 @@ def _render_logs(sctx, *, cluster_id=None, recipe=None, hosts, cluster=None, ove
             sctx=sctx,
         )
         multi = scope == SCOPE_ALL and len(hosts) > 1
-        for line in stream:
-            click.echo("[%s/%s] %s" % (line.host, line.role, line.text) if multi else line.text)
+        try:
+            for line in stream:
+                click.echo("[%s/%s] %s" % (line.host, line.role, line.text) if multi else line.text)
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
     except (api.JobNotFound, api.AmbiguousWorkload, api.SparkrunError) as e:
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
     except KeyboardInterrupt:
         click.echo("")  # leave the shell prompt on its own line
+    except subprocess.CalledProcessError as exc:
+        click.echo("Error: Log reader exited with status %s" % exc.returncode, err=True)
+        sys.exit(1)

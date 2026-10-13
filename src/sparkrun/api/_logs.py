@@ -16,20 +16,162 @@ raises here rather than on the first ``next()``); only the reading is lazy.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Iterator
+from dataclasses import dataclass, field
+import math
+import threading
+from typing import TYPE_CHECKING, Generator
 
 from sparkrun.api._errors import JobNotFound, SparkrunError
-from sparkrun.core.log_source import SCOPE_ALL, SCOPE_HEAD, LogLine
+from sparkrun.core.log_source import SCOPE_ALL, SCOPE_HEAD, LogLine, LogSource
 
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
     from sparkrun.core.context import SparkrunContext
     from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.executors._base import Executor
 
 logger = logging.getLogger(__name__)
 
 
+def _nonnegative_int(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("%s must be a non-negative integer" % name)
+
+
+@dataclass(frozen=True)
+class LogTarget:
+    """Resolved workload log sources; obtain one with :func:`open_log_target`.
+
+    Resolution and the liveness precheck happen once. Each read opens fresh
+    reader processes; the target itself owns no running processes and needs no
+    close. Close partially consumed iterators (or set their cancellation event)
+    to release readers. Reopen the target after workload placement changes.
+    """
+
+    cluster_id: str
+    runtime: str
+    sources: tuple[LogSource, ...]
+    _executor: Executor = field(repr=False, compare=False)
+    _ssh_kwargs: dict = field(repr=False, compare=False)
+    _cancel: threading.Event | None = field(default=None, repr=False, compare=False)
+
+    def read(
+        self, *, follow: bool = False, tail: int | None = None, cancel: threading.Event | None = None, check: bool = True
+    ) -> Generator[LogLine, None, None]:
+        """Read lazily, rank-grouped or interleaved in arrival order when following.
+
+        ``tail=None`` reads all available lines; zero starts at the end. Reader
+        failures raise by default; ``check=False`` allows best-effort following.
+        Cancellation ends iteration normally and defaults to the event captured
+        when opening this target. It never stops the workload.
+        """
+        from sparkrun.orchestration.logs import read_log_sources
+
+        if tail is not None:
+            _nonnegative_int("tail", tail)
+        return read_log_sources(
+            self._executor,
+            self.sources,
+            follow=follow,
+            tail=tail,
+            ssh_kwargs=self._ssh_kwargs,
+            cancel=self._cancel if cancel is None else cancel,
+            check=check,
+        )
+
+    def follow(
+        self, *, tail: int | None = 200, cancel: threading.Event | None = None, check: bool = True
+    ) -> Generator[LogLine, None, None]:
+        """Alias for ``read(follow=True, ...)``, initially tailing 200 lines."""
+        return self.read(follow=True, tail=tail, cancel=cancel, check=check)
+
+    def page(
+        self,
+        source: LogSource,
+        *,
+        skip: int,
+        count: int = 500,
+        cancel: threading.Event | None = None,
+        timeout: float = 30.0,
+    ) -> list[LogLine]:
+        """Read up to ``count`` lines preceding the last ``skip`` lines of a source.
+
+        Uses the existing tail primitive and retains at most ``count`` records;
+        transfer grows with ``skip + count``. Offsets are relative to the end at
+        read time, not a snapshot cursor: appends/rotation can shift pages.
+        Reader failures and timeouts raise. Cancellation returns an empty list;
+        check the event before interpreting that as exhausted history.
+        """
+        from sparkrun.orchestration.logs import read_log_sources
+
+        if source not in self.sources:
+            raise ValueError("Log source does not belong to this target")
+        _nonnegative_int("skip", skip)
+        _nonnegative_int("count", count)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Log page timeout must be positive and finite")
+        cancel = self._cancel if cancel is None else cancel
+        if count == 0 or (cancel is not None and cancel.is_set()):
+            return []
+        reader = read_log_sources(
+            self._executor, (source,), tail=skip + count, ssh_kwargs=self._ssh_kwargs, cancel=cancel, check=True, timeout=timeout
+        )
+        page: list[LogLine] = []
+        total = 0
+        try:
+            for line in reader:
+                total += 1
+                if len(page) < count:
+                    page.append(line)
+        finally:
+            reader.close()
+        if cancel is not None and cancel.is_set():
+            return []
+        return page[: max(0, total - skip)]
+
+
 def logs(
+    cluster_id: str | None = None,
+    *,
+    recipe: str | Recipe | None = None,
+    hosts: list[str] | tuple[str, ...] | None = None,
+    overrides: dict | None = None,
+    cluster: str | ClusterDefinition | None = None,
+    scope: str = SCOPE_HEAD,
+    host: str | None = None,
+    container: str | None = None,
+    follow: bool = False,
+    tail: int | None = None,
+    cache_dir: str | None = None,
+    sctx: SparkrunContext | None = None,
+    cancel: threading.Event | None = None,
+    check: bool = True,
+) -> Generator[LogLine, None, None]:
+    """Resolve a workload eagerly and return a lazy iterator of :class:`LogLine`.
+
+    Target arguments and filters follow :func:`open_log_target`. Reading follows
+    :meth:`LogTarget.read`: finite reads are rank-grouped, following interleaves
+    arrival order, ``tail=None`` reads all lines, and failures raise unless
+    ``check=False``. Explicit cancellation overrides the operation's event.
+    """
+    if tail is not None:
+        _nonnegative_int("tail", tail)
+    return open_log_target(
+        cluster_id,
+        recipe=recipe,
+        hosts=hosts,
+        overrides=overrides,
+        cluster=cluster,
+        scope=scope,
+        host=host,
+        container=container,
+        cache_dir=cache_dir,
+        sctx=sctx,
+        cancel=cancel,
+    ).read(follow=follow, tail=tail, check=check)
+
+
+def open_log_target(
     cluster_id: str | None = None,
     *,
     recipe: "str | Recipe | None" = None,
@@ -37,13 +179,13 @@ def logs(
     overrides: dict | None = None,
     cluster: "str | ClusterDefinition | None" = None,
     scope: str = SCOPE_HEAD,
-    follow: bool = False,
-    tail: int | None = None,
+    host: str | None = None,
+    container: str | None = None,
     cache_dir: str | None = None,
     sctx: "SparkrunContext | None" = None,
-    cancel=None,
-) -> Iterator[LogLine]:
-    """Yield :class:`LogLine` records from a running workload.
+    cancel: threading.Event | None = None,
+) -> LogTarget:
+    """Resolve log sources and check liveness without opening log readers.
 
     Either ``cluster_id`` *or* (``recipe`` + a host source) is required.
     When both are given, ``cluster_id`` wins — the same contract as
@@ -65,19 +207,22 @@ def logs(
         cluster: Optional cluster name or definition.
         scope: :data:`SCOPE_HEAD` (default) reads only the primary log;
             :data:`SCOPE_ALL` reads every worker/rank too.
-        follow: Stream new lines as they arrive.  With several sources this
-            interleaves them in arrival (i.e. time) order; without it,
-            sources are read rank-grouped.  See
-            :mod:`sparkrun.orchestration.logs` for the ordering contract.
-        tail: Start this many lines from the end of each source; ``None``
-            reads the whole log.
+        host: Select sources on this host after resolving the full topology.
+            Exact matches win; otherwise ignore hostname case and a ``user@``
+            prefix. An ambiguous normalized host is rejected. This selector
+            never changes the resolved connection user or placement.
+        container: Exact container/source name filter. If either selector is
+            supplied, filter all sources regardless of scope; both selectors
+            intersect. Use these instead of reducing ``hosts`` to one worker.
         cache_dir: Override for the sparkrun cache root.  Defaults to
             the supplied or current application configuration, without plugin bootstrap.
         sctx: Optional shared :class:`SparkrunContext`.
+        cancel: Default cancellation event for subsequent reads; otherwise
+            capture the scoped operation's event. Individual reads may override.
 
     Raises:
         JobNotFound: No hosts can be determined, or no running workload
-            matches the recipe.
+            matches the recipe or source filters.
         AmbiguousWorkload: The recipe matches several running workloads.
         SparkrunError: Neither ``cluster_id`` nor ``recipe`` was given, or
             *scope* is not a valid value.
@@ -92,10 +237,12 @@ def logs(
     )
     from sparkrun.orchestration.executor import resolve_executor
     from sparkrun.orchestration.job_metadata import generate_intent_id, load_job_metadata
-    from sparkrun.orchestration.logs import read_log_sources
 
     if scope not in (SCOPE_HEAD, SCOPE_ALL):
         raise SparkrunError("Invalid log scope %r: expected %r or %r" % (scope, SCOPE_HEAD, SCOPE_ALL))
+    for name, value in (("host", host), ("container", container)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError("%s must be a non-empty string" % name)
 
     from sparkrun.core.config import resolve_configured_cache_dir
 
@@ -104,7 +251,7 @@ def logs(
     resolved_recipe = None
     if not cluster_id:
         if recipe is None:
-            raise SparkrunError("api.logs requires cluster_id or recipe+hosts")
+            raise SparkrunError("Log resolution requires cluster_id or recipe+hosts")
         cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
         prepare_transport(cluster_def)
         resolved_recipe = resolve_recipe(recipe, sctx=sctx)
@@ -166,12 +313,27 @@ def logs(
     cluster_def = bind_job_cluster(cluster_def, executor.resolve_target(dry_run=True), meta)
     sctx, ssh_kwargs = scope_operation(cluster_def, sctx=sctx, prepare=False)
 
+    filtered = host is not None or container is not None
+    effective_scope = SCOPE_ALL if filtered else scope
     sources = runtime.log_sources(
         cluster_id,
         target_hosts,
         is_solo=len(target_hosts) <= 1,
-        scope=scope,
+        scope=effective_scope,
     )
+    if host is not None:
+        exact = [source for source in sources if source.host == host]
+        if exact:
+            sources = exact
+        else:
+            normalized = host.strip().rsplit("@", 1)[-1].lower()
+            sources = [source for source in sources if source.host.strip().rsplit("@", 1)[-1].lower() == normalized]
+            if len({source.host for source in sources}) > 1:
+                raise SparkrunError("Ambiguous log host %r; use the exact host including its user prefix" % host)
+    if container is not None:
+        sources = [source for source in sources if source.container == container]
+    if filtered and not sources:
+        raise JobNotFound("No log sources match host=%r container=%r for workload %s" % (host, container, cluster_id))
 
     # Liveness precheck: check ALL nodes (not just the head log source) —
     # in a multi-node job the head may have crashed while workers are still
@@ -184,7 +346,7 @@ def logs(
     # asks *what is running* and *what became of it*, never *how to look*.
     all_sources = (
         sources
-        if scope == SCOPE_ALL
+        if effective_scope == SCOPE_ALL
         else runtime.log_sources(
             cluster_id,
             target_hosts,
@@ -192,17 +354,12 @@ def logs(
             scope=SCOPE_ALL,
         )
     )
-    _verify_log_source_alive(executor, all_sources, ssh_kwargs, cluster_id, cache_dir, scope=scope)
+    # Explicit selectors check only their sources. Reads never remove metadata
+    # or cache claims, even when all selected containers are confirmed absent.
+    _verify_log_source_alive(executor, all_sources, ssh_kwargs, cluster_id, cache_dir, scope=effective_scope)
 
     cancel = cancel if cancel is not None else getattr(getattr(sctx, "operation", None), "cancel", None)
-    return read_log_sources(
-        executor,
-        sources,
-        follow=follow,
-        tail=tail,
-        ssh_kwargs=ssh_kwargs,
-        **({"cancel": cancel} if cancel is not None else {}),
-    )
+    return LogTarget(cluster_id, runtime.runtime_name, tuple(sources), executor, dict(ssh_kwargs), cancel)
 
 
 def _verify_log_source_alive(
@@ -387,4 +544,4 @@ def _resolve_runtime_for_job(meta: dict | None, cluster_id: str, *, recipe=None,
         raise SparkrunError("Cannot resolve runtime %r for cluster_id %r: %s" % (runtime_name, cluster_id, e)) from e
 
 
-__all__ = ["logs"]
+__all__ = ["LogTarget", "logs", "open_log_target"]

@@ -29,6 +29,7 @@ renders it.  Nothing here imports ``api`` (layering).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import signal
@@ -37,7 +38,7 @@ import threading
 import time
 from typing import Generator, Iterator, Sequence
 
-from sparkrun.core.log_source import LogLine, LogSource
+from sparkrun.core.log_source import LogLine, LogSource, source_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,10 @@ def build_read_command(
 
 
 def _spawn(cmd: list[str]) -> subprocess.Popen:
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+    # Background SSH readers must not consume the CLI/TUI's keystrokes.
+    return subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True
+    )
 
 
 def _line(source: LogSource, text: str, *, timestamp: float | None = None) -> LogLine:
@@ -102,28 +106,75 @@ def _read_one(
     follow: bool,
     tail: int | None,
     ssh_kwargs: dict | None,
+    cancel: threading.Event | None,
+    check: bool,
+    timeout: float | None,
 ) -> Iterator[LogLine]:
     """Yield every line from a single source, then return."""
     cmd = build_read_command(executor, source, follow=follow, tail=tail, ssh_kwargs=ssh_kwargs)
     logger.debug("Reading logs from %s: %s", source.label, " ".join(cmd))
-    yield from read_log_command(cmd, source)
+    yield from read_log_command(cmd, source, cancel=cancel, check=check, timeout=timeout)
 
 
-def read_log_command(cmd: list[str], source: LogSource, *, check: bool = False) -> Iterator[LogLine]:
+def read_log_command(
+    cmd: list[str],
+    source: LogSource,
+    *,
+    check: bool = False,
+    cancel: threading.Event | None = None,
+    timeout: float | None = None,
+) -> Iterator[LogLine]:
     """Read a local argv into structured lines; closing the iterator stops it.
 
     Stderr is merged into the captured stream. Native control-plane plugins
     reuse this reader without routing a local client command through SSH.
     With check=True, a nonzero reader exit raises CalledProcessError.
+    Cancellation ends iteration normally, including while waiting on a silent
+    command. A positive finite timeout bounds the command's wall-clock lifetime
+    and raises TimeoutExpired. Neither cancellation nor timeout stops the workload.
     """
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("Log read timeout must be positive and finite")
+    if cancel is not None and cancel.is_set():
+        return
     proc = _spawn(cmd)
+    finished = threading.Event()
+    expired = threading.Event()
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def watch() -> None:
+        while not finished.wait(0.05):
+            if cancel is not None and cancel.is_set():
+                _terminate(proc)
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                expired.set()
+                _terminate(proc)
+                return
+
+    watcher = None
     try:
+        if cancel is not None or timeout is not None:
+            thread = threading.Thread(target=watch, name="sparkrun-log-watch-%s" % source.label, daemon=True)
+            thread.start()
+            watcher = thread
         assert proc.stdout is not None
         for text in proc.stdout:
+            if expired.is_set() or (cancel is not None and cancel.is_set()):
+                break
             yield _line(source, text)
-        if check and (rc := proc.wait()) != 0:
+        rc = proc.wait()
+        if cancel is not None and cancel.is_set():
+            return
+        if expired.is_set():
+            assert timeout is not None
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        if check and rc != 0:
             raise subprocess.CalledProcessError(rc, cmd)
     finally:
+        finished.set()
+        if watcher is not None:
+            watcher.join()
         _terminate(proc)
         if proc.stdout is not None:
             proc.stdout.close()
@@ -167,17 +218,25 @@ def read_log_sources(
     ssh_kwargs: dict | None = None,
     cancel: threading.Event | None = None,
     check: bool = False,
+    timeout: float | None = None,
 ) -> Generator[LogLine, None, None]:
     """Read sources in arrival order when following, otherwise rank-grouped.
 
-    For live streams, ``cancel`` ends even a silent reader and ``check``
-    propagates reader failures. Neither option changes workload lifetime.
+    In both modes, ``cancel`` ends even a silent reader and ``check`` propagates
+    reader failures. ``timeout`` bounds each non-follow command; following has
+    no deadline and must use cancellation. No option changes workload lifetime.
     """
-    if not sources:
+    if follow and timeout is not None:
+        raise ValueError("Log read timeout is only supported for non-follow reads")
+    if not sources or (cancel is not None and cancel.is_set()):
         return
     if not follow:
-        for source in sources:
-            yield from _read_one(executor, source, follow=False, tail=tail, ssh_kwargs=ssh_kwargs)
+        for source in sorted(sources, key=source_sort_key):
+            if cancel is not None and cancel.is_set():
+                return
+            yield from _read_one(
+                executor, source, follow=False, tail=tail, ssh_kwargs=ssh_kwargs, cancel=cancel, check=check, timeout=timeout
+            )
         return
     yield from _interleave(executor, sources, tail=tail, ssh_kwargs=ssh_kwargs, cancel=cancel, check=check)
 

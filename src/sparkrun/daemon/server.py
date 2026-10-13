@@ -587,7 +587,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
         principal(request)
         if kind not in {"logs", "monitor"}:
             raise LookupError("Unknown stream")
-        from sparkrun.daemon.ops import fields, B, INTEGER
+        from sparkrun.daemon.ops import fields, B, INTEGER, S
         from sparkrun.api._wire import validate, object_schema
 
         arguments: dict[str, Any] = dict(request.query_params)
@@ -604,6 +604,11 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
         schema = fields("cluster_id recipe hosts cluster scope tail" if kind == "logs" else "hosts cluster interval")
         if kind == "logs":
             schema["follow"] = B
+            schema["scope"] = {"type": "string", "enum": ["head", "all"]}
+            for selector in ("host", "container"):
+                schema[selector] = {**S, "minLength": 1}
+                if selector in arguments and not arguments[selector].strip():
+                    raise ValueError("%s must be a non-empty string" % selector)
         else:
             schema["interval"] = {**INTEGER, "minimum": 1, "maximum": 60}
         validate(arguments, object_schema(schema))

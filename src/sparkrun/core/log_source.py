@@ -109,6 +109,12 @@ class LogLine:
     """Rank of the source that produced this line, when known."""
 
 
+def source_sort_key(source: LogSource) -> tuple[float, str, str]:
+    """Deterministic read/display order: primary source, ranks, unranked workers."""
+    rank = source.rank if source.rank is not None else (-1 if source.role in {"head", "solo"} else float("inf"))
+    return rank, source.host, source.container
+
+
 __all__ = [
     "LogLine",
     "LogSource",
@@ -117,4 +123,5 @@ __all__ = [
     "SCOPE_ALL",
     "SCOPE_HEAD",
     "SERVE_LOG_PATH",
+    "source_sort_key",
 ]

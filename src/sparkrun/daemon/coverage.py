@@ -40,6 +40,7 @@ API_OPERATIONS.update(
     }
 )
 EXCLUSIONS = {
+    "open_log_target": "Python reader handle; /v1/streams/logs resolves each request and accepts the same host/container filters.",
     "discover_endpoints": "List-only Python API; use discovery.snapshot for scoped endpoints and observation coverage.",
     "default_sctx": "Python application binding; daemon creates an operation-local context.",
     "resolve_catalog_recipe": "Returns a live Recipe; catalog.recipe exposes a bounded preview and run resolves it server-side.",

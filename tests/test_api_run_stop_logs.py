@@ -475,7 +475,8 @@ def test_logs_removed_container_preserves_metadata(tmp_path):
 
 
 @pytest.mark.parametrize("relaunch", [False, True])
-def test_log_inspection_preserves_pending_launch_claims(tmp_path, relaunch):
+@pytest.mark.parametrize("filtered", [False, True])
+def test_log_inspection_preserves_pending_launch_claims(tmp_path, relaunch, filtered):
     """Reading before container creation, including an ID reuse, cannot finalize."""
     from sparkrun.core.recipe import Recipe
     from sparkrun.orchestration.job_metadata import save_job_metadata, load_job_metadata
@@ -503,7 +504,7 @@ def test_log_inspection_preserves_pending_launch_claims(tmp_path, relaunch):
         patch("sparkrun.models.usage.release_claims") as release,
     ):
         with pytest.raises(api.JobNotFound, match="job metadata has been preserved"):
-            api.logs(cluster_id, hosts=("h1",), cache_dir=str(tmp_path))
+            api.logs(cluster_id, hosts=("h1",), cache_dir=str(tmp_path), **({"host": "h1"} if filtered else {}))
         release.assert_not_called()
     assert load_job_metadata(cluster_id, cache_dir=str(tmp_path))["model_cache_claims"] == claims
 
@@ -570,6 +571,34 @@ def test_logs_precheck_all_sources_proceeds_when_head_dead(tmp_path):
         gen = api.logs(cluster_id, hosts=("h1", "h2"), cache_dir=str(tmp_path), tail=10, scope="all")
         # With --all-sources, worker is alive → proceed (no JobNotFound).
         assert isinstance(gen, Iterator)
+
+
+@pytest.mark.parametrize("selected_alive", [True, False])
+def test_filtered_logs_precheck_only_selected_worker(tmp_path, selected_alive):
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata, load_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "sglang", "model": "test/m"})
+    cid = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cid, recipe, ["h1", "h2"], cache_dir=str(tmp_path))
+    snapshot = _make_status(
+        {
+            "h1": [] if selected_alive else [(cid, [cid + "_node_0"])],
+            "h2": [(cid, [cid + "_node_1"])] if selected_alive else [],
+        }
+    )
+    with (
+        patch.object(DockerExecutor, "query_status", return_value=snapshot) as query,
+        patch.object(DockerExecutor, "describe_terminated", return_value={}),
+    ):
+        if selected_alive:
+            target = api.open_log_target(cid, host="h2", cache_dir=str(tmp_path))
+            assert target.sources[0].rank == 1
+        else:
+            with pytest.raises(api.JobNotFound):
+                api.open_log_target(cid, host="h2", cache_dir=str(tmp_path))
+        assert query.call_args.args[0] == ["h2"]
+    assert load_job_metadata(cid, cache_dir=str(tmp_path)) is not None
 
 
 def test_logs_skips_precheck_on_ssh_failure(tmp_path):

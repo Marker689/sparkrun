@@ -2,6 +2,8 @@
 
 Contributor-facing map of the layers introduced for multiplatform support. Pair
 with `MULTIPLATFORM.md`, `EXECUTORS.md`, and `SECURITY.md` for the deeper dives.
+The shared workload log reader, resolved targets, paging, and daemon filters are
+documented in [LOGGING_API.md](LOGGING_API.md).
 
 ## Layer diagram
 

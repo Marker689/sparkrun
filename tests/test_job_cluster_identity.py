@@ -272,7 +272,7 @@ def test_logs_by_cluster_id_connects_as_the_launching_cluster(tmp_path: Path):
 
     captured: dict = {}
 
-    def _read(executor, sources, follow=False, tail=None, ssh_kwargs=None):
+    def _read(executor, sources, follow=False, tail=None, ssh_kwargs=None, **kwargs):
         captured.update(ssh_kwargs or {})
         return iter(())
 
