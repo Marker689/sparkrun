@@ -119,7 +119,7 @@ first tagged release containing them, regardless of their original commit date.
   authentication and permission metadata, and reject conflicting route paths.
 
 - The cluster monitor now features real-time log tailing for running workloads.
-  Log lines are colorized (toggle) and searchable with optional search-term 
+  Log lines are colorized (toggle) and regex searchable, with optional search-term 
   highlighting. Parallelized workload logs can be combined into a single stream.
 
 - Parallelize builtin manifest-based model copies across hosts and file batches,
