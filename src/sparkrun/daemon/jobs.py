@@ -65,11 +65,14 @@ class JobStore:
 
     @classmethod
     def from_config(cls, directory, config):
+        from sparkrun.utils.data import positive_integer_setting
+
+        limits = {
+            name: positive_integer_setting(config.get("daemon." + name, default), key="daemon." + name, minimum=minimum)
+            for name, default, minimum in (("max_queued_jobs", 128, 1), ("max_events", 4096, 1), ("max_event_bytes", 8 * 1024 * 1024, 1024))
+        }
         return cls(
-            directory,
-            max_queued=int(config.get("daemon.max_queued_jobs", 128)),
-            max_events=int(config.get("daemon.max_events", 4096)),
-            max_event_bytes=int(config.get("daemon.max_event_bytes", 8 * 1024 * 1024)),
+            directory, max_queued=limits["max_queued_jobs"], max_events=limits["max_events"], max_event_bytes=limits["max_event_bytes"]
         )
 
     @contextmanager

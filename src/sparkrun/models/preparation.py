@@ -87,7 +87,15 @@ def _acquire(
     result = None
     if host is not None:
         pull = ModelPullRequest(
-            manifest, host, root, (ModelTarget(host, root, host, files),), operation, config=config, session=io.session, token=lambda: token
+            manifest,
+            host,
+            root,
+            (ModelTarget(host, root, host, files),),
+            operation,
+            config=config,
+            session=io.session,
+            cancelled=io.cancelled,
+            token=lambda: token,
         )
         result = try_model_transfer(pull, pull=True)
     if result is None:
@@ -96,7 +104,7 @@ def _acquire(
             from sparkrun.models.hub import configure_hub_client
 
             configure_hub_client()
-            repair_snapshot_files(request.repo, manifest.revision, root, request.endpoint, token, files)
+            repair_snapshot_files(request.repo, manifest.revision, root, request.endpoint, token, files, cancelled=io.cancelled)
         else:
             run_adapter(io, host, request, root, token=token, manifest=manifest, files=files)
     verified = io.observe(host, manifest, root, checksums=checksums)
@@ -293,7 +301,15 @@ def prepare_model(
                         raise ModelArtifactError("model source changed before fan-out: " + _report_error(source_check))
                     record_use(io, source_host, source_root, manifest, event="distributed")
                     copy = ModelCopyRequest(
-                        manifest, source_host, source_root, tuple(needed), operation, offline=offline, config=config, session=io.session
+                        manifest,
+                        source_host,
+                        source_root,
+                        tuple(needed),
+                        operation,
+                        offline=offline,
+                        config=config,
+                        session=io.session,
+                        cancelled=io.cancelled,
                     )
                     outcome = try_model_transfer(copy)
                     if outcome is None:
@@ -339,7 +355,13 @@ def prepare_model(
                 if not re.fullmatch(r"[0-9a-f]{40}", ref) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ref) and ".." not in ref:
                     # Compatibility with HF loaders and offline pin/inspection
                     # tools. Runtime bindings still use the immutable snapshot.
-                    io.write(host, roots[host] + "/hub/models--" + request.repo.replace("/", "--") + "/refs/" + ref, manifest.revision)
+                    io.publish(
+                        host,
+                        roots[host],
+                        request.repo,
+                        roots[host] + "/hub/models--" + request.repo.replace("/", "--") + "/refs/" + ref,
+                        manifest.revision,
+                    )
             except ModelArtifactError as exc:
                 logger.warning("Model validated, but its HF revision ref could not be persisted: %s", exc)
         # Publish only after every required host passed. No partial binding can
@@ -355,7 +377,7 @@ def _persist_manifest(io, host, root, request, manifest):
     contents = manifest.to_json()
     paths = {manifest_path(root, request), manifest_path(root, replace(request, revision=manifest.revision))}
     for path in sorted(paths):
-        io.write(host, str(path), contents)
+        io.publish(host, root, request.repo, str(path), contents)
 
 
 def validate_preplaced(model: str, hosts, *, model_path=None, ssh_kwargs=None, checksums=False) -> tuple[ValidatedModelBinding, ...]:

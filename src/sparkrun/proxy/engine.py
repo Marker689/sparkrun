@@ -283,6 +283,11 @@ def _model_from_info(row: object) -> ProxyModel:
     return ProxyModel(name, base, length)
 
 
+def _master_key(value: str | None) -> str | None:
+    """LiteLLM-only credential fallback, shared by launch and management."""
+    return value if value is not None else (os.environ.get("LITELLM_MASTER_KEY") or DEFAULT_MASTER_KEY)
+
+
 class ProxyEngine(GatewaySupervisor):
     """Manages the litellm proxy subprocess and its management API.
 
@@ -314,7 +319,7 @@ class ProxyEngine(GatewaySupervisor):
         super().__init__(state_dir)
         self.host = host
         self.port = port
-        self.master_key = master_key
+        self.master_key = _master_key(master_key)
         # Whether the bind host was explicitly configured by the user.  When
         # False and host is the legacy 0.0.0.0 default, start() warns loudly.
         self.host_configured = host_configured
@@ -471,6 +476,12 @@ class ProxyEngine(GatewaySupervisor):
         unable to start the proxy at all, with a wholly unrelated error.
         """
         env = os.environ.copy()
+        # Keep inherited server auth consistent with the key rendered into
+        # config/state. An explicit key wins over the caller's environment.
+        if self.master_key:
+            env["LITELLM_MASTER_KEY"] = self.master_key
+        else:
+            env.pop("LITELLM_MASTER_KEY", None)
         if env.pop("DATABASE_URL", None) is not None:
             logger.debug("Ignoring inherited DATABASE_URL; the proxy runs without a database")
         return env
@@ -760,7 +771,7 @@ class ProxyEngine(GatewaySupervisor):
         if "host" in state:
             self.host = str(state["host"])
         if "master_key" in state:
-            self.master_key = state["master_key"]
+            self.master_key = _master_key(state["master_key"])
 
     def _load_current_config(self) -> dict[str, Any]:
         """Read the litellm config currently on disk ({} when absent)."""
@@ -828,7 +839,8 @@ class ProxyEngine(GatewaySupervisor):
         return endpoints
 
     def _api_request(self, method: str, path: str, payload: dict | None = None) -> dict:
-        """Make an HTTP request to the litellm management API."""
+        """Make an authenticated request using the running LiteLLM identity."""
+        self._adopt_running_identity()
         url = "http://localhost:%d%s" % (self.port, path)
         headers: dict[str, str] = {
             "Content-Type": "application/json",

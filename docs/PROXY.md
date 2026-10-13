@@ -260,6 +260,14 @@ aliases:
   my-model: "Qwen/Qwen3-1.7B"
 ```
 
+For LiteLLM, `LITELLM_MASTER_KEY` supplies the key when no explicit master key is
+configured. The effective key is recorded in the private gateway state alongside
+the listening port. `proxy models` and `proxy status` reuse that running identity,
+so they also work from a new shell without the environment variable. A recorded
+key takes precedence over the current shell's variable; older state without a
+key can use `LITELLM_MASTER_KEY` as a fallback. Authentication stays inside the
+gateway backend; model listing does not require a backend-specific CLI flag.
+
 CLI overrides persist for subsequent invocations. Writers lock and merge changed
 sections so a discovery sweep does not overwrite a concurrent alias or listener
 change. Gateway-specific settings also belong to `proxy.yaml`; see the relevant

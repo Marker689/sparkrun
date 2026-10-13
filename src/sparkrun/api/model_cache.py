@@ -66,7 +66,7 @@ def import_manifest(
             root = io.root(host, cache_dir)
             io.lock(host, root, request.repo)
             reports.append(io.observe(host, manifest, root, checksums=checksums))
-            io.write(host, str(manifest_path(root, request)), manifest.to_json())
+            io.publish(host, root, request.repo, str(manifest_path(root, request)), manifest.to_json())
     return tuple(reports)
 
 

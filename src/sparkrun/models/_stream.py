@@ -9,7 +9,7 @@ from sparkrun.models.artifacts import ModelArtifactError
 from sparkrun.transports.session import HostCommandResult, StreamingHostSession
 
 
-def execute_stream(session, host, script, *, timeout, cancelled, stdout=None):
+def execute_stream(session, host, script, *, timeout, cancelled, stdout=None, stdout_limit: int | None = 16 * 1024**2):
     """Drain both pipes while supervising the process, including stdin delivery.
 
     Only this handle is cancelled; the session may also own publication leases
@@ -29,8 +29,9 @@ def execute_stream(session, host, script, *, timeout, cancelled, stdout=None):
         try:
             while data := stream.read(16384):
                 tail.extend(data)
-                limit = 65536 if callback is not None or stream is process.stderr else 16 * 1024**2
-                del tail[:-limit]
+                limit = 65536 if callback is not None or stream is process.stderr else stdout_limit
+                if limit is not None:
+                    del tail[:-limit]
                 if callback is not None:
                     callback(data)
         except Exception as exc:

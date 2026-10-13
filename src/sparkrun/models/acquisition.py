@@ -13,7 +13,7 @@ from sparkrun.models.manifest import HUB_ADAPTER_VERSION, read_weight_index
 from sparkrun.utils.shell import quote
 
 
-def repair_snapshot_files(repo, revision, cache, endpoint, token, files):
+def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, cancelled=None):
     """Publish only selected snapshot entries; never unlink shared HF blobs.
 
     Hub force_download updates a blob but leaves an existing regular snapshot
@@ -29,6 +29,8 @@ def repair_snapshot_files(repo, revision, cache, endpoint, token, files):
     snapshot = Path(cache) / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / revision
     snapshot.mkdir(parents=True, exist_ok=True)
     for name in files:
+        if cancelled is not None and cancelled():
+            raise RuntimeError("model acquisition cancelled")
         with TemporaryDirectory(prefix=".sparkrun-repair-", dir=snapshot.parent) as staging:
             downloaded = hf_hub_download(
                 repo,
@@ -38,6 +40,8 @@ def repair_snapshot_files(repo, revision, cache, endpoint, token, files):
                 token=token,
                 local_dir=staging,
             )
+            if cancelled is not None and cancelled():
+                raise RuntimeError("model acquisition cancelled")
             target = snapshot / name
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(downloaded, target)

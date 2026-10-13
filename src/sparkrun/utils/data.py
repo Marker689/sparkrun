@@ -63,6 +63,21 @@ def integer_setting(value: object, *, key: str) -> int:
     return _numeric_setting(value, key, int)
 
 
+def positive_integer_setting(value: object, *, key: str, minimum: int = 1) -> int:
+    """Parse a finite integral count without truncation, then enforce its bound."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError
+        number = Decimal(str(value))
+        if not number.is_finite() or number != number.to_integral_value() or number < minimum:
+            raise ValueError
+        return int(number)
+    except (ValueError, InvalidOperation, OverflowError) as error:
+        raise ValueError("Configuration %r must be an integer >= %d" % (key, minimum)) from error
+
+
 def float_setting(value: object, *, key: str) -> float:
     """Convert a numeric scalar; the consumer owns finite/range policy."""
     return _numeric_setting(value, key, float)

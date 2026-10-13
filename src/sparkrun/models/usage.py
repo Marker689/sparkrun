@@ -72,7 +72,7 @@ def activate_workload():
                     if record is None or scope.token not in record["claims"]:
                         raise ModelArtifactError("model cache launch claim disappeared")
                     record["last_launched"] = record["last_used"] = max(record["last_used"], time.time())
-                    io.write(host, usage_path(root, repo, revision), json.dumps(record, sort_keys=True))
+                    io.publish(host, root, repo, usage_path(root, repo, revision), json.dumps(record, sort_keys=True))
 
 
 def workload_claims():
@@ -124,7 +124,7 @@ def record_use(io, host, root, manifest, *, event="prepared", acquired=False):
         record["last_acquired"] = now
     if event == "prepared":
         _claim(record, host, root, manifest.repo, manifest.revision)
-    io.write(host, usage_path(root, manifest.repo, manifest.revision), json.dumps(record, sort_keys=True))
+    io.publish(host, root, manifest.repo, usage_path(root, manifest.repo, manifest.revision), json.dumps(record, sort_keys=True))
 
 
 def _claim(record, host, root, repo, revision):
@@ -165,7 +165,7 @@ def protect_unverified(model, hosts, cache_dir, *, ssh_kwargs=None, revision=Non
                     continue
                 _claim(record, host, root, repo, selected_revision)
                 record["last_used"] = max(record["last_used"], time.time())
-                io.write(host, usage_path(root, repo, selected_revision), json.dumps(record, sort_keys=True))
+                io.publish(host, root, repo, usage_path(root, repo, selected_revision), json.dumps(record, sort_keys=True))
 
 
 def protect_preplaced(path, host, *, ssh_kwargs=None):
@@ -209,4 +209,4 @@ def release_claims(claims, *, hosts=None, ssh_kwargs=None, session=None):
                 del record["claims"][ref["claim"]]
             record["last_released"] = time.time()
             record["last_used"] = max(record["last_used"], record["last_released"])
-            io.write(host, usage_path(root, repo, revision), json.dumps(record, sort_keys=True))
+            io.publish(host, root, repo, usage_path(root, repo, revision), json.dumps(record, sort_keys=True))

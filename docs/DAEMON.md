@@ -363,6 +363,11 @@ changing admission/retention settings.
 | `retained_jobs` | 1000 | Maximum retained terminal jobs |
 | `discovery_interval` | 0 | Opt-in endpoint snapshots; 0 disables, minimum 5 seconds |
 
+Count and byte-limit settings require positive integers (`max_event_bytes` must
+be at least 1024); fractional counts and booleans are rejected at startup.
+Worker/query deadlines and retention durations accept positive finite fractions.
+Limits are normalized at startup.
+
 Results have a 2 MiB cap and individual events a 256 KiB cap. Log subscription
 queues hold 128 lines and emit gaps on overflow. Query caches hold 128 entries
 for at most two seconds and invalidate on config revision/job events. Query

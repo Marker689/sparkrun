@@ -5,12 +5,13 @@ from __future__ import annotations
 from contextlib import ExitStack
 from pathlib import PurePosixPath
 import uuid
+import threading
 
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest
 from sparkrun.models.manifest import STATE_DIRECTORY
+from sparkrun.models._publication import PublicationLease
 from sparkrun.models.observation import observation_script, parse_observations, path_assignment
 from sparkrun.transports.session import HostCommandResult, HostSession, HostSessionError, SshHostSession, StreamingHostSession
-from sparkrun.utils.shell import quote
 
 
 class ModelHostIO:
@@ -22,26 +23,79 @@ class ModelHostIO:
         self._stack = ExitStack()
         self._operation = uuid.uuid4().hex
         self._locks: dict[tuple[str | None, str], str] = {}
+        self._owners: dict[str, PublicationLease] = {}
+        self._mutex = threading.RLock()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
-        self._stack.close()
-        self.local.close()
-        if self.owns_session:
-            self.session.close()
+        try:
+            if exc[0] is None:
+                self.check_leases()
+        finally:
+            try:
+                self._stack.close()
+            finally:
+                self.local.close()
+                if self.owns_session:
+                    self.session.close()
+
+    def check_leases(self):
+        with self._mutex:
+            owners = tuple(self._owners.values())
+        for owner in owners:
+            owner.check()
+
+    def cancelled(self):
+        try:
+            self.check_leases()
+        except ModelArtifactError:
+            return True
+        return False
 
     def execute(self, host: str | None, script: str, *, timeout: float = 30, cancelled=None, stdout=None) -> HostCommandResult:
+        self.check_leases()
         session = self.local if host is None else self.session
+
+        def interrupted():
+            self.check_leases()
+            return cancelled is not None and cancelled()
+
         try:
-            if cancelled is not None:
+            if cancelled is not None or self._owners:
                 from sparkrun.models._stream import execute_stream
 
-                return execute_stream(session, host or "localhost", script, timeout=timeout, cancelled=cancelled, stdout=stdout)
-            return session.execute(host or "localhost", ["bash", "-s"], input_data=script.encode(), timeout=timeout)
+                result = execute_stream(
+                    session,
+                    host or "localhost",
+                    script,
+                    timeout=timeout,
+                    cancelled=interrupted,
+                    stdout=stdout,
+                    # Lease supervision must not truncate previously unbounded
+                    # metadata reads. Bulk copy output retains its existing cap.
+                    stdout_limit=None if cancelled is None and stdout is None else 16 * 1024**2,
+                )
+            else:
+                result = session.execute(host or "localhost", ["bash", "-s"], input_data=script.encode(), timeout=timeout)
+            self.check_leases()
+            return result
         except (HostSessionError, OSError) as exc:
             raise ModelArtifactError("model host session unavailable on " + (host or "control")) from exc
+
+    def publish(self, host: str | None, cache: str, repo: str, path: str, contents: str):
+        """Commit metadata through the process holding this repository's flock.
+
+        Aliases may name the shared mount differently; translate to the owner's
+        root before sending the write. Loss never silently reacquires a lease.
+        """
+        nonce = self.lock(host, cache, repo)
+        owner = self._owners[nonce]
+        relative = PurePosixPath(path).relative_to(cache)
+        if ".." in relative.parts:
+            raise ModelArtifactError("model publication escapes its cache")
+        owner.publish(str(PurePosixPath(owner.root) / relative), contents, check=self.check_leases)
 
     def checked(self, host: str | None, script: str, *, timeout: float = 30) -> str:
         result = self.execute(host, script, timeout=timeout)
@@ -81,18 +135,6 @@ class ModelHostIO:
             raise ModelArtifactError("could not read model manifest on " + (host or "control"))
         return result.stdout.decode()
 
-    def write(self, host: str | None, path: str, contents: str) -> None:
-        # Exclusive temp + atomic publication. stdin remains the script, so the
-        # payload is safely quoted shell data rather than an interpolated heredoc.
-        self.checked(
-            host,
-            "set -eu\n" + path_assignment("p", path) + 'mkdir -p -- "$(dirname -- "$p")"\n'
-            'tmp=$(mktemp "$(dirname -- "$p")/.manifest-XXXXXXXX")\n'
-            "trap 'rm -f -- \"$tmp\"' EXIT\n"
-            f'printf %s {quote(contents)} > "$tmp"\n'
-            'mv -f -- "$tmp" "$p"\n',
-        )
-
     def lock(self, host: str | None, cache: str, repo: str) -> str:
         """One lease per shared repo write domain, held across provider callbacks.
 
@@ -100,27 +142,24 @@ class ModelHostIO:
         another host/mount alias. Never unlink flock files: that would allow
         two writers to lock different inodes under the same pathname.
         """
-        path = str(PurePosixPath(cache) / STATE_DIRECTORY / (repo.replace("/", "--") + ".lock"))
-        key = host, path
-        if key in self._locks:
-            return self._locks[key]
-        existing = self.read(host, path)
-        if existing is not None and existing in self._locks.values():
-            self._locks[key] = existing
-            return existing
-        session = self.local if host is None else self.session
-        if not isinstance(session, StreamingHostSession):
-            raise ModelArtifactError("model publication requires a host session with supervised streaming leases")
-        lease = self._operation + ":" + uuid.uuid4().hex
-        inner = f'printf %s {quote(lease)} > {quote(path)}; printf "LOCKED\\n"; cat >/dev/null'
-        script = "set -eu\nmkdir -p -- %s\nexec flock -w 30 %s bash -c %s\n" % (
-            quote(str(PurePosixPath(path).parent)),
-            quote(path),
-            quote(inner),
-        )
-        process = session.open_process(host or "localhost", ["bash", "-c", script])
-        self._stack.callback(process.close)
-        if process.stdout.readline() != b"LOCKED\n":
-            raise ModelArtifactError("could not acquire model cache publication lease on " + (host or "control"))
-        self._locks[key] = lease
-        return lease
+        with self._mutex:
+            self.check_leases()
+            path = str(PurePosixPath(cache) / STATE_DIRECTORY / (repo.replace("/", "--") + ".lock"))
+            key = host, path
+            if key in self._locks:
+                return self._locks[key]
+            existing = self.read(host, path)
+            if existing is not None and existing in self._owners:
+                self.check_leases()
+                self._locks[key] = existing
+                return existing
+            session = self.local if host is None else self.session
+            if not isinstance(session, StreamingHostSession):
+                raise ModelArtifactError("model publication requires a host session with supervised streaming leases")
+            nonce = self._operation + ":" + uuid.uuid4().hex
+            owner = PublicationLease(session, host, cache, path, nonce)
+            self._stack.callback(owner.process.close)
+            self._owners[nonce] = owner
+            self._locks[key] = nonce
+            self.check_leases()
+            return nonce

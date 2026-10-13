@@ -130,6 +130,45 @@ class Boundary:
         return await self.app(scope, receive, send)
 
 
+class Subscriptions:
+    """Reserve before producer setup and release after the complete ASGI lifetime."""
+
+    def __init__(self, maximum):
+        self.maximum = maximum
+        self.active = set()
+
+    def response(self, factory, **kwargs):
+        if len(self.active) >= self.maximum:
+            raise Conflict("Subscriber limit reached")
+        marker = object()
+        self.active.add(marker)
+        try:
+            return SubscriptionResponse(factory(), release=lambda: self.active.discard(marker), **kwargs)
+        except BaseException:
+            self.active.discard(marker)
+            raise
+
+
+class SubscriptionResponse(StreamingResponse):
+    def __init__(self, content, *, release, **kwargs):
+        super().__init__(content, media_type="text/event-stream", **kwargs)
+        self.release = release
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                # A disconnect/send failure can precede the first iteration or
+                # leave the generator suspended at a yield. Always close it.
+                with anyio.CancelScope(shield=True):
+                    close = getattr(self.body_iterator, "aclose", None)
+                    if close is not None:
+                        await close()
+            finally:
+                self.release()
+
+
 def create_app(binding=None, *, worker_supervisor="process", start_workers=True, allow_request_trust=None):
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.daemon.streams import MonitorHub
@@ -138,32 +177,36 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     config = SparkrunConfig(binding.config_path)
     import math
 
-    for name, default in {
-        "max_jobs": 4,
-        "max_services": 2,
-        "cancel_grace": 15,
-        "worker_start_timeout": 60,
-        "max_streams": 64,
-        "max_query_threads": 8,
-        "max_queued_queries": 32,
-        "query_timeout": 30,
-        "max_body_bytes": 1024 * 1024,
-        "job_retention_days": 7,
-        "retained_jobs": 1000,
-    }.items():
-        value = float(config.get("daemon." + name, default))
+    from sparkrun.utils.data import positive_integer_setting, float_setting
+
+    counts = {
+        name: positive_integer_setting(config.get("daemon." + name, default), key="daemon." + name)
+        for name, default in {
+            "max_jobs": 4,
+            "max_services": 2,
+            "max_streams": 64,
+            "max_query_threads": 8,
+            "max_queued_queries": 32,
+            "max_body_bytes": 1024 * 1024,
+            "retained_jobs": 1000,
+        }.items()
+    }
+    durations = {}
+    for name, default in {"cancel_grace": 15, "worker_start_timeout": 60, "query_timeout": 30, "job_retention_days": 7}.items():
+        value = float_setting(config.get("daemon." + name, default), key="daemon." + name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"daemon.{name} must be positive and finite")
+        durations[name] = value
     tokens = TokenStore(binding)
     store = JobStore.from_config(binding.directory, config)
     coordinator = Coordinator(
         binding,
         store,
         systemd=worker_supervisor == "systemd",
-        max_active=int(config.get("daemon.max_jobs", 4)),
-        max_services=int(config.get("daemon.max_services", 2)),
-        cancel_grace=float(config.get("daemon.cancel_grace", 15)),
-        start_timeout=float(config.get("daemon.worker_start_timeout", 60)),
+        max_active=counts["max_jobs"],
+        max_services=counts["max_services"],
+        cancel_grace=durations["cancel_grace"],
+        start_timeout=durations["worker_start_timeout"],
     )
     hub = MonitorHub()
     from sparkrun.daemon.services import Services, QueryCache
@@ -171,9 +214,8 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     services = Services(store)
     cache = QueryCache()
     stop = asyncio.Event()
-    active_streams = set()
-    max_streams = int(config.get("daemon.max_streams", 64))
-    query_limit = anyio.CapacityLimiter(int(config.get("daemon.max_query_threads", 8)))
+    subscriptions = Subscriptions(counts["max_streams"])
+    query_limit = anyio.CapacityLimiter(counts["max_query_threads"])
     query_admitted = 0
 
     @asynccontextmanager
@@ -207,8 +249,8 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                         if time.monotonic() - last_prune > 60:
                             await asyncio.to_thread(
                                 store.prune,
-                                age=float(config.get("daemon.job_retention_days", 7)) * 86400,
-                                count=int(config.get("daemon.retained_jobs", 1000)),
+                                age=durations["job_retention_days"] * 86400,
+                                count=counts["retained_jobs"],
                             )
                             last_prune = time.monotonic()
                     except Exception:
@@ -230,7 +272,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     app.state.store, app.state.coordinator, app.state.binding = store, coordinator, binding
     app.state.stop = stop
     app.state.operation_paths = {}
-    app.add_middleware(Boundary, tokens=tokens, body_limit=int(config.get("daemon.max_body_bytes", 1024 * 1024)))
+    app.add_middleware(Boundary, tokens=tokens, body_limit=counts["max_body_bytes"])
 
     @app.exception_handler(Exception)
     async def failure(request, exc):
@@ -373,7 +415,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                 coordinator.maintenance = True
                 raise Conflict(str(exc)) from exc
             return JSONResponse({"job_id": identifier, "events_url": f"/v1/jobs/{identifier}/events"}, status_code=202)
-        if query_admitted >= int(current.get("daemon.max_queued_queries", 32)):
+        if query_admitted >= counts["max_queued_queries"]:
             raise Conflict("Query admission limit reached")
         cache_key = (
             op.name,
@@ -391,9 +433,7 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             from sparkrun.application import initialize
 
             sctx = initialize(config_path=binding.config_path)
-            state = OperationState(
-                deadline=time.monotonic() + float(current.get("daemon.query_timeout", 30)), via_daemon=True, manager=user.manager
-            )
+            state = OperationState(deadline=time.monotonic() + durations["query_timeout"], via_daemon=True, manager=user.manager)
             with operation_scope(sctx, state=state):
                 result = check_result(op, op.handler_loader()(arguments, sctx, None))
                 state.check()
@@ -507,62 +547,46 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
         if after < 0:
             raise ValueError("Invalid event cursor")
         store.events(identifier, after)  # Return 410 before stream headers on expired cursors.
-        if len(active_streams) >= max_streams:
-            raise Conflict("Subscriber limit reached")
-        marker = object()
-        active_streams.add(marker)
 
         async def produce():
             nonlocal after
-            try:
-                while not stop.is_set() and not await request.is_disconnected():
-                    job_access(request, identifier)
-                    try:
-                        batch = await asyncio.to_thread(store.events, identifier, after)
-                    except ReplayGap as exc:
-                        yield sse({"type": "gap", "detail": str(exc)})
-                        return
-                    for event in batch:
-                        after = event["id"]
-                        yield sse(event)
-                    job = store.get(identifier)
-                    if job["state"] in TERMINAL and after >= job["seq"]:
-                        return
-                    if not batch:
-                        yield ": heartbeat\n\n"
-                        await asyncio.sleep(1)
-            finally:
-                active_streams.discard(marker)
+            while not stop.is_set() and not await request.is_disconnected():
+                job_access(request, identifier)
+                try:
+                    batch = await asyncio.to_thread(store.events, identifier, after)
+                except ReplayGap as exc:
+                    yield sse({"type": "gap", "detail": str(exc)})
+                    return
+                for event in batch:
+                    after = event["id"]
+                    yield sse(event)
+                job = store.get(identifier)
+                if job["state"] in TERMINAL and after >= job["seq"]:
+                    return
+                if not batch:
+                    yield ": heartbeat\n\n"
+                    await asyncio.sleep(1)
 
-        return StreamingResponse(produce(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+        return subscriptions.response(produce, headers={"Cache-Control": "no-cache"})
 
     @app.get("/v1/events")
     async def global_events(request: Request):
         user = principal(request)
-        if len(active_streams) >= max_streams:
-            raise Conflict("Subscriber limit reached")
-        marker = object()
-        active_streams.add(marker)
 
         async def produce():
-            try:
-                while not stop.is_set() and not await request.is_disconnected():
-                    principal(request)
-                    rows = store.list(principal=None if user.local or user.scope == "admin" else user.id)
-                    yield sse({"type": "snapshot", "jobs": [public_job(j) for j in rows if user.allows(j["scope"])]})
-                    await asyncio.sleep(2)
-            finally:
-                active_streams.discard(marker)
+            while not stop.is_set() and not await request.is_disconnected():
+                principal(request)
+                rows = store.list(principal=None if user.local or user.scope == "admin" else user.id)
+                yield sse({"type": "snapshot", "jobs": [public_job(j) for j in rows if user.allows(j["scope"])]})
+                await asyncio.sleep(2)
 
-        return StreamingResponse(produce(), media_type="text/event-stream")
+        return subscriptions.response(produce)
 
     @app.get("/v1/streams/{kind}")
     async def stream(kind: str, request: Request):
         principal(request)
         if kind not in {"logs", "monitor"}:
             raise LookupError("Unknown stream")
-        if len(active_streams) >= max_streams:
-            raise Conflict("Subscriber limit reached")
         from sparkrun.daemon.ops import fields, B, INTEGER
         from sparkrun.api._wire import validate, object_schema
 
@@ -583,51 +607,52 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
         else:
             schema["interval"] = {**INTEGER, "minimum": 1, "maximum": 60}
         validate(arguments, object_schema(schema))
-        marker = object()
-        active_streams.add(marker)
-        from sparkrun.application import initialize
 
-        sctx = initialize(config_path=binding.config_path)
-        sctx.operation = OperationState(via_daemon=True)
+        def open_stream():
+            from sparkrun.application import initialize
 
-        async def produce():
-            resource: Any = None
-            try:
-                if kind == "logs":
-                    from sparkrun.daemon.streams import LogStream
+            sctx = initialize(config_path=binding.config_path)
+            sctx.operation = OperationState(via_daemon=True)
 
-                    resource = LogStream(arguments, sctx)
-                    while not stop.is_set() and not await request.is_disconnected():
-                        principal(request)
-                        if resource.dropped:
-                            count = resource.dropped
-                            resource.dropped = 0
-                            yield sse({"type": "gap", "dropped": count})
-                        try:
-                            yield sse(resource.queue.get_nowait())
-                        except queue.Empty:
-                            if resource.done.is_set():
-                                if resource.error:
-                                    yield sse({"type": "error", **resource.error})
-                                return
-                            yield ": heartbeat\n\n"
-                            await asyncio.sleep(1)
-                else:
-                    resource = hub.subscribe(arguments, sctx)
-                    frame = await run_sync(resource.__enter__, limiter=query_limit)
-                    while not stop.is_set() and not await request.is_disconnected():
-                        principal(request)
-                        yield sse(frame())
-                        await asyncio.sleep(arguments.get("interval", 2))
-            finally:
-                if resource is not None:
+            async def produce():
+                resource: Any = None
+                try:
                     if kind == "logs":
-                        await asyncio.to_thread(resource.close)
-                    else:
-                        await asyncio.to_thread(resource.__exit__, None, None, None)
-                active_streams.discard(marker)
+                        from sparkrun.daemon.streams import LogStream
 
-        return StreamingResponse(produce(), media_type="text/event-stream")
+                        resource = LogStream(arguments, sctx)
+                        while not stop.is_set() and not await request.is_disconnected():
+                            principal(request)
+                            if resource.dropped:
+                                count = resource.dropped
+                                resource.dropped = 0
+                                yield sse({"type": "gap", "dropped": count})
+                            try:
+                                yield sse(resource.queue.get_nowait())
+                            except queue.Empty:
+                                if resource.done.is_set():
+                                    if resource.error:
+                                        yield sse({"type": "error", **resource.error})
+                                    return
+                                yield ": heartbeat\n\n"
+                                await asyncio.sleep(1)
+                    else:
+                        resource = hub.subscribe(arguments, sctx)
+                        frame = await run_sync(resource.__enter__, limiter=query_limit)
+                        while not stop.is_set() and not await request.is_disconnected():
+                            principal(request)
+                            yield sse(frame())
+                            await asyncio.sleep(arguments.get("interval", 2))
+                finally:
+                    if resource is not None:
+                        if kind == "logs":
+                            await asyncio.to_thread(resource.close)
+                        else:
+                            await asyncio.to_thread(resource.__exit__, None, None, None)
+
+            return produce()
+
+        return subscriptions.response(open_stream)
 
     original_openapi = app.openapi
 

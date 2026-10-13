@@ -331,7 +331,14 @@ on equal sizes when a checksum repair has identified corruption.
 
 Core holds per-cache/repository `flock` leases across acquisition and provider
 calls. An operation nonce recognizes leases reached through shared-cache aliases;
-complete aliases are omitted from transfer after observation. External downloaders
+complete aliases are omitted from transfer after observation. Core monitors the
+holder processes and treats lease loss as terminal: streaming commands are
+cancelled and providers receive cancellation through their request. Local Hub
+downloads check cancellation between files and before publishing a staged file.
+Manifest, usage/claim and revision-ref writes run through the holder, inheriting
+its actual lock until each write finishes; a dead holder cannot authorize new
+publication. Borrowed transport sessions remain open for their other callers.
+External downloaders
 and garbage collectors do not participate in these leases. A final observation is
 still required, and no receipt promises protection against later external changes.
 
