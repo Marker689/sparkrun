@@ -352,7 +352,8 @@ class TestRequiredFeatureGuard:
 
     def test_builtin_executor_flags_present(self):
         names = {f.name for f in all_features()}
-        assert {"executor.local", "integration.k8s"} <= names
+        assert {"executor.local", "gateway"} <= names
+        assert "integration.k8s" not in names  # Legacy loading aliases live in plugin controls.
 
 
 class TestCliTuneFlag:
@@ -428,12 +429,11 @@ class TestFeatureListSetupSteps:
         assert "--all" not in result.output
 
     def test_omitted_steps_still_accept_overrides(self, tmp_path, monkeypatch):
-        from types import SimpleNamespace
         from click.testing import CliRunner
         from sparkrun.cli._setup import _commands
 
         config = SparkrunConfig(tmp_path / "config.yaml")
-        monkeypatch.setattr(_commands, "_get_context", lambda ctx: SimpleNamespace(config=config))
+        monkeypatch.setattr("sparkrun.cli._plugins.management_config", lambda ctx: config)
         runner = CliRunner()
         for command, expected in (
             (_commands.setup_features_disable, False),

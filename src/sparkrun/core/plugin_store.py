@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 import hashlib
 import json
@@ -125,6 +125,10 @@ class PluginStore:
             for field in ("before_config", "after_config", "before_ledger", "after_ledger"):
                 if field not in data or (data[field] is not None and not isinstance(data[field], str)):
                     raise PluginError("Invalid transaction snapshots; preserve the journal for recovery")
+            if "before_proxy" in data or "after_proxy" in data:
+                for key in ("before_proxy", "after_proxy"):
+                    if key not in data or (data[key] is not None and not isinstance(data[key], str)):
+                        raise PluginError("Invalid proxy transaction snapshot")
             owned = data.get("owned_generations", [])
             if not isinstance(owned, list):
                 raise PluginError("Invalid transaction ownership records")
@@ -246,7 +250,18 @@ class PluginStore:
                 shutil.rmtree(staging)
             raise
 
-    def commit(self, records: dict[str, dict], config: SparkrunConfig, baseline: tuple[str | None, str | None]) -> str | None:
+    def read_proxy(self):
+        return _read(self.root / "proxy.yaml")
+
+    def commit(
+        self,
+        records: dict[str, dict],
+        config: SparkrunConfig,
+        baseline: tuple[str | None, str | None],
+        *,
+        proxy_updates=None,
+        proxy_baseline=None,
+    ) -> str | None:
         """Commit activation, then prune. Return an honest cleanup-pending warning."""
         limit = retention(config)
         self.history_pruned = any(len(record["previous_generations"]) >= limit for record in records.values())
@@ -258,9 +273,23 @@ class PluginStore:
         if yaml.safe_load(before_config or "{}") == config._data:
             after_config = before_config
         after_ledger = _yaml({"schema_version": SCHEMA_VERSION, "plugins": records})
-        with file_lock(self.lock):
+        if (yaml.safe_load(before_ledger or "{}") or {}).get("plugins", {}) == records:
+            after_ledger = before_ledger
+        from sparkrun.proxy.config import ProxyConfig
+
+        proxy_config = ProxyConfig(self.root / "proxy.yaml")
+        with file_lock(self.lock), proxy_config._write_lock():
             if (_read(self.config_path), _read(self.ledger)) != baseline:
                 raise PluginError("Plugin/config state changed during validation; retry the operation")
+            proxy_snapshots = {}
+            if proxy_updates:
+                if self.read_proxy() != proxy_baseline:
+                    raise PluginError("Proxy configuration changed during validation; retry the operation")
+                proxy_data = yaml.safe_load(proxy_baseline or "{}") or {}
+                if not isinstance(proxy_data, dict) or not isinstance(proxy_data.get("proxy", {}), dict):
+                    raise PluginError("Proxy configuration must contain mappings")
+                proxy_data.setdefault("proxy", {}).update(proxy_updates)
+                proxy_snapshots = {"before_proxy": proxy_baseline, "after_proxy": _yaml(proxy_data)}
             before_records = (yaml.safe_load(before_ledger or "{}") or {}).get("plugins", {})
             owned = [
                 [name, identifier]
@@ -271,6 +300,7 @@ class PluginStore:
 
             assert_generations_available(self.root, records)
             journal = {
+                **proxy_snapshots,
                 "owned_generations": owned,
                 "schema_version": 1,
                 "config_path": str(self.config_path),
@@ -284,10 +314,12 @@ class PluginStore:
             try:
                 self._restore(self.config_path, after_config)
                 self._restore(self.ledger, after_ledger)
+                if proxy_snapshots:
+                    self._restore(self.root / "proxy.yaml", proxy_snapshots["after_proxy"])
                 journal["state"] = "committed"
                 atomic_private_write(self.journal, _yaml(journal))
             except BaseException:
-                self._recover()
+                self._recover(proxy_locked=True)
                 raise
             try:
                 self._prune(records, owned=owned)
@@ -303,17 +335,28 @@ class PluginStore:
         else:
             atomic_private_write(path, content)
 
-    def _recover(self):
+    def _recover(self, *, proxy_locked=False):
+        from sparkrun.proxy.config import ProxyConfig
+
+        with nullcontext() if proxy_locked else ProxyConfig(self.root / "proxy.yaml")._write_lock():
+            self._recover_locked()
+
+    def _recover_locked(self):
         pending = self._journal()
         if pending is None:
             return
         if pending["state"] == "prepared":
             # Manual edits outside our lock must never be overwritten by recovery.
-            for path, field in ((self.config_path, "config"), (self.ledger, "ledger")):
+            paths = [(self.config_path, "config"), (self.ledger, "ledger")]
+            if "before_proxy" in pending:
+                paths.append((self.root / "proxy.yaml", "proxy"))
+            for path, field in paths:
                 if _read(path) not in (pending["before_" + field], pending["after_" + field]):
                     raise PluginError("Plugin recovery found outside edits in %s; reconcile the journal before retrying" % path)
             self._restore(self.config_path, pending["before_config"])
             self._restore(self.ledger, pending["before_ledger"])
+            if "before_proxy" in pending:
+                self._restore(self.root / "proxy.yaml", pending["before_proxy"])
         self._prune(self._records(), owned=pending.get("owned_generations", []))
         self._clean_staging()
         self.journal.unlink()

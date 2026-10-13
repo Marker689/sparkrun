@@ -13,7 +13,7 @@ class TestBuildLitellmConfigMasterKey:
 
     def test_master_key_set_emits_general_settings(self):
         """With master_key='secret', config has general_settings.master_key='secret'."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         config = build_litellm_config([], master_key="secret")
 
@@ -22,7 +22,7 @@ class TestBuildLitellmConfigMasterKey:
 
     def test_master_key_set_no_database_keys(self):
         """With master_key, config has NO database_url / store_model_in_db keys."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         config = build_litellm_config([], master_key="secret")
 
@@ -35,7 +35,7 @@ class TestBuildLitellmConfigMasterKey:
 
     def test_master_key_none_no_general_settings(self):
         """With master_key=None, config has no general_settings.master_key."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         config = build_litellm_config([], master_key=None)
 
@@ -58,7 +58,7 @@ class TestStartupEnvironmentNoDatabaseUrl:
         master_key: str | None,
     ):
         """Invoke ProxyEngine.start() and capture the env passed to Popen."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         captured_envs: list[dict] = []
 
@@ -82,8 +82,8 @@ class TestStartupEnvironmentNoDatabaseUrl:
         config_path.write_text("model_list: []\n")
 
         with (
-            patch("sparkrun.proxy.engine.shutil.which", return_value="/usr/bin/uvx"),
-            patch("sparkrun.proxy.engine.subprocess.Popen", side_effect=fake_popen),
+            patch("sparkrun.plugins.litellm.engine.shutil.which", return_value="/usr/bin/uvx"),
+            patch("sparkrun.plugins.litellm.engine.subprocess.Popen", side_effect=fake_popen),
             patch("time.sleep", lambda *_a, **_k: None),
         ):
             rc = engine.start(config_path=config_path, foreground=False)
@@ -132,14 +132,14 @@ class TestUiSupportRemoved:
 
     def test_engine_rejects_enable_ui_kwarg(self, state_dir: Path):
         """ProxyEngine must not silently accept a UI request it cannot honour."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         with pytest.raises(TypeError):
             ProxyEngine(state_dir=state_dir, master_key="secret", enable_ui=True)
 
     def test_build_env_has_no_ui_or_db_vars(self, state_dir: Path):
         """_build_env never injects DB/UI vars — that is what broke startup."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         env = ProxyEngine(host="127.0.0.1", port=14123, master_key="secret", state_dir=state_dir)._build_env()
 
@@ -166,7 +166,7 @@ class TestConfigNeverEmitsDbKeys:
 
     def test_master_key_emitted(self):
         """LiteLLM config YAML carries general_settings.master_key."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         config = build_litellm_config([], master_key="secret")
         assert config["general_settings"]["master_key"] == "secret"
@@ -177,10 +177,15 @@ class TestConfigNeverEmitsDbKeys:
         It would make litellm require a DB-backed model store, which needs
         PostgreSQL plus a generated prisma client.
         """
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         for mk in (None, "secret"):
             config = build_litellm_config([], master_key=mk)
             assert "store_model_in_db" not in config
             assert "store_model_in_db" not in config.get("general_settings", {})
             assert "store_model_in_db" not in config.get("litellm_settings", {})
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

@@ -58,6 +58,10 @@ def init_sparkrun(v: Variables | None = None, log_level: str = "WARNING", *, pro
     # initialization shares that same binding and cannot replace it.
     config_module._bind_config_path(config_path)
 
+    from sparkrun.core.plugin_store import PluginStore
+
+    PluginStore(config if config is not None else config_module.SparkrunConfig(config_path)).snapshot()
+
     if _variables is not None:
         if v is not None and v is not _variables:
             raise RuntimeError("Application is already initialized; Variables can only be supplied on first initialization")

@@ -96,6 +96,8 @@ def _discover_installed_plugins(config=None) -> tuple[list[InstalledIntegration]
     overrides = config.get("integrations", {})
     if not isinstance(overrides, dict) or any(type(value) is not bool for value in overrides.values()):
         raise ValueError("integrations must map stable integration IDs to true or false")
+    from sparkrun.core.plugin_policy import plugin_state
+
     selected = set(profile.integrations) | set(profile.required_integrations)
     selected.update(name for name, enabled in overrides.items() if enabled)
     selected.difference_update(name for name, enabled in overrides.items() if not enabled)
@@ -107,8 +109,8 @@ def _discover_installed_plugins(config=None) -> tuple[list[InstalledIntegration]
     for ep in sorted(entry_points(group=ENTRY_POINT_GROUP), key=lambda e: (e.name, e.value, getattr(e.dist, "name", "") or "")):
         package = ep.dist.name if ep.dist else None
         version = ep.dist.version if ep.dist else None
-        chosen = ep.name in selected and not disabled
-        source = "config" if ep.name in overrides else "distribution" if ep.name in selected else "unset"
+        state = plugin_state(ep.name, config, source="installed")
+        chosen, source = state.enabled, state.source
         row = InstalledIntegration(ep.name, ep.value, package, version, chosen, source, ep.name in profile.required_integrations)
         previous = next((p for p in out if p.name == ep.name), None)
         if previous is not None:
@@ -194,12 +196,19 @@ def installed_plugin_identities(rows):
     for index, row in enumerate(rows):
         # Discovery already diagnoses exact entry-point duplicates. Include
         # their claims too so they fail before any selected provider imports.
-        if not row.selected or not row.module:
+        if not row.module:
             continue
         source = ("installed", row.name, row.package)
         module = row.module.split(":")[0]
         try:
-            identities[index] = discovered_identity(row.name, module, source, origin=physical_origin(module), match_name=True)
+            from sparkrun.core.features import declare_plugin_features
+            from sparkrun.core.plugin_manifest import read_declarations
+
+            origin = physical_origin(module)
+            identity = discovered_identity(row.name, module, source, origin=origin, match_name=True)
+            declare_plugin_features(identity, read_declarations(origin, module))
+            if row.selected:
+                identities[index] = identity
         except (ValueError, OSError) as exc:
             record_plugin_load_failure(source, exc)
     return identities

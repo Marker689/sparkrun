@@ -24,7 +24,7 @@ def plugin_errors(function):
     def call(*args, **kwargs):
         try:
             return function(*args, **kwargs)
-        except (PluginError, OSError) as exc:
+        except (ValueError, OSError) as exc:
             raise click.ClickException(str(exc)) from exc
 
     return call
@@ -43,8 +43,8 @@ def _trust(details):
         click.echo("The manifest declares a different repository; trust applies only to this supplied source.")
     if details["enable_external"]:
         click.echo("This will enable core.external_plugins.")
-    if details["enable_feature"]:
-        click.echo("This will enable %s." % details["enable_feature"])
+    if details.get("enable_plugin"):
+        click.echo("This will enable plugin %s; capability settings are preserved." % details["enable_plugin"])
     click.echo("Plugin code runs with your permissions. Trust covers future compatible updates during sparkrun update.")
     if not sys.stdin.isatty():
         return False
@@ -66,6 +66,10 @@ def _show_result(result):
             " @ " + result["revision"][:12] if result.get("revision") else "",
         )
     )
+    for message in result.get("messages", []):
+        click.echo(message)
+    if result.get("restart_required"):
+        click.echo("Restart long-running plugin consumers to apply this change.")
     if result.get("warning"):
         click.echo("Warning: " + result["warning"], err=True)
     if result["status"] in {"updated", "rolled back", "removed"} or result.get("history_pruned"):
@@ -75,7 +79,7 @@ def _show_result(result):
 @click.group("plugins", invoke_without_command=True)
 @click.pass_context
 def plugins(ctx):
-    """Manage external plugins and inspect plugin compatibility.
+    """Manage plugin loading, installations, and compatibility.
 
     With no subcommand, list all plugins. Listing includes bundled plugins,
     directory plugins, installed integrations, and managed external plugins.
@@ -95,6 +99,39 @@ def plugins(ctx):
         ctx.invoke(plugins_list)
 
 
+@plugins.command("enable")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Preview the plugin loading change without running hooks or saving.")
+@click.pass_context
+@plugin_errors
+def plugins_enable(ctx, name, dry_run):
+    """Allow plugin NAME to load, preserving its capability settings.
+
+    Works for bundled, installed, directory and managed plugins. Enabling a
+    gateway plugin does not select it; explicitly enable its gateway feature.
+    """
+    from sparkrun.core.plugin_lifecycle import change_plugin
+
+    _show_result(change_plugin(management_config(ctx), name, True, dry_run=dry_run))
+
+
+@plugins.command("disable")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Preview disabling without running hooks or saving.")
+@click.pass_context
+@plugin_errors
+def plugins_disable(ctx, name, dry_run):
+    """Prevent plugin NAME from loading; retain its installation and settings.
+
+    A disabled plugin contributes no commands, operations or feature definitions
+    to new processes. Existing services are not stopped. This command remains
+    usable when the plugin is broken; optional cleanup hook failures are reported.
+    """
+    from sparkrun.core.plugin_lifecycle import change_plugin
+
+    _show_result(change_plugin(management_config(ctx), name, False, dry_run=dry_run))
+
+
 @plugins.command("list", short_help="Show plugin versions, state, and compatibility.")
 @json_option(help="Output plugin metadata, compatibility reasons, and load-check results as JSON")
 @click.option(
@@ -105,7 +142,7 @@ def plugins(ctx):
 def plugins_list(ctx, output_json, check):
     """List all plugin sources, versions, and compatibility with this host.
 
-    Includes disabled plugins. STATE shows the effective feature gate;
+    Includes disabled plugins. STATE shows the effective plugin loading policy;
     COMPATIBILITY checks declared requirements against the current installation.
     Explanations for unknown or incompatible results follow the table.
 
@@ -131,6 +168,29 @@ def plugins_list(ctx, output_json, check):
     for plugin in list_plugins(config):
         row = plugin.to_dict()
         row["managed"] = plugin.managed
+        from sparkrun.core.plugin_lifecycle import plugin_details
+        from sparkrun.core.plugin_policy import plugin_state
+
+        try:
+            details = plugin_details(plugin)
+        except (PluginError, OSError, ValueError) as exc:
+            details = {"declarations": {}}
+            row["failure"] = str(exc)
+        row["features"] = sorted(details["declarations"].get("features", {}))
+        state = plugin_state(
+            plugin.plugin_id or plugin.name,
+            config,
+            source=plugin.source,
+            legacy_feature=plugin.feature_flag if plugin.managed and not details["declarations"] else None,
+        )
+        row["state_source"] = state.source
+        row["blocked_reason"] = state.reason
+        row["selected_gateway"] = None
+        from sparkrun.proxy.config import ProxyConfig
+
+        selected = ProxyConfig(config.config_path.parent / "proxy.yaml").gateway
+        if selected and "gateway." + selected in row["features"]:
+            row["selected_gateway"] = selected
         row["compatibility"] = evaluate_plugin_compatibility(metadata_for_plugin(plugin), host).to_dict()
         if check and plugin.managed and plugin.path is not None:
             try:
@@ -152,7 +212,7 @@ def plugins_list(ctx, output_json, check):
     if not rows:
         click.echo("No plugins found.")
         return
-    header = ("NAME", "VERSION", "SOURCE", "STATE", "COMPATIBILITY", "FLAG")
+    header = ("NAME", "VERSION", "SOURCE", "STATE", "COMPATIBILITY", "FEATURES")
     table: list[tuple[str, ...]] = [header]
     for row in rows:
         state = "disabled" if not row["enabled"] else "enabled (load failed)" if row["failure"] else "enabled"
@@ -163,17 +223,29 @@ def plugins_list(ctx, output_json, check):
                 row["source"],
                 state,
                 row["compatibility"]["status"],
-                row["feature_flag"] or "(unbound)",
+                (", ".join(row["features"]) or "—") if row["enabled"] else "unavailable (plugin disabled)",
             )
         )
     widths = [max(len(cell) for cell in column) for column in zip(*table, strict=True)]
     lines = ["  ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True)).rstrip() for cells in table]
     click.echo("\n".join(lines))
-    diagnostics = [row for row in rows if row["failure"] or row["compatibility"]["reasons"] or row.get("load_check")]
+    diagnostics = [
+        row
+        for row in rows
+        if row["failure"]
+        or row["compatibility"]["reasons"]
+        or row.get("load_check")
+        or row.get("selected_gateway")
+        or row.get("blocked_reason")
+    ]
     if diagnostics:
         click.echo("\nPlugin diagnostics:")
     for row in diagnostics:
         click.echo("  %s:" % row["name"])
+        if row.get("blocked_reason"):
+            click.echo("    Unavailable: " + row["blocked_reason"])
+        if row.get("selected_gateway"):
+            click.echo("    Selected gateway: " + row["selected_gateway"] + (" (plugin disabled)" if not row["enabled"] else ""))
         if row["failure"]:
             click.echo("    Load failure: %s" % row["failure"])
         if row["compatibility"]["reasons"]:
@@ -188,7 +260,7 @@ def plugins_list(ctx, output_json, check):
 @click.argument("source", metavar="SOURCE")
 @click.option("--ref", metavar="REF", default="main", show_default=True, help="Git branch, tag, or full commit ID to install")
 @click.option("--trust", is_flag=True, help="Trust the source and future compatible updates without prompting")
-@click.option("--enable", is_flag=True, help="Also enable the plugin's declared feature flag; environment overrides still apply")
+@click.option("--enable", is_flag=True, help="Enable plugin loading after installation; preserve its capability settings")
 @click.option("--dry-run", is_flag=True, help="Fetch and check metadata without granting trust, executing plugin code, or installing")
 @click.pass_context
 @plugin_errors
@@ -205,8 +277,8 @@ def plugins_add(ctx, source, ref, trust, enable, dry_run):
 
     Installation asks for source trust and enables core.external_plugins if
     needed. Existing plugin directories may need separate trust confirmation.
-    The plugin's own feature flag keeps its current value unless --enable is
-    supplied. Use --trust for noninteractive source consent.
+    Capability settings are preserved. --enable explicitly allows plugin loading
+    and runs its enable hook; it does not enable every capability or select a gateway. Use --trust for noninteractive source consent.
 
     \b
     Examples:
@@ -223,9 +295,14 @@ def plugins_add(ctx, source, ref, trust, enable, dry_run):
         config, records = manager.store.snapshot()
         record = records[result["name"]]
         if not managed_enabled(record, config):
-            click.echo("Installed but disabled by feature configuration or environment.")
+            click.echo(
+                "Installed but loading is disabled. Use sparkrun plugins enable %s after resolving any global loading override."
+                % result["name"]
+            )
         feature = record["metadata"].get("feature")
-        if feature and not config.is_feature_enabled(feature):
+        from sparkrun.core.plugin_policy import LEGACY_PLUGIN_FLAGS
+
+        if feature and feature not in LEGACY_PLUGIN_FLAGS.values() and not config.is_feature_enabled(feature):
             click.echo("Enable with: sparkrun setup features enable %s" % feature)
 
 

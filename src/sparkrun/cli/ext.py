@@ -171,7 +171,7 @@ class PluggableGroup(click.Group):
         ctx.meta["daemon_management"] = words[:1] == ["daemon"]
         ctx.meta["plugin_management"] = bool(
             words[:1] in (["plugins"], ["update"], ["daemon"])
-            or (words[:1] == ["setup"] and words[1:2] in (["plugins"], ["update"], ["version"]))
+            or (words[:1] == ["setup"] and words[1:2] in (["plugins"], ["update"], ["version"], ["features"]))
         )
         return super().parse_args(ctx, args)
 
@@ -203,6 +203,10 @@ class PluggableGroup(click.Group):
 
     def list_commands(self, ctx):
         self._ensure_cli_extensions_loaded(ctx)
+        from sparkrun.core.features import feature_gate_enabled
+
+        if "proxy" in self.commands:
+            self.commands["proxy"].hidden = not feature_gate_enabled("gateway")
         return super().list_commands(ctx)
 
     def get_command(self, ctx, name):

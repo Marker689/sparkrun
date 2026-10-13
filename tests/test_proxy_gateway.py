@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+
 FLAG_ENV = "SPARKRUN_FEATURE_GATEWAY_LITELLM"
 
 
@@ -46,7 +47,7 @@ class TestFlagRegistration:
 
     def test_flag_name_matches_the_engine_declaration(self):
         """The engine's ``required_feature_flag`` is the registry key verbatim."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
         from sparkrun.proxy.gateway import GATEWAY_FEATURE_FLAGS
 
         assert ProxyEngine.required_feature_flag == GATEWAY_FEATURE_FLAGS[ProxyEngine.gateway_name]
@@ -132,7 +133,7 @@ class TestResolveGateway:
 
 class TestEngineGate:
     def test_start_refuses_when_disabled(self, tmp_path: Path, gateway_off):
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
         from sparkrun.proxy.gateway import GatewayUnavailableError
 
         engine = ProxyEngine(state_dir=tmp_path)
@@ -141,7 +142,7 @@ class TestEngineGate:
 
     def test_dry_run_start_also_refuses(self, tmp_path: Path, gateway_off):
         """A dry run must not advertise a start that would be refused."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
         from sparkrun.proxy.gateway import GatewayUnavailableError
 
         engine = ProxyEngine(state_dir=tmp_path)
@@ -150,7 +151,7 @@ class TestEngineGate:
 
     def test_stop_and_status_stay_usable_when_disabled(self, tmp_path: Path, monkeypatch):
         """Teardown is ungated: a proxy started while on must stay stoppable."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=tmp_path)
         engine._save_state(4321)
@@ -164,7 +165,7 @@ class TestEngineGate:
         assert kill.called
 
     def test_state_records_the_gateway(self, tmp_path: Path):
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=tmp_path)
         engine._save_state(999)
@@ -225,7 +226,7 @@ class TestApiFacade:
     def test_sync_requiring_a_running_proxy_is_a_noop_when_stopped(self):
         from sparkrun import api
 
-        with patch("sparkrun.proxy.engine.ProxyEngine.is_running", return_value=False):
+        with patch("sparkrun.plugins.litellm.engine.ProxyEngine.is_running", return_value=False):
             result = api.proxy.sync(require_running=True)
         assert result.proxy_running is False
         assert result.changed is False
@@ -233,7 +234,7 @@ class TestApiFacade:
     def test_management_engine_follows_the_state_file(self):
         """Management paths bind to what is *running*, not what is configured."""
         from sparkrun.api.proxy._ops import _running_engine
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         with patch("sparkrun.proxy._supervisor.GatewayState.get_state", return_value={"pid": 1, "gateway": "litellm"}):
             assert isinstance(_running_engine(), ProxyEngine)
@@ -265,3 +266,8 @@ class TestApiFacade:
         with pytest.raises(GatewayQueryError) as exc:
             engine.query_models()
         assert "ghost" in str(exc.value)
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

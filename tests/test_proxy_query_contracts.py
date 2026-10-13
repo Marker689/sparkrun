@@ -6,13 +6,14 @@ import json
 from urllib.error import HTTPError
 
 import pytest
+
 from click.testing import CliRunner
 
 from sparkrun import api
 from sparkrun.api.proxy import _ops
 from sparkrun.cli import main
 from sparkrun.proxy._supervisor import GatewaySupervisor
-from sparkrun.proxy.engine import ProxyEngine
+from sparkrun.plugins.litellm.engine import ProxyEngine
 
 
 @pytest.fixture
@@ -88,3 +89,8 @@ def test_refresh_can_recover_a_failed_initial_query(gateway, monkeypatch):
     result = CliRunner().invoke(main, ["proxy", "models", "--json", "--refresh"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)[0]["model_name"] == "recovered"
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

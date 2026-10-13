@@ -280,7 +280,12 @@ def register(v):
             for name in ("graph_bad", "graph_good")
         ]
         monkeypatch.setattr("sparkrun.core.installed_plugins.entry_points", lambda **kw: eps)
-        load_installed_plugins(v, config=SimpleNamespace(get=lambda *a: {"graph-bad": True, "graph-good": True}))
+        from sparkrun.core.config import SparkrunConfig
+
+        cfg = SparkrunConfig()
+        cfg.set("integrations", {"graph-bad": True, "graph-good": True})
+        cfg._profile = replace(get_application_profile(), required_integrations=("graph-bad",))
+        load_installed_plugins(v, config=cfg)
         rows = installed_plugin_inventory()
         assert not rows[0].loaded and rows[0].failure and rows[1].loaded
         with pytest.raises(RequiredIntegrationError, match="graph-bad"):

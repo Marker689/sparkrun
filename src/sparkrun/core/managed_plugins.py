@@ -93,6 +93,7 @@ def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_p
             tier=DeclarationTier.OUT_OF_TREE,
             source=("external", metadata.module, str(source_path)),
             identity=PluginIdentity(normalize_plugin_id(metadata.name), metadata.module, ("external", metadata.module, str(source_path))),
+            declarations=metadata.declarations,
         )
     except BaseException:
         for name in list(sys.modules):
@@ -108,15 +109,11 @@ def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_p
 
 
 def managed_enabled(record: dict, config) -> bool:
-    from sparkrun.core.external_plugins import _external_plugins_disabled
-    from sparkrun.core.features import is_feature_enabled
+    from sparkrun.core.plugin_policy import plugin_state
 
-    feature = record["metadata"].get("feature")
-    return (
-        not _external_plugins_disabled()
-        and is_feature_enabled("core.external_plugins", config=config)
-        and (not feature or is_feature_enabled(feature, config=config))
-    )
+    metadata = record["metadata"]
+    legacy = metadata.get("feature") if not metadata.get("declarations") else None
+    return plugin_state(metadata["name"], config, source="external", legacy_feature=legacy).enabled
 
 
 def load_managed_plugins(v, *, config=None):
@@ -211,16 +208,20 @@ def managed_plugin_identities(config, records=None):
         candidate, _ = _validation_candidate
         records[candidate["metadata"]["name"]] = candidate
     identities = {}
+    from sparkrun.core.features import declare_plugin_features
+
     for name, record in records.items():
         validating = _validation_candidate is not None and record is _validation_candidate[0]
-        if not validating and not managed_enabled(record, config):
-            continue
         source = (
             _validation_candidate[1] if validating and _validation_candidate else store.generation_path(name, record["active_generation"])
         )
-        module = record["metadata"]["module"]
+        metadata = record["metadata"]
+        module = metadata["module"]
         try:
-            identities[name] = PluginIdentity(normalize_plugin_id(name), module, ("external", module, str(source)))
+            identity = PluginIdentity(normalize_plugin_id(name), module, ("external", module, str(source)))
+            declare_plugin_features(identity, metadata.get("declarations", {}))
+            if validating or managed_enabled(record, config):
+                identities[name] = identity
         except ValueError as exc:
             from sparkrun.core.registration import record_plugin_load_failure
 

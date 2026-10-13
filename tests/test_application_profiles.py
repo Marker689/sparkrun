@@ -648,7 +648,7 @@ def test_feature_reset_restores_application_channel_policy(tmp_path, monkeypatch
     config = SparkrunConfig(tmp_path / "config.yaml")
     config.set("features", {"cli.tune": True, "executor.docker": False, "channel": "alpha"})
     config.save()
-    monkeypatch.setattr(_commands, "_get_context", lambda ctx: SimpleNamespace(config=config))
+    monkeypatch.setattr("sparkrun.cli._plugins.management_config", lambda ctx: config)
     result = CliRunner().invoke(_commands.setup_features_reset, ["cli.tune"])
     assert result.exit_code == 0, result.output
     reloaded = SparkrunConfig(config.config_path)

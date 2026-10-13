@@ -691,3 +691,18 @@ def daemon_test_directory(tmp_path):
         root = Path(temporary)
         secure_path(root)
         yield root
+
+
+@pytest.fixture
+def loaded_litellm_plugin():
+    from importlib import import_module
+    from unittest.mock import patch
+    from sparkrun.core.registration import load_and_register_plugin
+    from sparkrun.core.plugin_identity import PluginIdentity
+
+    module = "sparkrun.plugins.litellm"
+    source = ("in-tree", module, None)
+    # Unit tests request this provider before selecting their application.
+    # Supplying it must not resolve config and bind the default profile early.
+    with patch("sparkrun.core.features.feature_gate_enabled", return_value=True):
+        load_and_register_plugin(lambda: import_module(module), None, source=source, identity=PluginIdentity("litellm", module, source))

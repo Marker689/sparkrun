@@ -248,6 +248,10 @@ def register_core_ops():
                 scope=scope,
                 cacheable=name in CACHEABLE_QUERIES,
                 resources="none" if name.startswith("proxy.") else "auto",
+                feature_flag="gateway"
+                if name.startswith("proxy.")
+                and name not in {"proxy.status", "proxy.stop", "proxy.service_status", "proxy.uninstall_service"}
+                else None,
                 description=DESCRIPTIONS.get(name, f"{target.replace('_', ' ').capitalize()} through the library API."),
             )
         )
@@ -266,6 +270,10 @@ def register_core_ops():
                 kind="job",
                 scope=scope,
                 resources="none" if name.startswith("proxy.") else "auto",
+                feature_flag="gateway"
+                if name.startswith("proxy.")
+                and name not in {"proxy.status", "proxy.stop", "proxy.service_status", "proxy.uninstall_service"}
+                else None,
                 description=DESCRIPTIONS.get(name, f"{name.replace('_', ' ').capitalize()} with an operation-local context."),
             )
         )

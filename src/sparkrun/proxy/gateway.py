@@ -2,7 +2,7 @@
 
 A *gateway* is the process that fronts every discovered inference endpoint
 behind one OpenAI-compatible API.  Core ships one implementation,
-:class:`~sparkrun.proxy.engine.ProxyEngine` (LiteLLM); others register here.
+:class:`~sparkrun.plugins.litellm.engine.ProxyEngine` (LiteLLM); others register here.
 
 Implementations become resolvable via :func:`register_gateway`, which is what
 lets one live outside the ``sparkrun.proxy`` tree entirely.  The registry is
@@ -10,12 +10,12 @@ in-process rather than a SAF extension point because an engine is *constructed
 with arguments* (host, port, master key, state dir) rather than resolved as a
 stateless singleton — the same reason ``platforms`` and ``models.kv`` stayed
 in-process.  Registration carries a **loader** rather than the class, so
-``proxy.engine`` can import this module without a cycle and a registration
+a plugin engine can import this module without a cycle and a registration
 never drags in the implementation it names.
 
-Note that enabling a second gateway's flag does **not** switch to it: with the
-default enabled, the default wins.  Selecting a non-default gateway is an
-explicit ``gateway:`` under ``proxy:`` in ``proxy.yaml``.
+Explicitly enabling a gateway feature runs its plugin's lifecycle hook and
+persists ``proxy.gateway`` in ``proxy.yaml``. Installation and plugin loading
+changes preserve that selection and the other providers' capability settings.
 
 Two mechanisms, deliberately separate:
 
@@ -59,8 +59,9 @@ enlist_registry_state(globals(), "GATEWAY_FEATURE_FLAGS")
 
 #: Known gateway name -> zero-arg callable returning its engine class.
 _GATEWAY_LOADERS: dict[str, "Callable[[], type]"] = {}
+_GATEWAY_OWNERS: dict[str, object] = {}
 
-enlist_registry_state(globals(), "_GATEWAY_LOADERS")
+enlist_registry_state(globals(), "_GATEWAY_LOADERS", "_GATEWAY_OWNERS")
 
 
 class GatewayError(RuntimeError):
@@ -119,6 +120,10 @@ def register_gateway(name: str, *, feature_flag: str, loader: "Callable[[], type
         return
     GATEWAY_FEATURE_FLAGS[name] = feature_flag
     _GATEWAY_LOADERS[name] = loader
+    from sparkrun.core.plugin_identity import current_registration_owner
+
+    if current_registration_owner() is not None:
+        _GATEWAY_OWNERS[name] = current_registration_owner()
 
 
 def gateway_class(name: str) -> type:
@@ -147,18 +152,6 @@ def gateway_class(name: str) -> type:
     return loader()
 
 
-def _load_litellm_engine() -> type:
-    """Deferred import of the built-in LiteLLM engine."""
-    from sparkrun.proxy.engine import ProxyEngine
-
-    return ProxyEngine
-
-
-# The built-in default.  Registered here rather than by a plugin because it is
-# core: ``proxy`` must resolve to *something* even with every plugin absent.
-register_gateway("litellm", feature_flag="gateway.litellm", loader=_load_litellm_engine)
-
-
 def gateway_feature_flag(name: str) -> str | None:
     """Return the feature flag gating gateway *name*, or ``None`` if unknown."""
     return GATEWAY_FEATURE_FLAGS.get(name)
@@ -173,6 +166,10 @@ def is_gateway_enabled(name: str, *, config: "SparkrunConfig | None" = None) -> 
             ``None`` the standard config path is read — the auto-discover
             daemon and other ``sctx``-less callers land here.
     """
+    from sparkrun.core.features import is_feature_enabled
+
+    if not is_feature_enabled("gateway", config=config):
+        return False
     flag = gateway_feature_flag(name)
     if flag is None:
         return False
@@ -207,6 +204,10 @@ def resolve_gateway(name: str | None = None, *, config: "SparkrunConfig | None" 
         AmbiguousGatewayError: no name was given, the default is disabled, and
             more than one other gateway is enabled.
     """
+    from sparkrun.core.features import is_feature_enabled
+
+    if not is_feature_enabled("gateway", config=config):
+        raise GatewayUnavailableError("Gateway support is disabled. Enable it with: sparkrun setup features enable gateway", gateway=name)
     enabled = list_gateways(config=config)
 
     if name:
@@ -228,7 +229,8 @@ def resolve_gateway(name: str | None = None, *, config: "SparkrunConfig | None" 
 
     if not enabled:
         raise GatewayUnavailableError(
-            "No inference gateway is enabled. Enable one with: sparkrun setup features enable %s" % GATEWAY_FEATURE_FLAGS[DEFAULT_GATEWAY],
+            "No inference gateway is enabled. Inspect sparkrun plugins list, enable a provider plugin, "
+            "then select it with: sparkrun setup features enable gateway.<name>",
             available=(),
         )
 
@@ -246,7 +248,7 @@ def require_gateway_enabled(name: str, *, config: "SparkrunConfig | None" = None
     """Raise unless gateway *name* is known and enabled.
 
     The enforcement point for a gateway implementation's own bring-up (see
-    :meth:`sparkrun.proxy.engine.ProxyEngine.start`).  Deliberately *not*
+    :meth:`sparkrun.plugins.litellm.engine.ProxyEngine.start`).  Deliberately *not*
     applied to teardown, status, or the auto-discover daemon's restart path:
     a proxy that is already running must stay stoppable and manageable even
     after its flag has been turned off — the same rule
@@ -254,6 +256,10 @@ def require_gateway_enabled(name: str, *, config: "SparkrunConfig | None" = None
     """
     from sparkrun.core.in_tree_plugins import plugin_application_profile_failure
 
+    from sparkrun.core.features import is_feature_enabled
+
+    if not is_feature_enabled("gateway", config=config):
+        raise GatewayUnavailableError("Gateway support is disabled. Enable it with: sparkrun setup features enable gateway", gateway=name)
     failure = plugin_application_profile_failure(name)
     if failure:
         raise GatewayUnavailableError(failure, gateway=name)
@@ -271,6 +277,14 @@ def _unavailable_message(name: str, enabled: list[str]) -> str:
     """Build the 'gateway X is not usable' message, with the remedy."""
     flag = gateway_feature_flag(name)
     if flag is None:
+        from sparkrun.core.features import DECLARED_FEATURE_OWNERS
+
+        owner = DECLARED_FEATURE_OWNERS.get("gateway." + name)
+        if owner is not None:
+            return (
+                "Gateway %r is unavailable. Inspect sparkrun plugins list; enable its plugin with "
+                "sparkrun plugins enable %s, then select it with sparkrun setup features enable gateway.%s" % (name, owner.plugin_id, name)
+            )
         known = ", ".join(sorted(GATEWAY_FEATURE_FLAGS)) or "(none)"
         return "Unknown gateway %r. Known gateways: %s" % (name, known)
     detail = "Gateway %r is disabled. Enable it with: sparkrun setup features enable %s" % (name, flag)

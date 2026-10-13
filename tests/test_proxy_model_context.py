@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 from sparkrun.api.proxy._ops import ProxyModel
 from sparkrun.proxy.discovery import DiscoveredEndpoint, _check_single_health
-from sparkrun.proxy.engine import ProxyEngine, _model_keys, build_litellm_config, write_config
+from sparkrun.plugins.litellm.engine import ProxyEngine, _model_keys, build_litellm_config, write_config
 
 
 def _endpoint(max_model_len: int | None = None) -> DiscoveredEndpoint:
@@ -194,7 +194,7 @@ def test_proxy_model_to_dict_omits_max_model_len_when_none():
 
 def test_models_via_api_reads_model_info():
     """``proxy models --json`` surfaces the window LiteLLM reports back."""
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     engine = ProxyEngine()
     engine._api_request = MagicMock(

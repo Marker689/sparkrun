@@ -24,7 +24,7 @@ the configured path, never a same-named module from elsewhere.
 from __future__ import annotations
 
 from sparkrun.core.registration import plugin_load_failure
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -163,9 +163,9 @@ def _module_version(dotted: str, *, path: Path | None = None) -> tuple[str | Non
     return source_version(dotted, plugin_origin(dotted, path))
 
 
-def _in_tree_plugins(v: "Variables | None") -> list[PluginInfo]:
+def _in_tree_plugins(v: "Variables | None", config=None) -> list[PluginInfo]:
     from sparkrun.core.external_plugins import loaded_plugin_module
-    from sparkrun.core.features import feature_gate_enabled, get_feature
+    from sparkrun.core.features import get_feature
     from sparkrun.core.in_tree_plugins import (
         IN_TREE_PLUGIN_PACKAGE,
         iter_in_tree_plugin_names,
@@ -184,7 +184,9 @@ def _in_tree_plugins(v: "Variables | None") -> list[PluginInfo]:
         # with no flag rather than omitted, which is what makes the defect
         # visible instead of silent.
         registered = flag is not None and get_feature(flag) is not None
-        enabled = flag is not None and registered and feature_gate_enabled(flag, v)
+        from sparkrun.core.in_tree_plugins import in_tree_plugin_enabled
+
+        enabled = in_tree_plugin_enabled(name, v, config=config)
         version, origin = _module_version(dotted)
         dist = bundled_distribution(dotted, plugin_origin(dotted))
         out.append(
@@ -208,11 +210,10 @@ def _in_tree_plugins(v: "Variables | None") -> list[PluginInfo]:
 def _external_plugins(config: "SparkrunConfig | None", v: "Variables | None") -> list[PluginInfo]:
     from sparkrun.core.external_plugins import (
         FEATURE_CORE_EXTERNAL_PLUGINS,
-        _external_plugins_disabled,
         iter_plugin_module_names,
         loaded_plugin_module,
     )
-    from sparkrun.core.features import feature_gate_enabled
+    from sparkrun.core.plugin_policy import plugin_state
 
     if config is None:
         return []
@@ -221,7 +222,6 @@ def _external_plugins(config: "SparkrunConfig | None", v: "Variables | None") ->
     # whole point of the command) to list these even with the gate off — you
     # cannot decide whether to enable the gate without seeing what it governs.
     gate = FEATURE_CORE_EXTERNAL_PLUGINS.name
-    enabled = feature_gate_enabled(gate, v) and not _external_plugins_disabled()
 
     out: list[PluginInfo] = []
     for path in config.external_plugin_paths:
@@ -232,7 +232,7 @@ def _external_plugins(config: "SparkrunConfig | None", v: "Variables | None") ->
                     name=name,
                     source=SOURCE_EXTERNAL,
                     module=name,
-                    enabled=enabled,
+                    enabled=False,
                     loaded=loaded_plugin_module(name, path=path) is not None,
                     feature_flag=gate,
                     version=version,
@@ -241,7 +241,7 @@ def _external_plugins(config: "SparkrunConfig | None", v: "Variables | None") ->
                     failure=plugin_load_failure((SOURCE_EXTERNAL, name, str(path.resolve()))),
                 )
             )
-    return out
+    return [replace(plugin, enabled=plugin_state(plugin.plugin_id or plugin.name, config, source="external").enabled) for plugin in out]
 
 
 def list_plugins(config: "SparkrunConfig | None" = None, v: "Variables | None" = None) -> list[PluginInfo]:
@@ -259,7 +259,7 @@ def list_plugins(config: "SparkrunConfig | None" = None, v: "Variables | None" =
         from, followed by installed metadata rows. Loader/configuration
         validation errors propagate; listing does not import any plugin.
     """
-    plugins = sorted(_in_tree_plugins(v), key=lambda p: p.name)
+    plugins = sorted(_in_tree_plugins(v, config), key=lambda p: p.name)
     plugins.extend(sorted(_external_plugins(config, v), key=lambda p: (str(p.path), p.name)))
     from sparkrun.core.installed_plugins import installed_plugin_inventory
 

@@ -5,6 +5,12 @@ This inventory was rendered from the actual operation declarations in the local
 host and SparkRoute plugin worktrees, without running handlers or a live daemon.
 Operational setup and examples are in [DAEMON.md](DAEMON.md).
 
+Gateway operations also honor the default-on `gateway` feature. Disabling it
+rejects new gateway actions while status, stop, service status and service removal
+remain available for recovery. Plugin loading state and capability flags are
+separate: disabling a plugin removes its contributions in new daemon processes;
+restart an existing daemon to apply loading or gateway selection changes.
+
 ## Contract and terminology
 
 Optional request fields are omitted unless their schema explicitly accepts null.
@@ -292,7 +298,7 @@ own namespaces and routing-policy fields.
 
 ## Bundled Kubernetes plugin
 
-Requires the loaded `k8s` integration and `integration.k8s`.
+Requires the enabled and loaded `k8s` plugin (`sparkrun plugins enable k8s`).
 
 ### operations
 

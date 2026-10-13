@@ -18,9 +18,10 @@ import time
 
 import pytest
 
+
 from sparkrun.api.proxy._ops import _foreground_exit_status
 from sparkrun.proxy._supervisor import SUPERVISOR_ENV, exit_status, supervisor_from_env
-from sparkrun.proxy.engine import ProxyEngine
+from sparkrun.plugins.litellm.engine import ProxyEngine
 
 
 def _sleeper() -> subprocess.Popen:
@@ -459,3 +460,8 @@ def test_cleanup_ignores_repeated_signals():
         os.kill(os.getpid(), signal.SIGINT)  # would raise KeyboardInterrupt otherwise
         time.sleep(0.05)
     assert signal.getsignal(signal.SIGINT) is before
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

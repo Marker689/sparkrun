@@ -423,7 +423,7 @@ runtime that can't pair with Local.
 `plugins/k8s/executor.py`, owned by the [Kubernetes plugin](../src/sparkrun/plugins/k8s/README.md). `kubectl run`-based — every lifecycle
 operation is a `kubectl` invocation.
 
-Enable `integration.k8s` first (default on only for Sparkrun alpha). The plugin
+Run `sparkrun plugins enable k8s` first (default on only for Sparkrun alpha). The plugin
 registers `executor.k8s`, `cli.setup.k8s`, and `api.run.k8s`, each defaulting on.
 Its typed executor settings live in `K8sExecutorConfig`. The native API run path
 uses JobSet for supported single-pod launches; the commands below describe the

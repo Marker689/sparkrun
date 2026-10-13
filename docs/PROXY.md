@@ -13,18 +13,30 @@ For built-in Sparkrun, the channel defaults are:
 | --- | --- |
 | stable / beta / alpha | LiteLLM |
 
-An existing `proxy.gateway` pin takes precedence over channel defaults. Install a
-gateway plugin before selecting it, then enable its feature flag; enabling a second
-gateway alone does not switch the selection. When LiteLLM and another gateway
-are enabled and there is no pin, LiteLLM wins. Alternate application profiles can
-supply their own feature defaults.
+The default-on `gateway` feature controls shared gateway support. Disable it with
+`sparkrun setup features disable gateway` to hide `proxy` from help and reject new
+gateway activity. `proxy status` and `proxy stop` remain callable for recovery;
+disabling support does not stop an existing process or remove installed packages.
+Re-enable it with `sparkrun setup features enable gateway`.
+
+LiteLLM is an in-tree implementation plugin. To select an external implementation:
 
 ```bash
-sparkrun setup features list
-# After installing the optional SparkRoute plugin:
+sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin
+sparkrun plugins enable sparkroute
 sparkrun setup features enable gateway.sparkroute
-sparkrun proxy start --gateway sparkroute --host 127.0.0.1
+sparkrun proxy start --host 127.0.0.1
 ```
+
+Explicit feature enabling selects that gateway for subsequent starts, including
+when already enabled. Enabling a plugin alone preserves feature settings and the
+selected gateway. Both implementations may stay enabled. Updates preserve the
+choice. To switch back, explicitly enable `gateway.litellm`.
+
+An existing `proxy.gateway` pin takes precedence over defaults. A disabled or
+missing selected provider is an error; there is no silent replacement. With no
+pin, LiteLLM is preferred when available. All providers may be disabled while
+other Sparkrun operations continue working.
 
 `--gateway <name>` persists the selection in `proxy.yaml`. Use `--restart` to
 replace a running gateway with new settings or another enabled implementation.
@@ -71,7 +83,7 @@ and launches its process. An already-running proxy is an error unless `--restart
 is set. Explicit settings are saved even when an existing process prevents the
 start; the dry run computes a preview without persisting settings.
 
-`--master-key` configures an inference API bearer token. Both bundled gateways
+`--master-key` configures an inference API bearer token. LiteLLM and the external SparkRoute plugin
 support it; their admin authentication differs. With a key configured, clients
 send `Authorization: Bearer <key>`. See [authentication](#authentication-and-admin-console).
 
@@ -297,7 +309,7 @@ managed SparkRoute instance reconcile multiple application controllers. See
 
 The LiteLLM engine runs the pinned `litellm[proxy]` package through `uvx`; it does
 not require a permanent LiteLLM installation. The pin and launch command live in
-`src/sparkrun/proxy/engine.py`.
+`src/sparkrun/plugins/litellm/engine.py`.
 
 Sparkrun uses generated configuration for model mutations, because it does not
 provision LiteLLM's database-backed model store. Changes regenerate the config
@@ -340,7 +352,7 @@ Select installed plugins through [the plugin contract](PLUGINS.md).
 | `proxy/_supervisor.py` | Shared process/state ownership and discovery lifecycle |
 | `proxy/discovery.py` | Job/status discovery, health checks and deduplication |
 | `proxy/config.py` | Persistent settings and aliases |
-| `proxy/engine.py` | LiteLLM implementation |
+| `plugins/litellm/engine.py` | LiteLLM implementation |
 | `proxy/autodiscover.py` | Optional reconciliation sidecar |
 
 `sparkrun.proxy.supervisor.GatewaySupervisor` is the supported lifecycle base.

@@ -121,7 +121,8 @@ def test_two_real_directory_plugins_share_local_names_and_adapter_policy(binding
             sys.modules.pop(name, None)
 
 
-def test_duplicate_normalized_directory_ids_fail_before_import(tmp_path):
+def test_duplicate_normalized_directory_ids_fail_before_import(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPARKRUN_FEATURE_PLUGINS_OCI_RELAY", "1")
     from sparkrun.core.external_plugins import load_external_plugins
 
     roots = [

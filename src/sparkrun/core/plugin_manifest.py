@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 import re
 import tomllib
@@ -75,7 +75,7 @@ def repository_identity(value: str) -> str:
     return source
 
 
-def literal_attribute(path: Path, name: str):
+def literal_attribute(path: Path, name: str, *, strict=False):
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
@@ -83,8 +83,9 @@ def literal_attribute(path: Path, name: str):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 if any(isinstance(t, ast.Name) and t.id == name for t in targets):
                     return ast.literal_eval(node.value) if node.value is not None else None
-    except (OSError, SyntaxError, ValueError, TypeError):
-        pass
+    except (OSError, SyntaxError, ValueError, TypeError) as exc:
+        if strict:
+            raise PluginError("Cannot read literal %s declaration: %s" % (name, exc)) from exc
     return None
 
 
@@ -102,6 +103,7 @@ class PluginMetadata:
     feature: str | None = None
     plugin_api: int | None = None
     application_profile_api: int | None = None
+    declarations: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -120,6 +122,7 @@ class PluginMetadata:
             raise PluginError("Invalid plugin metadata: %s" % exc) from exc
 
     def validate(self) -> None:
+        validate_declarations(self.declarations, self.module)
         safe_name(self.name)
         module_parts(self.module)
         safe_relative(self.source)
@@ -128,10 +131,10 @@ class PluginMetadata:
         Version(self.version)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.distribution):
             raise PluginError("Invalid distribution name")
-        for field in (self.requires_sparkrun, self.requires_python):
-            if not isinstance(field, str) or not field.strip():
+        for requirement_range in (self.requires_sparkrun, self.requires_python):
+            if not isinstance(requirement_range, str) or not requirement_range.strip():
                 raise PluginError("Managed plugins require explicit Sparkrun and Python compatibility ranges")
-            SpecifierSet(field)
+            SpecifierSet(requirement_range)
         if self.feature is not None and not re.fullmatch(r"[a-zA-Z0-9_.-]+", self.feature):
             raise PluginError("Invalid feature gate")
         if type(self.plugin_api) is not int:
@@ -166,6 +169,7 @@ def read_manifest(root: Path) -> PluginMetadata:
             feature=manifest.get("feature"),
             plugin_api=literal_attribute(root / source / "__init__.py", "SPARKRUN_PLUGIN_API_VERSION"),
             application_profile_api=manifest.get("application_profile_api"),
+            declarations=read_declarations(root / source / "__init__.py", manifest["module"]),
         )
         metadata.validate()
         if not (root / source / "__init__.py").is_file():
@@ -173,3 +177,57 @@ def read_manifest(root: Path) -> PluginMetadata:
         return metadata
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise PluginError("Cannot read plugin.toml/pyproject.toml: %s" % exc) from exc
+
+
+LIFECYCLE_EVENTS = frozenset(
+    {
+        "plugin.install",
+        "plugin.update",
+        "plugin.rollback",
+        "plugin.remove",
+        "plugin.enable",
+        "plugin.disable",
+        "feature.enable",
+        "feature.disable",
+    }
+)
+
+
+def validate_declarations(data, module):
+    if not isinstance(data, dict) or set(data) - {"api", "features", "hooks"}:
+        raise PluginError("Invalid SPARKRUN_PLUGIN_MANIFEST declaration")
+    if not data:
+        return
+    if type(data.get("api")) is not int or data["api"] != 1:
+        raise PluginError("Unsupported plugin lifecycle declaration API")
+    features, hooks = data.get("features", {}), data.get("hooks", {})
+    if not isinstance(features, dict) or not isinstance(hooks, dict):
+        raise PluginError("Plugin features and hooks must be mappings")
+    for name, definition in features.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]+", name) or not isinstance(definition, dict):
+            raise PluginError("Invalid plugin feature declaration")
+        if set(definition) - {"description", "default", "channel_defaults"} or not isinstance(definition.get("description"), str):
+            raise PluginError("Plugin features require descriptions and supported settings")
+        if type(definition.get("default", False)) is not bool:
+            raise PluginError("Plugin feature defaults must be boolean")
+        channels = definition.get("channel_defaults", {})
+        if not isinstance(channels, dict) or any(k not in {"stable", "beta", "alpha"} or type(v) is not bool for k, v in channels.items()):
+            raise PluginError("Invalid feature channel defaults")
+    for event, target in hooks.items():
+        if event not in LIFECYCLE_EVENTS or not isinstance(target, str):
+            raise PluginError("Invalid lifecycle event/handler")
+        package, separator, function = target.partition(":")
+        if not separator or not function.isidentifier() or not (package == module or package.startswith(module + ".")):
+            raise PluginError("Lifecycle handlers must belong to their declaring plugin")
+        if not all(part.isidentifier() for part in package.split(".")):
+            raise PluginError("Invalid lifecycle handler module")
+
+
+def read_declarations(origin, module):
+    if origin is None:
+        return {}
+    data = literal_attribute(Path(origin), "SPARKRUN_PLUGIN_MANIFEST", strict=True)
+    if data is None:
+        return {}
+    validate_declarations(data, module)
+    return data

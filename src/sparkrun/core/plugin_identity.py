@@ -136,7 +136,7 @@ def preflight_plugin_sources(v, config=None):
 
     config = config or SparkrunConfig()
     selected = list(in_tree_plugin_identities(v).values())
-    selected.extend(directory_plugin_identities(configured_plugin_paths(v)).values())
+    selected.extend(directory_plugin_identities(configured_plugin_paths(v), config=config).values())
     selected.extend(managed_plugin_identities(config).values())
     rows, _ = _discover_installed_plugins(config)
     selected.extend(installed_plugin_identities(rows).values())

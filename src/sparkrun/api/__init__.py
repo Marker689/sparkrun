@@ -264,3 +264,7 @@ __all__ += [
 ]
 
 __all__ += ["workloads"]
+
+from . import plugins, features  # noqa: E402
+
+__all__ += ["plugins", "features"]

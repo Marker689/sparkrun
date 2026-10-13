@@ -13,6 +13,7 @@ import sys
 from unittest.mock import patch
 
 import pytest
+
 import yaml
 
 from click.testing import CliRunner
@@ -179,12 +180,12 @@ def patch_engine():
         return True
 
     with (
-        patch("sparkrun.proxy.engine.ProxyEngine.is_running", fake_is_running),
-        patch("sparkrun.proxy.engine.ProxyEngine._read_pid", fake_read_pid),
-        patch("sparkrun.proxy.engine.ProxyEngine.start", fake_start),
-        patch("sparkrun.proxy.engine.ProxyEngine.stop", fake_stop),
-        patch("sparkrun.proxy.engine.ProxyEngine._await_exit", return_value=True),
-        patch("sparkrun.proxy.engine.write_config", return_value=Path("/tmp/cfg.yaml")),
+        patch("sparkrun.plugins.litellm.engine.ProxyEngine.is_running", fake_is_running),
+        patch("sparkrun.plugins.litellm.engine.ProxyEngine._read_pid", fake_read_pid),
+        patch("sparkrun.plugins.litellm.engine.ProxyEngine.start", fake_start),
+        patch("sparkrun.plugins.litellm.engine.ProxyEngine.stop", fake_stop),
+        patch("sparkrun.plugins.litellm.engine.ProxyEngine._await_exit", return_value=True),
+        patch("sparkrun.plugins.litellm.engine.write_config", return_value=Path("/tmp/cfg.yaml")),
     ):
         yield state
 
@@ -334,12 +335,12 @@ class TestStartCli:
             return 0
 
         with (
-            patch("sparkrun.proxy.engine.ProxyEngine.is_running", fake_is_running),
-            patch("sparkrun.proxy.engine.ProxyEngine._read_pid", fake_read_pid),
-            patch("sparkrun.proxy.engine.ProxyEngine.stop", fake_stop),
-            patch("sparkrun.proxy.engine.ProxyEngine._await_exit", return_value=False) as wait_exit,
-            patch("sparkrun.proxy.engine.ProxyEngine.start", fake_start),
-            patch("sparkrun.proxy.engine.write_config", return_value=Path("/tmp/cfg.yaml")),
+            patch("sparkrun.plugins.litellm.engine.ProxyEngine.is_running", fake_is_running),
+            patch("sparkrun.plugins.litellm.engine.ProxyEngine._read_pid", fake_read_pid),
+            patch("sparkrun.plugins.litellm.engine.ProxyEngine.stop", fake_stop),
+            patch("sparkrun.plugins.litellm.engine.ProxyEngine._await_exit", return_value=False) as wait_exit,
+            patch("sparkrun.plugins.litellm.engine.ProxyEngine.start", fake_start),
+            patch("sparkrun.plugins.litellm.engine.write_config", return_value=Path("/tmp/cfg.yaml")),
         ):
             result = CliRunner().invoke(proxy, ["start", "--restart"])
 
@@ -417,3 +418,8 @@ def test_restart_timeout_keeps_original_pid_for_retry(tmp_path):
         assert _stop_and_wait(engine) is False
     assert engine.current_pid() == 98765
     assert [call.args for call in wait_exit.call_args_list] == [(98765, 0.0), (98765, 10.0)]
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

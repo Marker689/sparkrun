@@ -157,6 +157,14 @@ def clear_loaded_plugin_modules() -> None:
 
     from sparkrun.core.plugin_identity import clear_plugin_identities
 
+    from sparkrun.core.features import clear_plugin_features
+    from sparkrun.proxy.gateway import _GATEWAY_LOADERS, _GATEWAY_OWNERS, GATEWAY_FEATURE_FLAGS
+
+    clear_plugin_features()
+    for name in _GATEWAY_OWNERS:
+        _GATEWAY_LOADERS.pop(name, None)
+        GATEWAY_FEATURE_FLAGS.pop(name, None)
+    _GATEWAY_OWNERS.clear()
     clear_plugin_identities()
     clear_plugin_load_failures()
     _LOADED_PLUGIN_MODULES.clear()
@@ -192,7 +200,7 @@ def _scan_module_for_plugins(module, base: type) -> list[type]:
     for attr_name in dir(module):
         _consider(getattr(module, attr_name, None))
 
-    if hasattr(module, "__path__"):
+    if hasattr(module, "__path__") and getattr(module, "SPARKRUN_PLUGIN_SCAN_SUBMODULES", True):
         for cls in find_types_in_modules(module.__name__, base):
             _consider(cls)
 
@@ -243,13 +251,19 @@ def load_plugin_module(module, v: "Variables", *, tier: "DeclarationTier | None"
     return True
 
 
-def _register_plugin_module(module, v, *, tier=None) -> None:
+def _register_plugin_module(module, v, *, tier=None, declarations=None) -> None:
     from sparkrun.core.registry_defaults import DeclarationTier, declaring_tier
     from sparkrun.core.features import register_feature
     from sparkrun.core.installed_plugins import claim_implementation
 
     if _LOADED_PLUGIN_MODULES.get(module.__name__) is module and (id(v), module.__name__) in _REGISTERED_MODULES:
         return
+    from sparkrun.core.plugin_manifest import read_declarations
+    from sparkrun.core.features import FeatureFlag
+
+    declarations = declarations if declarations is not None else read_declarations(getattr(module, "__file__", None), module.__name__)
+    for name, options in declarations.get("features", {}).items():
+        register_feature(FeatureFlag(name=name, **options))
     for definition in getattr(module, "FEATURE_DEFINITIONS", ()):
         register_feature(definition)
 
@@ -295,7 +309,9 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
         configured.
     """
     paths = configured_plugin_paths(v, paths)
-    identities = directory_plugin_identities(paths)
+    from sparkrun.core.features import _gate_config
+
+    identities = directory_plugin_identities(paths, config=_gate_config(v))
     from sparkrun.core.plugin_identity import preflight_identities
 
     preflight_identities(identities.values())
@@ -336,7 +352,7 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
     return loaded
 
 
-def directory_plugin_identities(paths):
+def directory_plugin_identities(paths, config=None):
     from sparkrun.core.plugin_identity import discovered_identity
     from sparkrun.core.registration import record_plugin_load_failure
 
@@ -346,7 +362,14 @@ def directory_plugin_identities(paths):
             source = ("external", name, str(path))
             try:
                 spec = PathFinder.find_spec(name, [str(path)])
-                identities[path, name] = discovered_identity(name, name, source, origin=spec.origin if spec else None)
+                identity = discovered_identity(name, name, source, origin=spec.origin if spec else None)
+                from sparkrun.core.plugin_policy import plugin_state
+                from sparkrun.core.features import declare_plugin_features
+                from sparkrun.core.plugin_manifest import read_declarations
+
+                declare_plugin_features(identity, read_declarations(spec.origin if spec else None, name))
+                if plugin_state(identity.plugin_id, config, source="directory").enabled:
+                    identities[path, name] = identity
             except (ValueError, OSError) as exc:
                 record_plugin_load_failure(source, exc)
                 logger.warning("Skipping plugin %s: %s", name, exc)

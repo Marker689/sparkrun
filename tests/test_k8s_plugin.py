@@ -92,7 +92,7 @@ def test_plugin_defaults_follow_channel_and_application(tmp_path, application, c
 def _assert_policy(data, *, enabled):
     assert data["plugin"]["loaded"] is enabled
     assert data["plugin"]["enabled"] is enabled
-    assert "integration.k8s" in data["flags"]
+    assert "integration.k8s" not in data["flags"]
     assert (CHILD_FEATURES & set(data["flags"])) == (CHILD_FEATURES if enabled else set())
     assert bool(data["modules"]) is enabled
     assert ("k8s" in data["executors"]) is enabled

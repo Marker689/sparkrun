@@ -239,12 +239,13 @@ policy wins. Its JSON retains `channel` for core maturity and adds
 `application_channel` for the application's release track.
 
 The `cli.tune` flag defaults on in Sparkrun. Disabling it hides `tune` from root
-help and completion and blocks tuning commands. The `integration.arena` flag
-gates the Arena commands, benchmark options and lifecycle; it also defaults on.
-Application profiles can set either flag to false. Explicit user configuration
-or `<command> setup features enable <flag>` overrides an application default.
+help and completion and blocks tuning commands. The default-on `sparkarena` plugin
+owns Arena commands, benchmark options and lifecycle. Disable it with
+`<command> plugins disable sparkarena`. Application profiles can set its
+`plugins.enabled` default; the old `integration.arena` flag remains a migration input.
 
-`integration.k8s` loads the Kubernetes plugin. Its core defaults are off for
+`sparkrun plugins enable k8s` enables the Kubernetes plugin.
+The older `integration.k8s` flag remains a migration alias. Its core defaults are off for
 stable/beta and on for alpha. Only an enabled plugin registers `executor.k8s`,
 `cli.setup.k8s`, and `api.run.k8s`; those child features default on within it.
 Application profiles can override the loading default independently of the core
@@ -253,12 +254,15 @@ feature channel.
 Installed integration selection is by stable ID:
 
 ```yaml
-integrations:
-  example-hardware: true
-  another-integration: false
+plugins:
+  enabled:
+    example-hardware: true
+    another-integration: false
 ```
 
-False persists across profile upgrades. Disabling a required integration remains
+False persists across profile upgrades. The older `integrations` mapping is read
+when no explicit plugin override exists. The CLI refuses to disable required
+integrations; a manual conflicting override remains
 visible in diagnostics and blocks launch. Installed metadata is enumerated before
 import, so an unselected integration never executes merely because it is installed.
 See [PLUGINS.md](PLUGINS.md) for the registration contract.

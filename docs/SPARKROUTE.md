@@ -18,22 +18,22 @@ compatible SparkRoute plugin, select it explicitly:
 
 ```sh
 sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin --enable
-sparkrun proxy start --gateway sparkroute --host 127.0.0.1
+sparkrun setup features enable gateway.sparkroute
+sparkrun proxy start --host 127.0.0.1
 ```
 
-Enabling a feature flag does not install a plugin. Both `gateway.sparkroute`
-and `plugins.coldsnap` default off on stable, beta, and alpha. The `--enable`
-installation option above opts in to SparkRoute; an existing installation can
-use `sparkrun setup features enable gateway.sparkroute`. Selecting it still
-requires an explicit `--gateway sparkroute` or `proxy.gateway` setting in
-`proxy.yaml`. Explicit config, environment, and application-profile overrides
-continue to apply.
+`--enable` enables plugin loading, preserving its capability settings. Explicitly
+enabling `gateway.sparkroute` enables that capability and saves the gateway
+selection. It does not disable LiteLLM or restart a running gateway. Plugin updates
+preserve selection. `plugins disable sparkroute` preserves all settings while
+preventing plugin loading; `plugins enable sparkroute` restores that configuration.
 
-`--gateway` persists the choice. An existing SparkRoute pin is not silently
-replaced when its plugin is absent. To select the bundled gateway instead:
+Shared `gateway` support is on by default. If disabled, enable it before activating
+a provider. To select the bundled LiteLLM plugin again:
 
 ```sh
-sparkrun proxy start --gateway litellm
+sparkrun setup features enable gateway.litellm
+sparkrun proxy start
 ```
 
 Use `--restart` to replace an already running gateway. Process-level status and

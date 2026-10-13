@@ -6,7 +6,8 @@ the Kubernetes API launch path. Its Python package is `sparkrun.plugins.k8s`.
 
 ## Activation
 
-The loading gate is `integration.k8s`:
+Use `sparkrun plugins enable k8s` / `disable k8s` to control loading.
+Without a plugin override, the legacy `integration.k8s` defaults apply:
 
 | Application | Stable | Beta | Alpha |
 | --- | --- | --- | --- |
@@ -18,16 +19,17 @@ can override these defaults independently of the core feature channel. Explicit
 configuration or product-specific environment settings can override profile defaults.
 
 ```bash
-sparkrun setup features enable integration.k8s
+sparkrun plugins enable k8s
 sparkrun setup k8s --help
-sparkrun setup plugins list
+sparkrun plugins list
 ```
 
-The corresponding environment override is `SPARKRUN_FEATURE_INTEGRATION_K8S=1`.
+The legacy `SPARKRUN_FEATURE_INTEGRATION_K8S=1` override applies only when no
+explicit plugin loading choice is saved.
 Alternate applications use their own command and environment prefix.
 
 When disabled, startup does not import the plugin or register its executor,
-setup commands, run handler, or child features. Only the loading gate appears
+setup commands, run handler, or child features. Disabled plugin capabilities do not appear
 in `setup features list`. Child feature overrides cannot load the parent plugin.
 After enabling the plugin, these features register with a default of **on**:
 

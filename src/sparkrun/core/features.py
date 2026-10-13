@@ -40,6 +40,7 @@ from sparkrun.core.channels import CHANNEL_ALPHA, CHANNEL_BETA, CHANNEL_STABLE, 
 
 if TYPE_CHECKING:
     from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.plugin_identity import PluginIdentity
 
 _ENV_PREFIX = "SPARKRUN_FEATURE_"
 
@@ -79,8 +80,10 @@ class FeatureFlag:
 # --------------------------------------------------------------------------
 
 FEATURE_FLAGS: dict[str, FeatureFlag] = {}
+FEATURE_OWNERS: dict[str, PluginIdentity] = {}
+DECLARED_FEATURE_OWNERS: dict[str, PluginIdentity] = {}
 
-enlist_registry_state(globals(), "FEATURE_FLAGS")
+enlist_registry_state(globals(), "FEATURE_FLAGS", "FEATURE_OWNERS", "DECLARED_FEATURE_OWNERS")
 
 
 def register_feature(flag: FeatureFlag) -> FeatureFlag:
@@ -89,11 +92,30 @@ def register_feature(flag: FeatureFlag) -> FeatureFlag:
     Raises:
         ValueError: if a different flag is already registered under the name.
     """
+    from sparkrun.core.plugin_identity import current_registration_owner, PluginIdentity
+
+    owner = current_registration_owner()
+    previous_owner = FEATURE_OWNERS.get(flag.name)
+    if previous_owner is not None and previous_owner != owner:
+        raise ValueError("Feature %r already belongs to another plugin" % flag.name)
     existing = FEATURE_FLAGS.get(flag.name)
+    if existing is not None and isinstance(owner, PluginIdentity) and previous_owner is None:
+        raise ValueError("Feature %r belongs to core" % flag.name)
     if existing is not None and existing != flag:
         raise ValueError("Feature flag %r already registered with a different definition" % flag.name)
     FEATURE_FLAGS[flag.name] = flag
+    if isinstance(owner, PluginIdentity):
+        FEATURE_OWNERS[flag.name] = owner
     return flag
+
+
+def declare_plugin_features(identity, declarations):
+    """Remember static ownership without registering disabled capabilities."""
+    for name in declarations.get("features", {}):
+        if name in FEATURE_FLAGS and name not in FEATURE_OWNERS:
+            raise ValueError("Feature %r belongs to core" % name)
+    for name in declarations.get("features", {}):
+        DECLARED_FEATURE_OWNERS.setdefault(name, identity)
 
 
 def get_feature(name: str) -> FeatureFlag | None:
@@ -103,7 +125,9 @@ def get_feature(name: str) -> FeatureFlag | None:
 
 def all_features() -> list[FeatureFlag]:
     """Return all registered flags, sorted by name."""
-    return [FEATURE_FLAGS[n] for n in sorted(FEATURE_FLAGS)]
+    from sparkrun.core.plugin_policy import LEGACY_PLUGIN_FLAGS
+
+    return [FEATURE_FLAGS[n] for n in sorted(FEATURE_FLAGS) if n not in LEGACY_PLUGIN_FLAGS.values()]
 
 
 # --------------------------------------------------------------------------
@@ -139,7 +163,7 @@ def _application_default(name: str, config: "SparkrunConfig | None") -> tuple[bo
     return None, "unset"
 
 
-def is_feature_enabled(
+def _raw_feature_enabled(
     name: str,
     *,
     config: "SparkrunConfig | None" = None,
@@ -175,6 +199,29 @@ def is_feature_enabled(
 
     # Unknown flag, no override anywhere — fail closed.
     return False
+
+
+def is_feature_enabled(name: str, *, config=None, channel=None, env=None) -> bool:
+    from sparkrun.core.plugin_policy import LEGACY_PLUGIN_FLAGS, plugin_state
+
+    for plugin, alias in LEGACY_PLUGIN_FLAGS.items():
+        if name == alias:
+            return plugin_state(plugin, config, env=env, channel=channel).enabled
+    if name.startswith("gateway.") and not _raw_feature_enabled("gateway", config=config, channel=channel, env=env):
+        return False
+    owner = FEATURE_OWNERS.get(name) or DECLARED_FEATURE_OWNERS.get(name)
+    if owner is not None and (
+        name not in FEATURE_FLAGS or not plugin_state(owner.plugin_id, config, source=owner.source[0], env=env).enabled
+    ):
+        return False
+    return _raw_feature_enabled(name, config=config, channel=channel, env=env)
+
+
+def clear_plugin_features():
+    for name in FEATURE_OWNERS:
+        FEATURE_FLAGS.pop(name, None)
+    FEATURE_OWNERS.clear()
+    DECLARED_FEATURE_OWNERS.clear()
 
 
 def feature_gate_enabled(feature: str, v=None) -> bool:
@@ -336,16 +383,6 @@ FEATURE_CLI_SETUP_RDMA_TEST_NCCL = register_feature(
     )
 )
 
-# LiteLLM is bundled and available on every channel. Separately installed
-# gateway plugins remain selectable through explicit config/env overrides.
-FEATURE_GATEWAY_LITELLM = register_feature(
-    FeatureFlag(
-        name="gateway.litellm",
-        description="LiteLLM gateway behind 'sparkrun proxy' (enabled by default on all channels)",
-        default=True,
-    )
-)
-
 # Loading out-of-tree plugins from ``plugins.paths`` executes user-supplied
 # Python at startup; keep it off by default on every channel so a stock install
 # never reads (let alone imports) external plugin directories unless the user
@@ -391,14 +428,6 @@ FEATURE_REGISTRY_LIL = register_feature(
 )
 
 
-FEATURE_GATEWAY_SPARKROUTE = register_feature(
-    FeatureFlag(
-        name="gateway.sparkroute",
-        description="SparkRoute gateway and workload bridge (requires the separately installed plugin; opt-in on all channels)",
-        default=False,
-    )
-)
-
 # Setup policy is shared by readiness checks and the wizard. Hardware support
 # remains a separate prerequisite; these flags never qualify an unknown target.
 register_feature(FeatureFlag("cli.setup.wizard", "Guided hardware-aware host setup", default=True))
@@ -427,3 +456,5 @@ FEATURE_PLUGIN_OCI_RELAY = register_feature(
 )
 
 register_feature(FeatureFlag("daemon", "Local durable API service", channel_defaults={CHANNEL_ALPHA: True}))
+
+FEATURE_GATEWAY = register_feature(FeatureFlag("gateway", "Inference gateway support and proxy commands", default=True))

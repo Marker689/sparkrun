@@ -16,30 +16,13 @@ existing first-party packages that *do* map cleanly onto one extension point
 ``benchmarking``) stay where they are and keep their own
 ``find_types_in_modules`` scan in :mod:`sparkrun.core.bootstrap`.
 
-**Every in-tree plugin is gated by a feature flag**, for the same reason
-``executor.docker`` and ``gateway.litellm`` carry one despite shipping enabled:
-every plugin surface should be controllable the same way. The flag is checked
-*before* the import, so turning a plugin off costs nothing at all — no import,
-no commands, no registrations.
+Plugin loading is controlled by the shared ``plugins.enabled`` policy, checked
+before import. Existing whole-plugin flags remain migration fallbacks. Enabled
+plugins may register separate capability flags, which cannot load a disabled
+parent. ``IN_TREE_PLUGIN_FEATURES`` retains the known module inventory and legacy
+bindings. External loading additionally requires ``core.external_plugins``.
 
-The loading gate controls the whole integration. A plugin may additionally
-expose ``FEATURE_DEFINITIONS`` for individual capabilities; those definitions
-register only after the loading gate is enabled, before its implementations
-are scanned. Child overrides cannot load a disabled parent.
-
-The binding lives in :data:`IN_TREE_PLUGIN_FEATURES` rather than on the plugin
-because the flag has to be known *without importing* the module it gates —
-which is the whole point of checking before the import.
-
-Two deliberate differences from the external loader:
-
-* **Per-plugin flags, not one flag for the mechanism.** Out-of-tree loading is
-  all-or-nothing behind ``core.external_plugins`` because the set of plugins is
-  unknown until the config is read; here the set is fixed at build time, so
-  each gets its own switch.
-* **A failure here is our bug, not a user's.** It is still non-fatal — a broken
-  integration must not stop ``sparkrun run`` from working — but it logs at
-  exception level rather than being quietly skipped.
+A broken bundled plugin is logged and skipped so unrelated commands still work.
 
 (There is also no ``sys.path`` manipulation: these are already importable.)
 """
@@ -53,7 +36,6 @@ import pkgutil
 from typing import TYPE_CHECKING
 
 from sparkrun.core.registration import load_and_register_plugin
-from sparkrun.core.features import feature_gate_enabled, get_feature
 from sparkrun.core.registry_defaults import DeclarationTier
 
 if TYPE_CHECKING:
@@ -66,7 +48,7 @@ IN_TREE_PLUGIN_PACKAGE = "sparkrun.plugins"
 
 #: Plugins shipped and tested with this Sparkrun release. Namespace membership
 #: alone is not ownership: separately installed plugins can live there too.
-BUNDLED_PLUGIN_NAMES = frozenset({"k8s", "lil", "oci_relay", "sparkarena"})
+BUNDLED_PLUGIN_NAMES = frozenset({"k8s", "lil", "oci_relay", "sparkarena", "litellm"})
 
 #: In-tree plugin module name -> the feature flag gating it.
 #:
@@ -76,7 +58,8 @@ BUNDLED_PLUGIN_NAMES = frozenset({"k8s", "lil", "oci_relay", "sparkarena"})
 #: exactly what the gate is meant to avoid.
 # SparkRoute and ColdSnap are not bundled, but keep their pre-import gates for
 # users who install their packages separately into this plugin namespace.
-IN_TREE_PLUGIN_FEATURES: dict[str, str] = {
+IN_TREE_PLUGIN_FEATURES: dict[str, str | None] = {
+    "litellm": None,
     "sparkroute": "gateway.sparkroute",
     "coldsnap": "plugins.coldsnap",
     "oci_relay": "plugins.oci_relay",
@@ -119,6 +102,23 @@ def plugin_feature_flag(name: str) -> str | None:
     return IN_TREE_PLUGIN_FEATURES.get(name)
 
 
+def in_tree_plugin_enabled(name, v=None, *, config=None):
+    from sparkrun.core.features import _gate_config
+    from sparkrun.core.plugin_policy import plugin_state
+    from sparkrun.core.plugin_manifest import read_declarations
+    from sparkrun.core.plugin_metadata import plugin_origin
+
+    if name not in IN_TREE_PLUGIN_FEATURES:
+        return False
+    module = IN_TREE_PLUGIN_PACKAGE + "." + name
+    try:
+        declarations = read_declarations(plugin_origin(module), module)
+    except (OSError, ValueError):
+        declarations = {}  # Keep metadata-only disable/recovery available.
+    legacy = plugin_feature_flag(name) if not declarations and name != "litellm" else None
+    return plugin_state(name, config if config is not None else _gate_config(v), legacy_feature=legacy).enabled
+
+
 def iter_in_tree_plugin_names(package: str | None = None) -> list[str]:
     """Return the plugin subpackage names shipped under *package*.
 
@@ -159,7 +159,7 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
     loaded: list[str] = []
     for name in iter_in_tree_plugin_names(package):
         flag = plugin_feature_flag(name)
-        if flag is None or get_feature(flag) is None:
+        if name not in IN_TREE_PLUGIN_FEATURES:
             # Skipping either way (an unregistered flag resolves off), but
             # silently — and the reason would be far from the cause. Shipping
             # an in-tree plugin means an IN_TREE_PLUGIN_FEATURES entry and a
@@ -171,7 +171,7 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
                 flag or "no entry",
             )
             continue
-        if not feature_gate_enabled(flag, v):
+        if not in_tree_plugin_enabled(name, v):
             logger.debug("Skipping in-tree plugin %r (feature %r off)", name, flag)
             continue
 
@@ -208,17 +208,24 @@ def in_tree_plugin_identities(v, package=None):
 
     package = package or IN_TREE_PLUGIN_PACKAGE
     identities = {}
+    from sparkrun.core.plugin_manifest import read_declarations
+    from sparkrun.core.features import declare_plugin_features
+
     for name in iter_in_tree_plugin_names(package):
-        flag = plugin_feature_flag(name)
-        if not flag or not get_feature(flag) or not feature_gate_enabled(flag, v) or plugin_application_profile_failure(name):
+        if name not in IN_TREE_PLUGIN_FEATURES:
             continue
         dotted = package + "." + name
         source = ("in-tree", dotted, None)
         try:
-            identities[name] = discovered_identity(name, dotted, source, origin=physical_origin(dotted))
+            origin = physical_origin(dotted)
+            identity = discovered_identity(name, dotted, source, origin=origin)
+            declare_plugin_features(identity, read_declarations(origin, dotted))
+            if in_tree_plugin_enabled(name, v) and not plugin_application_profile_failure(name):
+                identities[name] = identity
         except (ValueError, OSError) as exc:
             record_plugin_load_failure(source, exc)
             logger.warning("Skipping plugin %s: %s", dotted, exc)
+
     return identities
 
 

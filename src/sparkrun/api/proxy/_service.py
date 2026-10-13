@@ -14,6 +14,8 @@ caller can collect it its own way.
 
 from __future__ import annotations
 
+from ._policy import gateway_operation
+
 from sparkrun.core.coordination import operation_boundary
 
 import logging
@@ -155,6 +157,7 @@ def spec_from_record(record: Any) -> "UnitSpec | None":
 
 
 @operation_boundary(mutation=True)
+@gateway_operation
 def install_service(options: ProxyServiceOptions | None = None, *, sctx: "SparkrunContext | None" = None) -> ProxyServiceInstallResult:
     """Install (or update) the caller's proxy unit and enable it.
 

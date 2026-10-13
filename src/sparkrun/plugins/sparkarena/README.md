@@ -2,9 +2,9 @@
 
 The `sparkarena` in-tree plugin (`sparkrun.plugins.sparkarena`) owns
 authentication, the `arena` command group, benchmark
-submission flags, the pinned Arena profile, and result upload. Its only feature
-gate is `integration.arena`, enabled in Sparkrun and configurable through an
-application profile. It does not register a measurement framework.
+submission flags, the pinned Arena profile, and result upload. It defaults on;
+`sparkrun plugins disable sparkarena` disables the whole integration. Application
+profiles can choose its loading default. `integration.arena` is a legacy fallback. It does not register a measurement framework.
 
 ```bash
 sparkrun arena login

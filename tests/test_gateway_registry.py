@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+
 from sparkrun.core.features import FEATURE_FLAGS, FeatureFlag, register_feature
 from sparkrun.proxy._supervisor import GatewaySupervisor
 from sparkrun.proxy.gateway import (
@@ -91,9 +92,9 @@ def fake_gateway(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_litellm_resolves_with_no_plugin_registered():
-    """The built-in default is core, not a plugin: proxy must resolve to it."""
-    from sparkrun.proxy.engine import ProxyEngine
+def test_litellm_resolves_after_plugin_registration():
+    """The bundled default resolves after loading its plugin."""
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     assert gateway_class(DEFAULT_GATEWAY) is ProxyEngine
     assert GATEWAY_FEATURE_FLAGS[DEFAULT_GATEWAY] == "gateway.litellm"
@@ -289,7 +290,12 @@ def test_data_plane_authentication_defaults_to_false(fake_gateway):
     """The safe assumption: a gateway that authenticates has to say so."""
     assert FakeGateway().data_plane_authenticated is False
 
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     assert ProxyEngine(master_key="sk-x").data_plane_authenticated is True
     assert ProxyEngine(master_key=None).data_plane_authenticated is False
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

@@ -29,12 +29,23 @@ logger = logging.getLogger(__name__)
 
 
 @click.group()
-def proxy():
+@click.pass_context
+def proxy(ctx):
     """Manage the inference proxy through a pluggable gateway.
 
     The proxy discovers running {app_command} inference endpoints and
     presents them through a single unified OpenAI-compatible API.
     """
+    from sparkrun.core.features import feature_gate_enabled
+
+    try:
+        enabled = feature_gate_enabled("gateway")
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not enabled and ctx.invoked_subcommand not in {"status", "stop"}:
+        raise click.ClickException(
+            "Gateway support is disabled; enable it with sparkrun setup features enable gateway. Status and stop remain available for recovery."
+        )
 
 
 # ---------------------------------------------------------------------------

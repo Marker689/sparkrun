@@ -440,6 +440,8 @@ def setup_features_list(ctx, output_json, include_all):
 
     config = _get_context(ctx).config
     channel = config.feature_channel
+    from sparkrun.core.features import FEATURE_OWNERS
+
     flags = [flag for flag in all_features() if include_all or not flag.name.startswith("setup.steps.")]
 
     if output_json:
@@ -449,6 +451,7 @@ def setup_features_list(ctx, output_json, include_all):
             [
                 {
                     "name": flag.name,
+                    "owner": getattr(FEATURE_OWNERS.get(flag.name), "plugin_id", "core"),
                     "description": flag.description,
                     "enabled": enabled,
                     "source": source,
@@ -473,7 +476,8 @@ def setup_features_list(ctx, output_json, include_all):
     for flag in flags:
         enabled, source, _override = _feature_state(config, flag)
         state = "on " if enabled else "off"
-        click.echo("%-*s  %s  (%-7s)  %s" % (width, flag.name, state, source, flag.description))
+        owner = getattr(FEATURE_OWNERS.get(flag.name), "plugin_id", "core")
+        click.echo("%-*s  %s  (%-7s)  %-12s  %s" % (width, flag.name, state, source, owner, flag.description))
 
 
 def _require_known_flag(name):
@@ -487,61 +491,44 @@ def _require_known_flag(name):
     return flag
 
 
-def _set_feature_override(config, name, value):
-    """Persist ``features.<name> = value`` to config and save.
+def _change_feature(ctx, name, enabled):
+    from sparkrun.cli._plugins import management_config, _show_result
+    from sparkrun.core.plugin_lifecycle import change_feature
+    from sparkrun.core.plugin_manifest import PluginError
 
-    Writes the literal flag name (e.g. ``executor.k8s``) as a single key
-    under ``features`` — ``config.set`` splits on dots, so the nested
-    ``features`` dict is edited directly instead.
-    """
-    features = config.get("features")
-    if not isinstance(features, dict):
-        features = {}
-    features[name] = value
-    config.set("features", features)
-    config.save()
+    try:
+        _show_result(change_feature(management_config(ctx), name, enabled))
+    except (PluginError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @setup_features.command("enable")
 @click.argument("name")
 @click.pass_context
 def setup_features_enable(ctx, name):
-    """Force feature NAME on (writes features.<name>: true)."""
-    _require_known_flag(name)
-    config = _get_context(ctx).config
-    _set_feature_override(config, name, True)
-    click.echo("Feature %r enabled. Restart in-progress commands to pick up the change." % name)
+    """Enable capability NAME and run its explicit enable hook.
+
+    A gateway feature also selects that provider for subsequent starts.
+    Repeating the command repeats the idempotent hook. The owning plugin must
+    already be enabled; environment overrides cannot be bypassed.
+    """
+    _change_feature(ctx, name, True)
 
 
 @setup_features.command("disable")
 @click.argument("name")
 @click.pass_context
 def setup_features_disable(ctx, name):
-    """Force feature NAME off (writes features.<name>: false)."""
-    _require_known_flag(name)
-    config = _get_context(ctx).config
-    _set_feature_override(config, name, False)
-    click.echo("Feature %r disabled." % name)
+    """Disable capability NAME without disabling its plugin or stopping services."""
+    _change_feature(ctx, name, False)
 
 
 @setup_features.command("reset")
 @click.argument("name")
 @click.pass_context
 def setup_features_reset(ctx, name):
-    """Clear the explicit override for NAME (restore application/core defaults)."""
-    _require_known_flag(name)
-    config = _get_context(ctx).config
-    features = config.get("features")
-    if isinstance(features, dict) and name in features:
-        del features[name]
-        config.set("features", features)
-        config.save()
-        click.echo("Feature %r override cleared; now follows the default policy." % name)
-    else:
-        click.echo("Feature %r had no explicit override." % name)
-    from sparkrun.core.features import feature_source
-
-    click.echo("Effective: %s (%s)" % ("on" if config.is_feature_enabled(name) else "off", feature_source(name, config=config)))
+    """Clear NAME's override; restore defaults without activation hooks or selection changes."""
+    _change_feature(ctx, name, None)
 
 
 def _run_ssh_diagnose(host_list, user, local_user):

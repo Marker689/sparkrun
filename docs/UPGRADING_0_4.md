@@ -33,12 +33,13 @@ and ColdSnap are installed independently of the core environment:
 
 ```sh
 sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin --enable
+sparkrun setup features enable gateway.sparkroute
 sparkrun plugins add https://github.com/sparksq/sparkrun-coldsnap-plugin --enable
 ```
 
 Only install the plugins you use. Review each source at the trust prompt;
 consent also covers future compatible updates from that source. Adding a plugin
-can enable external loading, while `--enable` opts into its capability. Neither
+can enable external loading, while `--enable` enables plugin loading and preserves capability settings. Neither
 capability defaults on. Existing manually configured copies are not converted
 automatically; resolve duplicate providers before installing a managed copy.
 

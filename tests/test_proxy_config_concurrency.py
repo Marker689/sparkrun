@@ -167,7 +167,7 @@ def test_the_module_imports_without_fcntl(monkeypatch):
 
 
 def test_saving_still_works_with_no_fcntl(config_path: Path, monkeypatch):
-    """Degrades to atomic-replace-without-locking, not to failing."""
+    """Proxy config delegates locking to the shared portable helper."""
     import sparkrun.proxy.config as config_mod
 
     monkeypatch.setattr(config_mod, "fcntl", None)
@@ -177,8 +177,8 @@ def test_saving_still_works_with_no_fcntl(config_path: Path, monkeypatch):
     cfg.save()
 
     assert _read(config_path)["aliases"] == {"fast": "model"}
-    # No lock sidecar is created when there is nothing to lock with.
-    assert not Path(str(config_path) + ".lock").exists()
+    # The portable lock remains active independently of the old module import.
+    assert Path(str(config_path) + ".lock").exists()
 
 
 # --------------------------------------------------------------------------

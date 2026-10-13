@@ -88,8 +88,8 @@ with `MULTIPLATFORM.md`, `EXECUTORS.md`, and `SECURITY.md` for the deeper dives.
 ### `plugins/k8s/`
 
 The optional Kubernetes integration owns its executor and config model, setup
-commands, API, kubectl helpers, and Kueue/JobSet launch path. Its parent gate is
-`integration.k8s`; child features register only when that plugin loads.
+commands, API, kubectl helpers, and Kueue/JobSet launch path. Enable it with
+`sparkrun plugins enable k8s`; child features register only when that plugin loads.
 See the [plugin guide](../src/sparkrun/plugins/k8s/README.md).
 
 ### `platforms/`

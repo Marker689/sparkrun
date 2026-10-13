@@ -111,3 +111,7 @@ __all__ += [
 
 
 __all__ += ["WORKLOAD_LIFECYCLE_API_VERSION", "WorkloadLifecycleProvider", "register_workload_lifecycle"]
+
+from sparkrun.plugin_lifecycle import PLUGIN_LIFECYCLE_API_VERSION, LifecycleContext, LifecyclePlan, select_gateway  # noqa: E402
+
+__all__ += ["PLUGIN_LIFECYCLE_API_VERSION", "LifecycleContext", "LifecyclePlan", "select_gateway"]

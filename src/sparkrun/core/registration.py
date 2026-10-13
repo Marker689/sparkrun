@@ -147,6 +147,7 @@ def load_and_register_plugin(
     tier: DeclarationTier | None = None,
     source: tuple[str, str, str | None] | None = None,
     identity=None,
+    declarations=None,
 ) -> ModuleType:
     """Import, validate and register one module in a single transaction.
 
@@ -172,7 +173,7 @@ def load_and_register_plugin(
                 api_version = getattr(module, "SPARKRUN_PLUGIN_API_VERSION", None)
                 if type(api_version) is not int or api_version != PLUGIN_API_VERSION:
                     raise PluginCompatibilityError(module.__name__, api_version)
-                _register_plugin_module(module, v, tier=tier)
+                _register_plugin_module(module, v, tier=tier, declarations=declarations)
             from sparkrun.core.setup_steps import validate_setup_plans
 
             validate_setup_plans()  # Validate forward references after the whole module registered.

@@ -268,6 +268,7 @@ def register_proxy_ops():
                 scope="admin",
                 visibility="internal" if name in {"proxy.watch", "proxy.serve"} else "public",
                 resources="none",
+                feature_flag="gateway" if name in {"proxy.discovery.ensure", "proxy.watch", "proxy.serve"} else None,
                 description="Manage the proxy's dedicated gateway or discovery service.",
             )
         )

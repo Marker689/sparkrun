@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import pytest
+
 import yaml
 from click.testing import CliRunner
 
@@ -72,7 +73,7 @@ def test_profile_source_plugins_load_without_user_config(tmp_path, monkeypatch):
 @pytest.mark.parametrize("operation", ["prepare", "start", "save", "sidecar"])
 def test_foreign_gateway_state_is_preserved_before_any_mutation(tmp_path, monkeypatch, operation):
     from sparkrun.proxy._supervisor import GatewayOperationError
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     state = tmp_path / "state.yaml"
     state.write_text(yaml.safe_dump({"distribution": "jetsonrun", "pid": os.getpid(), "master_key": "foreign-key"}))
@@ -99,7 +100,7 @@ def test_foreign_gateway_state_is_preserved_before_any_mutation(tmp_path, monkey
 
 
 def test_gateway_claim_survives_stop_and_rejects_other_application(tmp_path):
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     engine = ProxyEngine(state_dir=tmp_path)
     engine._save_state(99999)
@@ -123,7 +124,7 @@ sys.exit(1)
 
 
 def test_gateway_prepare_respects_explicit_state_directory_and_dry_run(tmp_path):
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     root = tmp_path / "custom"
     engine = ProxyEngine(state_dir=root)
@@ -219,7 +220,7 @@ else:
 
 
 def test_legacy_gateway_state_can_be_adopted_by_sparkrun(tmp_path):
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     (tmp_path / "state.yaml").write_text(yaml.safe_dump({"pid": 99999, "master_key": "legacy-key"}))
     engine = ProxyEngine(state_dir=tmp_path)
@@ -229,7 +230,7 @@ def test_legacy_gateway_state_can_be_adopted_by_sparkrun(tmp_path):
 
 @pytest.mark.parametrize("state", ["[invalid", "- list", "null"])
 def test_invalid_gateway_state_cannot_be_overwritten(tmp_path, state):
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
     from sparkrun.proxy._supervisor import GatewayOperationError
 
     path = tmp_path / "state.yaml"
@@ -412,3 +413,8 @@ def test_competing_native_launches_cannot_both_claim_pid_path(tmp_path, monkeypa
     assert sorted(result.returncode for result in results) == [0, 1]
     winner = "sparkrun" if results[0].returncode == 0 else "jetsonrun"
     assert (tmp_path / (name + ".pid.owner")).read_text() == winner
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

@@ -18,6 +18,8 @@ requires a loaded implementation; process recovery cannot reconcile models.
 
 from __future__ import annotations
 
+from ._policy import gateway_operation
+
 from sparkrun.core.coordination import operation_boundary
 
 import logging
@@ -337,7 +339,9 @@ def _running_engine(sctx: "SparkrunContext | None" = None) -> GatewaySupervisor:
     probe = GatewayState()
     state = probe.get_state() or {}
     gateway = str(state.get("gateway") or DEFAULT_GATEWAY)
-    if sctx is not None:
+    from sparkrun.core.features import is_feature_enabled
+
+    if sctx is not None and is_feature_enabled("gateway", config=sctx.config):
         try:
             engine_cls = _engine_class(gateway)
         except GatewayUnavailable:
@@ -389,6 +393,7 @@ def _engine_config_kwargs(gateway: str, sctx: "SparkrunContext | None") -> dict[
 
 
 @operation_boundary()
+@gateway_operation
 def start(options: ProxyStartOptions | None = None, *, sctx: "SparkrunContext | None" = None) -> ProxyStartResult:
     """Discover endpoints, write the gateway config, and start the gateway.
 
@@ -679,6 +684,7 @@ def _managed_by(state: dict) -> str | None:
     return None
 
 
+@gateway_operation
 def models(*, sctx: "SparkrunContext | None" = None) -> tuple[ProxyModel, ...]:
     """Return served models (empty when stopped); raise ProxyQueryFailed if unavailable."""
     return status(sctx=sctx).require_models()
@@ -694,6 +700,7 @@ def _gateway_update_errors():
 
 
 @operation_boundary()
+@gateway_operation
 def sync(
     *,
     endpoints: "list[DiscoveredEndpoint] | None" = None,
@@ -748,6 +755,7 @@ def sync(
 
 
 @operation_boundary(mutation=True)
+@gateway_operation
 def register_loaded_model(
     recipe: str,
     *,
@@ -776,6 +784,7 @@ def register_loaded_model(
 
 
 @operation_boundary(mutation=True)
+@gateway_operation
 def unregister_loaded_model(
     recipe: str,
     *,
@@ -809,6 +818,7 @@ def list_aliases(*, sctx: "SparkrunContext | None" = None) -> dict[str, str]:
 
 
 @operation_boundary(mutation=True)
+@gateway_operation
 def add_alias(alias: str, target: str, *, sctx: "SparkrunContext | None" = None) -> ProxyAliasResult:
     """Add (or update) an alias and apply it to a running proxy.
 
@@ -836,6 +846,7 @@ def add_alias(alias: str, target: str, *, sctx: "SparkrunContext | None" = None)
 
 
 @operation_boundary(mutation=True)
+@gateway_operation
 def remove_alias(alias: str, *, sctx: "SparkrunContext | None" = None) -> ProxyAliasResult:
     """Remove an alias and drop it from a running proxy.
 
@@ -1212,6 +1223,7 @@ class ProxyUiResult:
     auth_required: bool = True
 
 
+@gateway_operation
 def ui(*, issue_token: bool = False, sctx: "SparkrunContext | None" = None) -> ProxyUiResult:
     """Locate the running gateway's admin console, optionally minting access.
 
@@ -1248,6 +1260,7 @@ def ui(*, issue_token: bool = False, sctx: "SparkrunContext | None" = None) -> P
         )
 
 
+@gateway_operation
 def admin_token(*, rotate: bool = False, clear: bool = False, sctx: "SparkrunContext | None" = None) -> str | None:
     """Return, rotate, or clear the managed gateway's live admin token.
 

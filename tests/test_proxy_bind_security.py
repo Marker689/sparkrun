@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import logging
 import os
 import stat
@@ -29,8 +31,8 @@ def _start_engine_capturing(engine, state_dir: Path):
     config_path.write_text("model_list: []\n")
 
     with (
-        patch("sparkrun.proxy.engine.shutil.which", return_value="/usr/bin/uvx"),
-        patch("sparkrun.proxy.engine.subprocess.Popen", side_effect=fake_popen),
+        patch("sparkrun.plugins.litellm.engine.shutil.which", return_value="/usr/bin/uvx"),
+        patch("sparkrun.plugins.litellm.engine.subprocess.Popen", side_effect=fake_popen),
         patch("time.sleep", lambda *_a, **_k: None),
     ):
         rc = engine.start(config_path=config_path, foreground=False)
@@ -45,7 +47,7 @@ def _start_engine_capturing(engine, state_dir: Path):
 class TestSecretFilePermissions:
     def test_state_file_is_owner_only(self, tmp_path: Path):
         """_save_state writes state.yaml with 0o600 perms and 0o700 parent dir."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         engine = ProxyEngine(master_key="secret", state_dir=state_dir)
@@ -59,12 +61,12 @@ class TestSecretFilePermissions:
 
     def test_autodiscover_file_is_owner_only(self, tmp_path: Path):
         """start_autodiscover writes autodiscover.yaml with 0o600 perms."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         engine = ProxyEngine(master_key="secret", state_dir=state_dir)
 
-        with patch("sparkrun.proxy.engine.subprocess.Popen") as mock_popen:
+        with patch("sparkrun.plugins.litellm.engine.subprocess.Popen") as mock_popen:
             mock_popen.return_value = MagicMock(pid=222)
             engine.start_autodiscover(proxy_pid=111, interval=5)
 
@@ -82,7 +84,7 @@ class TestSecretFilePermissions:
         The litellm config carries general_settings.master_key plus every
         upstream endpoint api_key, so it must be owner-only at rest.
         """
-        from sparkrun.proxy.engine import write_config
+        from sparkrun.plugins.litellm.engine import write_config
 
         config_path = tmp_path / "proxy" / "litellm_config.yaml"
         config = {
@@ -98,7 +100,7 @@ class TestSecretFilePermissions:
 
     def test_litellm_config_repairs_preexisting_world_readable_file(self, tmp_path: Path):
         """A pre-existing 0o644 config (older version) is tightened to 0o600."""
-        from sparkrun.proxy.engine import write_config
+        from sparkrun.plugins.litellm.engine import write_config
 
         config_dir = tmp_path / "proxy"
         config_dir.mkdir(parents=True)
@@ -144,12 +146,12 @@ class TestBindHostConfig:
 class TestLoudWarning:
     def test_warns_when_unconfigured_and_no_master_key(self, tmp_path: Path, caplog):
         """Loud unauthenticated warning fires on start when nothing configured."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         engine = ProxyEngine(host="0.0.0.0", master_key=None, state_dir=state_dir, host_configured=False)
 
-        with caplog.at_level(logging.WARNING, logger="sparkrun.proxy.engine"):
+        with caplog.at_level(logging.WARNING, logger="sparkrun.plugins.litellm.engine"):
             rc, _cmds = _start_engine_capturing(engine, state_dir)
 
         assert rc == 0
@@ -160,12 +162,12 @@ class TestLoudWarning:
 
     def test_softer_warning_when_master_key_set(self, tmp_path: Path, caplog):
         """With a master key, the warning notes auth is enabled, not unauthenticated."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         engine = ProxyEngine(host="0.0.0.0", master_key="secret", state_dir=state_dir, host_configured=False)
 
-        with caplog.at_level(logging.WARNING, logger="sparkrun.proxy.engine"):
+        with caplog.at_level(logging.WARNING, logger="sparkrun.plugins.litellm.engine"):
             rc, _cmds = _start_engine_capturing(engine, state_dir)
 
         assert rc == 0
@@ -175,12 +177,12 @@ class TestLoudWarning:
 
     def test_no_warning_when_host_explicitly_configured(self, tmp_path: Path, caplog):
         """Explicit bind host overrides the legacy default and silences the warning."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         engine = ProxyEngine(host="127.0.0.1", master_key=None, state_dir=state_dir, host_configured=True)
 
-        with caplog.at_level(logging.WARNING, logger="sparkrun.proxy.engine"):
+        with caplog.at_level(logging.WARNING, logger="sparkrun.plugins.litellm.engine"):
             rc, cmds = _start_engine_capturing(engine, state_dir)
 
         assert rc == 0
@@ -195,7 +197,7 @@ class TestPersistedBindHostReused:
     def test_explicit_bind_host_persisted_and_reused_in_cmd(self, tmp_path: Path):
         """A persisted bind host flows into the litellm launch command on restart."""
         from sparkrun.proxy.config import ProxyConfig
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         cfg_path = tmp_path / "proxy.yaml"
         cfg = ProxyConfig(config_path=cfg_path)
@@ -215,3 +217,8 @@ class TestPersistedBindHostReused:
         assert rc == 0
         assert "127.0.0.1" in cmds[0]
         assert "0.0.0.0" not in cmds[0]
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

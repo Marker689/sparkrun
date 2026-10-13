@@ -3,12 +3,13 @@
 from unittest.mock import Mock
 
 import pytest
+
 from click.testing import CliRunner
 
 from sparkrun import api
 from sparkrun.api.proxy import _ops
 from sparkrun.proxy.contracts import GatewayOperationError
-from sparkrun.proxy.engine import ProxyEngine
+from sparkrun.plugins.litellm.engine import ProxyEngine
 from sparkrun.proxy.gateway import GatewayUnavailableError
 
 
@@ -71,3 +72,8 @@ def test_provider_refusal_is_a_public_error_and_a_readable_cli_failure(monkeypat
     assert result.exit_code == 1
     assert "Error: provider configuration is invalid" in result.stderr
     assert isinstance(result.exception, SystemExit)
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

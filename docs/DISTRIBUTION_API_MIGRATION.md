@@ -77,8 +77,9 @@ operation to mutate `sctx.config.ssh_user`.
 | Run-handler callback with individual resolved arguments | `(options, sctx, *, plan: RunPlan, started_at: float) -> RunResult`. Inspect public `rc`; the private launch handle is optional. |
 | `core.installed_plugins.registration_transaction(v)` | `core.registration.registry_transaction(v)`. All loaders use one shared import/registration boundary. |
 
-Arena's `integration.arena` gate registers its CLI and benchmark hooks; Sparkrun
-enables it by default. Kubernetes requires the parent `integration.k8s` gate.
+The `sparkarena` plugin registers its CLI and benchmark hooks; Sparkrun enables
+it by default. Kubernetes requires `sparkrun plugins enable k8s`. The former
+whole-plugin feature gates remain migration fallbacks.
 On stable/beta, enabling only `executor.k8s` is insufficient. On alpha, the parent
 and its `executor.k8s`, `cli.setup.k8s`, and `api.run.k8s` children default on.
 Explicit profile/user policy overrides defaults. See the

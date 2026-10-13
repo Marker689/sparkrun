@@ -143,6 +143,9 @@ def merge_defaults(baseline: dict, overrides: dict) -> dict:
     return result
 
 
+_lifecycle_snapshot: tuple[Path, dict] | None = None
+
+
 class SparkrunConfig:
     """Manages sparkrun user configuration."""
 
@@ -174,7 +177,10 @@ class SparkrunConfig:
         return "config"
 
     def _load(self):
-        data = read_yaml(str(self.config_path)) if self.config_path.exists() else None
+        if _lifecycle_snapshot is not None and self.config_path == _lifecycle_snapshot[0]:
+            data = deepcopy(_lifecycle_snapshot[1])
+        else:
+            data = read_yaml(str(self.config_path)) if self.config_path.exists() else None
         if data is None:
             data = {}
         if not isinstance(data, dict):
@@ -554,6 +560,8 @@ class SparkrunConfig:
         """Persist the current config data to disk."""
         from sparkrun.utils.fs import atomic_private_write, file_lock
 
+        if _lifecycle_snapshot is not None:
+            raise ValueError("Lifecycle hooks return configuration plans; they must not save configuration")
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(self.config_path.parent / "plugins.lock"):
             journal = self.config_path.parent / "plugins-transaction.yaml"

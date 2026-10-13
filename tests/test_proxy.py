@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 import yaml
 
 from click.testing import CliRunner
@@ -866,7 +867,7 @@ class TestEngineConfig:
     def test_build_config_basic(self):
         """Build litellm config from endpoints."""
         from sparkrun.proxy.discovery import DiscoveredEndpoint
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         endpoints = [
             DiscoveredEndpoint(
@@ -895,7 +896,7 @@ class TestEngineConfig:
     def test_build_config_no_aliases_in_config(self):
         """Aliases are no longer baked into litellm config (applied via API)."""
         from sparkrun.proxy.discovery import DiscoveredEndpoint
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         endpoints = [
             DiscoveredEndpoint(
@@ -917,7 +918,7 @@ class TestEngineConfig:
     def test_build_config_skips_unhealthy(self):
         """Unhealthy endpoints are excluded from config."""
         from sparkrun.proxy.discovery import DiscoveredEndpoint
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         endpoints = [
             DiscoveredEndpoint(
@@ -949,7 +950,7 @@ class TestEngineConfig:
     def test_build_config_uses_endpoint_api_key(self):
         """Endpoint api_key flows through to litellm_params; absent → 'not-needed'."""
         from sparkrun.proxy.discovery import DiscoveredEndpoint
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         endpoints = [
             DiscoveredEndpoint(
@@ -982,7 +983,7 @@ class TestEngineConfig:
     def test_build_config_deduplicates(self):
         """Same model on same host:port is deduplicated."""
         from sparkrun.proxy.discovery import DiscoveredEndpoint
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         ep = DiscoveredEndpoint(
             cluster_id="sparkrun_abc",
@@ -1000,7 +1001,7 @@ class TestEngineConfig:
 
     def test_write_config(self, tmp_path: Path):
         """Config dict is written to YAML file."""
-        from sparkrun.proxy.engine import write_config
+        from sparkrun.plugins.litellm.engine import write_config
 
         config_dict = {"model_list": [], "general_settings": {"master_key": "test"}}
         path = write_config(config_dict, config_path=tmp_path / "test_config.yaml")
@@ -1021,7 +1022,7 @@ class TestEngineLifecycle:
 
     def test_start_dry_run(self, state_dir: Path):
         """Dry-run start returns 0 without launching."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         with patch("shutil.which", return_value="/usr/bin/uvx"):
@@ -1033,7 +1034,7 @@ class TestEngineLifecycle:
 
     def test_start_no_uvx(self, state_dir: Path):
         """Start fails gracefully when uvx is not found."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         with patch("shutil.which", return_value=None):
@@ -1042,7 +1043,7 @@ class TestEngineLifecycle:
 
     def test_start_daemonized(self, state_dir: Path):
         """Daemonized start saves PID to state file."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
 
@@ -1058,7 +1059,7 @@ class TestEngineLifecycle:
 
     def test_stop_sends_sigterm(self, state_dir: Path):
         """Stop sends SIGTERM and clears state."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         engine._save_state(99999)
@@ -1072,7 +1073,7 @@ class TestEngineLifecycle:
 
     def test_stop_stale_pid(self, state_dir: Path):
         """Stop handles stale PID gracefully."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         engine._save_state(99999)
@@ -1085,14 +1086,14 @@ class TestEngineLifecycle:
 
     def test_stop_no_state(self, state_dir: Path):
         """Stop with no state file returns False."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         assert engine.stop() is False
 
     def test_is_running_true(self, state_dir: Path):
         """is_running returns True when PID is alive."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         engine._save_state(os.getpid())  # Current process is alive
@@ -1101,14 +1102,14 @@ class TestEngineLifecycle:
 
     def test_is_running_false_no_state(self, state_dir: Path):
         """is_running returns False with no state file."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         assert engine.is_running() is False
 
     def test_get_state(self, state_dir: Path):
         """get_state returns saved state dict."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         engine._save_state(12345)
@@ -1120,7 +1121,7 @@ class TestEngineLifecycle:
 
     def test_get_state_missing(self, state_dir: Path):
         """get_state returns None when no state file."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         assert engine.get_state() is None
@@ -1147,7 +1148,7 @@ class TestWaitForExit:
         import sys
         import time
 
-        from sparkrun.proxy.engine import _wait_for_exit
+        from sparkrun.plugins.litellm.engine import _wait_for_exit
 
         proc = subprocess.Popen([sys.executable, "-c", "pass"])
         time.sleep(0.5)  # exited, but deliberately not reaped
@@ -1166,7 +1167,7 @@ class TestWaitForExit:
         import subprocess
         import sys
 
-        from sparkrun.proxy.engine import _wait_for_exit
+        from sparkrun.plugins.litellm.engine import _wait_for_exit
 
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
@@ -1187,7 +1188,7 @@ class TestEngineModelQueryAPI:
 
     def test_query_models(self, state_dir: Path):
         """query_models returns typed records from the management response."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
 
@@ -1210,7 +1211,7 @@ class TestEngineModelQueryAPI:
 
     def test_list_models_api_failure(self, state_dir: Path):
         """An unreachable management API raises the shared query error."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
 
@@ -1226,7 +1227,7 @@ class TestEngineModelQueryAPI:
         They returned False/0 on failure, which callers read as "nothing to
         do" — the exact shape of the bug this replaced.
         """
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir)
         for dead in ("add_model_via_api", "remove_model_via_api", "add_alias_via_api", "remove_alias_via_api"):
@@ -1254,7 +1255,7 @@ class TestApplyDesiredState:
     """Test config-regeneration + restart, the only way models change."""
 
     def _engine(self, state_dir: Path, running: bool = True):
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
         engine._test_running = running
@@ -1262,7 +1263,7 @@ class TestApplyDesiredState:
 
     def _seed(self, engine, endpoints, aliases=None):
         """Write a config representing the proxy's current state."""
-        from sparkrun.proxy.engine import build_litellm_config, write_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config, write_config
 
         write_config(
             build_litellm_config(endpoints, master_key=engine.master_key, aliases=aliases),
@@ -1353,7 +1354,7 @@ class TestApplyDesiredState:
 
     def test_restart_failure_raises(self, state_dir: Path):
         """A failed restart must surface, not be swallowed as a no-op."""
-        from sparkrun.proxy.engine import ProxyRestartError
+        from sparkrun.plugins.litellm.engine import ProxyRestartError
 
         engine = self._engine(state_dir)
         self._seed(engine, [])
@@ -1373,7 +1374,7 @@ class TestApplyDesiredState:
         silently re-key the running proxy and lock out every client.
         """
         import yaml
-        from sparkrun.proxy.engine import ProxyEngine, build_litellm_config, write_config
+        from sparkrun.plugins.litellm.engine import ProxyEngine, build_litellm_config, write_config
 
         write_config(build_litellm_config([], master_key="sk-REAL-RUNNING-KEY"), state_dir / "litellm_config.yaml")
 
@@ -1411,7 +1412,7 @@ class TestEngineAliases:
 
     def test_alias_emitted_for_live_target(self):
         """An alias becomes an extra model_list entry on the target's backend."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         config = build_litellm_config([_ep("Qwen/Qwen3-1.7B")], aliases={"my-model": "Qwen/Qwen3-1.7B"})
 
@@ -1422,7 +1423,7 @@ class TestEngineAliases:
 
     def test_alias_skipped_when_target_absent(self):
         """An alias whose target has no backend is omitted, not emitted broken."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         config = build_litellm_config([_ep("other/model")], aliases={"my-model": "Qwen/Qwen3-1.7B"})
 
@@ -1430,7 +1431,7 @@ class TestEngineAliases:
 
     def test_alias_spans_every_backend_of_target(self):
         """A tp-replicated model gets one alias entry per backend."""
-        from sparkrun.proxy.engine import build_litellm_config
+        from sparkrun.plugins.litellm.engine import build_litellm_config
 
         eps = [_ep("Qwen/Qwen3-1.7B", host="10.0.0.1"), _ep("Qwen/Qwen3-1.7B", host="10.0.0.2")]
         config = build_litellm_config(eps, aliases={"my-model": "Qwen/Qwen3-1.7B"})
@@ -1440,7 +1441,7 @@ class TestEngineAliases:
 
     def test_endpoints_from_config_ignores_aliases(self, state_dir: Path):
         """Recovering endpoints from config must not resurrect aliases as models."""
-        from sparkrun.proxy.engine import ProxyEngine, build_litellm_config, write_config
+        from sparkrun.plugins.litellm.engine import ProxyEngine, build_litellm_config, write_config
 
         engine = ProxyEngine(state_dir=state_dir)
         write_config(
@@ -1457,7 +1458,7 @@ class TestEngineAliases:
     def test_sync_aliases_keeps_existing_models(self, state_dir: Path):
         """Adding an alias must not drop the models already being served."""
         import yaml
-        from sparkrun.proxy.engine import ProxyEngine, build_litellm_config, write_config
+        from sparkrun.plugins.litellm.engine import ProxyEngine, build_litellm_config, write_config
 
         engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
         write_config(build_litellm_config([_ep("Qwen/Qwen3-1.7B")], master_key="sk-test"), engine.config_path)
@@ -1476,7 +1477,7 @@ class TestEngineAliases:
     def test_sync_aliases_removes_dropped_alias(self, state_dir: Path):
         """Removing an alias from config removes its entry from the proxy."""
         import yaml
-        from sparkrun.proxy.engine import ProxyEngine, build_litellm_config, write_config
+        from sparkrun.plugins.litellm.engine import ProxyEngine, build_litellm_config, write_config
 
         engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
         write_config(
@@ -1799,7 +1800,7 @@ class TestCLI:
         from sparkrun.cli._proxy import proxy
 
         runner = CliRunner()
-        with patch("sparkrun.proxy.engine.ProxyEngine.is_running", return_value=False):
+        with patch("sparkrun.plugins.litellm.engine.ProxyEngine.is_running", return_value=False):
             result = runner.invoke(proxy, ["stop"])
 
         assert result.exit_code == 0
@@ -1810,7 +1811,7 @@ class TestCLI:
         from sparkrun.cli._proxy import proxy
 
         runner = CliRunner()
-        with patch("sparkrun.proxy.engine.ProxyEngine.get_state", return_value=None):
+        with patch("sparkrun.plugins.litellm.engine.ProxyEngine.get_state", return_value=None):
             result = runner.invoke(proxy, ["status"])
 
         assert result.exit_code == 0
@@ -1870,7 +1871,7 @@ class TestCLI:
         from sparkrun.cli._proxy import proxy
 
         runner = CliRunner()
-        with patch("sparkrun.proxy.engine.ProxyEngine.is_running", return_value=False):
+        with patch("sparkrun.plugins.litellm.engine.ProxyEngine.is_running", return_value=False):
             result = runner.invoke(proxy, ["models"])
 
         assert result.exit_code == 0
@@ -1887,7 +1888,7 @@ class TestAutodiscover:
 
     def test_start_autodiscover_writes_config(self, tmp_path: Path):
         """start_autodiscover writes config YAML and spawns a subprocess."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         engine = ProxyEngine(state_dir=state_dir)
@@ -1918,7 +1919,7 @@ class TestAutodiscover:
 
     def test_stop_autodiscover_sends_sigterm(self, tmp_path: Path):
         """stop_autodiscover sends SIGTERM to the auto-discover PID."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         state_dir.mkdir(parents=True)
@@ -1933,7 +1934,7 @@ class TestAutodiscover:
 
     def test_stop_kills_both_proxy_and_autodiscover(self, tmp_path: Path):
         """stop() kills both proxy and auto-discover PIDs."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         state_dir.mkdir(parents=True)
@@ -1952,7 +1953,7 @@ class TestAutodiscover:
 
     def test_update_autodiscover_pid(self, tmp_path: Path):
         """update_autodiscover_pid records PID in state file."""
-        from sparkrun.proxy.engine import ProxyEngine
+        from sparkrun.plugins.litellm.engine import ProxyEngine
 
         state_dir = tmp_path / "proxy"
         state_dir.mkdir(parents=True)
@@ -1989,3 +1990,8 @@ class TestAutodiscover:
         run_autodiscover(str(cfg_path))
         assert sleeper.call_count == autodiscover.PROXY_GONE_TOLERANCE
         sleeper.assert_called_with(1)
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

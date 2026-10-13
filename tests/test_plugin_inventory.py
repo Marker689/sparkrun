@@ -309,6 +309,10 @@ def test_json_output_is_a_bare_array_of_plugin_objects(runner, tmp_path, fake_in
     assert compatibility["status"] == "unknown"
     assert compatibility["host"]["core_version"]
     assert row == {
+        "features": [],
+        "blocked_reason": None,
+        "state_source": "default",
+        "selected_gateway": None,
         "name": "cli_json",
         "plugin_id": "cli-json",
         "source": SOURCE_IN_TREE,
@@ -384,7 +388,7 @@ def test_features_json_is_a_bare_array_carrying_the_channel(runner):
     payload = json.loads(result.output)
     assert isinstance(payload, list)
     assert [r["name"] for r in payload] == [f.name for f in all_features()]
-    assert set(payload[0]) == {"name", "description", "enabled", "source", "override", "channel", "application_channel"}
+    assert set(payload[0]) == {"name", "description", "enabled", "source", "override", "channel", "application_channel", "owner"}
     # Core feature maturity and application release policy remain distinct.
     assert len({r["channel"] for r in payload}) == 1
 

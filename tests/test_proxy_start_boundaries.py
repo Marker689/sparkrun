@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+
 from sparkrun import api
 from sparkrun.api.proxy import _ops
 from sparkrun.proxy.contracts import GatewayOperationError
@@ -16,7 +17,7 @@ from sparkrun.proxy.discovery import DiscoveredEndpoint
 def gateway(request, tmp_path, monkeypatch):
     from sparkrun.proxy import gateway as gateway_registry
     from sparkrun.proxy.gateway import register_gateway
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     name = request.param
     context = api.default_sctx()
@@ -162,3 +163,8 @@ def test_daemon_foreground_releases_start_reservation_before_wait(gateway, monke
     )
     assert result.started and result.foreground_rc == 0
     assert events == ["preview", "write", "daemon start", "foreground wait"]
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

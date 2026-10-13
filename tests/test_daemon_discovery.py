@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+
 from sparkrun.proxy.discovery import DiscoveredEndpoint, DiscoverySnapshot, discover_snapshot
 from sparkrun.proxy.autodiscover import _EndpointRemovalGrace, sync_discovered
 from sparkrun.proxy.discovery_service import DiscoverySession, DiscoveryOwnershipError
@@ -109,7 +110,7 @@ def test_service_budget_cannot_starve_normal_jobs(tmp_path):
 
 def test_managed_replacement_preserves_logical_instance_and_controller(tmp_path):
     import os
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
     from sparkrun.core.process_identity import process_identity
 
     engine = ProxyEngine(state_dir=tmp_path)
@@ -141,7 +142,7 @@ def test_real_gateway_and_watch_are_separate_services(binding, monkeypatch):
             from sparkrun.proxy.gateway import register_gateway
             register_gateway("fixture", feature_flag="gateway.litellm", loader=loader)
         def loader():
-            from sparkrun.proxy.engine import ProxyEngine
+            from sparkrun.plugins.litellm.engine import ProxyEngine
             class Fixture(ProxyEngine):
                 gateway_name = "fixture"
                 def _build_command(self, config_path=None):
@@ -196,7 +197,7 @@ def test_real_gateway_and_watch_are_separate_services(binding, monkeypatch):
 
 def test_gateway_rejects_reused_pid(tmp_path, monkeypatch):
     import os
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
     from sparkrun.core import process_identity
 
     engine = ProxyEngine(state_dir=tmp_path / "gateway")
@@ -208,7 +209,7 @@ def test_gateway_rejects_reused_pid(tmp_path, monkeypatch):
 
 def test_old_stop_cannot_clear_new_instance_with_same_pid(tmp_path):
     import os
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     engine = ProxyEngine(state_dir=tmp_path / "gateway")
     engine._save_state(os.getpid())
@@ -216,3 +217,8 @@ def test_old_stop_cannot_clear_new_instance_with_same_pid(tmp_path):
     engine._save_state(os.getpid())
     engine._clear_state(expected_pid=os.getpid(), expected_instance=original)
     assert engine.state_file.exists()
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

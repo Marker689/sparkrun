@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from sparkrun.core.features import FeatureFlag
 
 from sparkrun import __version__ as __version__
 
@@ -11,11 +10,14 @@ SPARKRUN_PLUGIN_API_VERSION = 1
 FEATURE_FLAG = "integration.k8s"
 
 # The loader registers these only after the application enables this plugin.
-FEATURE_DEFINITIONS = (
-    FeatureFlag("executor.k8s", "Experimental Kubernetes (kubectl) executor", default=True),
-    FeatureFlag("cli.setup.k8s", "Kubernetes cluster setup commands", default=True),
-    FeatureFlag("api.run.k8s", "Launch Kubernetes workloads through JobSet", default=True),
-)
+SPARKRUN_PLUGIN_MANIFEST = {
+    "api": 1,
+    "features": {
+        "executor.k8s": {"description": "Experimental Kubernetes (kubectl) executor", "default": True},
+        "cli.setup.k8s": {"description": "Kubernetes cluster setup commands", "default": True},
+        "api.run.k8s": {"description": "Launch Kubernetes workloads through JobSet", "default": True},
+    },
+}
 
 
 def _load_setup_command():

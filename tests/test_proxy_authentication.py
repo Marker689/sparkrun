@@ -14,7 +14,7 @@ def test_models_cli_authenticates_to_running_litellm(tmp_path, monkeypatch, sour
     from click.testing import CliRunner
     from sparkrun.cli import main
     from sparkrun.api.proxy import _ops
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     secret = "fixture-master-secret"
     seen = []
@@ -68,7 +68,7 @@ def test_models_cli_authenticates_to_running_litellm(tmp_path, monkeypatch, sour
 
 @pytest.mark.parametrize("key,expected", [(None, "from-env"), ("explicit", "explicit"), ("", "")])
 def test_litellm_launch_credentials_are_consistent(tmp_path, monkeypatch, key, expected):
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
     import yaml
 
     monkeypatch.setenv("LITELLM_MASTER_KEY", "from-env")
@@ -89,3 +89,8 @@ def test_litellm_environment_does_not_configure_other_gateway_backends(tmp_path,
     monkeypatch.setenv("LITELLM_MASTER_KEY", "backend-private")
     assert ProxyConfig(tmp_path / "proxy.yaml").master_key is None
     assert GatewaySupervisor(state_dir=tmp_path).data_plane_authenticated is False
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

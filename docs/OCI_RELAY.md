@@ -3,8 +3,9 @@
 Sparkrun `develop-next` / 0.4.0 bundles the [OCI Relay](https://github.com/spark-arena/oci-relay)
 image-distribution adapter. It streams registry pulls or existing local images
 to Docker hosts, reuses compatible layers across storage backends, and reports
-transfer progress. The `plugins.oci_relay` feature defaults **on for every channel**.
-Explicit config or environment overrides take precedence.
+transfer progress. The `oci-relay` plugin defaults **on for every channel**.
+`sparkrun plugins disable oci-relay` opts out; `plugins enable oci-relay` restores it.
+The old `plugins.oci_relay` feature remains a fallback when no plugin override is set.
 
 Use `sparkrun run YOUR_RECIPE` normally. There is no separate plugin install
 or Go build: the controller downloads checksum-pinned v0.1.4 binaries and
@@ -27,7 +28,7 @@ reported immediately. INFO logs identify each execution host's verified relay
 version, commit, and protocol; DEBUG also includes its checksum and capabilities.
 Large upstream registry blobs can now use bounded parallel HTTP ranges; see the
 [range download settings](https://github.com/spark-arena/oci-relay/blob/main/docs/registry-source.md#parallel-upstream-ranges).
-To opt out on any channel, set the feature to `false`, or use
+To opt out on any channel, disable the plugin, or use
 `container_distribution_provider: builtin` for the built-in copy path.
 
 Mac controllers should use `transfer_mode: delegated` so that the relay runs

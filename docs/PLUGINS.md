@@ -21,7 +21,8 @@ sparkrun plugins remove sparkroute
 with identical subcommands. Management commands inspect metadata without loading
 plugins, so they can repair an installation whose plugin fails at import. Use
 `list --check` to additionally check managed plugins in a bounded child process.
-The state column reports the effective feature gate (`enabled` or `disabled`).
+The state column reports effective plugin loading (`enabled` or `disabled`);
+capabilities are shown separately.
 Compatibility is checked on every listing; it does not imply a successful load.
 
 `add` asks you to trust the supplied source before executing its code. Plugins
@@ -34,7 +35,8 @@ repository, or capability require renewed consent.
 Adding a plugin enables `core.external_plugins` if needed. If that would also
 activate existing `plugins.paths`, their activation needs separate confirmation;
 noninteractive users must review and enable those paths beforehand. The plugin's
-own capability flag keeps its configured/default value unless you pass `--enable`.
+capability settings are always preserved. `--enable` explicitly enables plugin
+loading and runs its enable hook.
 Unknown flags default off. Environment feature overrides and
 `SPARKRUN_NO_EXTERNAL_PLUGINS` still take precedence. Installing ColdSnap does
 not trust the recipe registries it declares; use the separate registry trust flow.
@@ -449,6 +451,117 @@ Nothing is fetched until something clones it, so suggest `sparkrun registry
 update` after your plugin is first enabled rather than paying a clone inside
 the next `sparkrun run`.
 
+## Plugin state, capabilities, and lifecycle actions
+
+Use plugin controls for an entire integration, and feature controls for its
+individual capabilities:
+
+```sh
+sparkrun plugins enable sparkroute
+sparkrun setup features enable gateway.sparkroute
+sparkrun plugins disable sparkroute
+```
+
+`plugins enable` permits loading and preserves feature settings. `plugins disable`
+prevents importing the integration and registering its commands, operations or
+feature definitions in new processes. It preserves the installation, settings,
+and gateway selection. Re-enable to restore those settings. Update and rollback
+also preserve loading and feature choices. Neither action stops running services;
+restart long-running consumers to apply changes.
+
+The same policy applies to bundled, managed, directory and installed entry-point
+plugins. Overrides use canonical plugin IDs:
+
+```yaml
+plugins:
+  enabled:
+    sparkroute: true
+    oci-relay: false
+features:
+  gateway: true
+  gateway.sparkroute: true
+```
+
+`plugins.enabled` takes precedence over application integration defaults and the
+older `integrations` mapping / whole-plugin loading flags. The aliases
+`integration.k8s`, `integration.arena`, `registry.lil`, `plugins.oci_relay` and
+`plugins.coldsnap` remain readable migration inputs, but new commands write plugin
+state and the feature list omits these aliases. An explicit plugin disable wins
+over its child features. External loading still requires `core.external_plugins`;
+installed entry-point plugins retain their separate application selection policy.
+An application-required plugin cannot be disabled through the management command.
+
+The `gateway` feature enables shared gateway support by default. LiteLLM is a
+bundled implementation plugin; SparkRoute is external. Explicitly enabling a
+`gateway.<provider>` capability runs its selection hook, even when already on.
+This saves `proxy.gateway` together with the feature change, preserving unrelated
+proxy settings. Other providers remain enabled. Enabling a plugin alone does not
+select it, and feature commands never silently enable a disabled parent plugin.
+A disabled/missing selected provider produces an actionable error, not a fallback.
+
+Python callers use `api.plugins.enable/disable(name, config=...)` and
+`api.features.enable/disable/reset(name, config=...)`. These console-free management
+APIs return structured results. Enable/disable commands support metadata-only
+`--dry-run`; feature APIs also accept `dry_run=True`.
+
+### Declaring capabilities and lifecycle hooks
+
+Declare a literal dictionary in the plugin entry module. The host reads it without
+executing plugin code and copies it into managed generation receipts. This reuses
+the existing package and `plugin.toml`/`pyproject.toml` installation metadata; no
+additional definition file is needed.
+
+```python
+SPARKRUN_PLUGIN_API_VERSION = 1
+SPARKRUN_PLUGIN_MANIFEST = {
+    "api": 1,
+    "features": {
+        "gateway.example": {"description": "Example gateway", "default": False},
+    },
+    "hooks": {"feature.enable": "example_plugin.lifecycle:enable_feature"},
+}
+```
+
+The loader registers these feature definitions only when the plugin loads. Each
+feature accepts `description`, `default` and `channel_defaults`. Existing dynamic
+`FEATURE_DEFINITIONS` remain supported during registration; static declarations
+also make ownership available to management while a plugin is disabled.
+
+```python
+# example_plugin/lifecycle.py
+from sparkrun.plugin_lifecycle import select_gateway
+
+
+def enable_feature(context):
+    if context.feature == "gateway.example":
+        return select_gateway(context, "example")
+```
+
+`PLUGIN_LIFECYCLE_API_VERSION = 1`, `LifecycleContext`, `LifecyclePlan`, and
+`select_gateway` are public in `sparkrun.plugin_lifecycle` and re-exported by
+`sparkrun.plugins`. Context includes the event, plugin ID, optional feature,
+configuration snapshots and previous/current installation records where applicable.
+`LifecyclePlan.settings` proposes dotted settings below `plugins.<plugin-id>`;
+`messages` supplies user-facing feedback. The shared gateway helper validates the
+provider and proposes selection in `LifecyclePlan.proxy`.
+
+Supported events are `plugin.install`, `plugin.update`, `plugin.rollback`,
+`plugin.remove`, `plugin.enable`, `plugin.disable`, `feature.enable` and
+`feature.disable`. Installation with `--enable` runs install then plugin enable;
+updates never invoke enable automatically. No-op updates do not run update hooks.
+Repeated explicit enabling runs the enable hook again. Resetting a feature override
+only restores defaults; it invokes no activation hook or gateway selection.
+
+Hooks run in a bounded child process with the active application profile and a
+proposed configuration snapshot. They must be idempotent planners: return changes,
+do not write configuration, prompt, start processes, or perform external changes.
+Startup, inventory, candidate load validation and dry runs never run lifecycle
+hooks. Enable/install/update/rollback hook failure leaves activation unchanged.
+Disable/remove report optional hook failures but still allow recovery. Host-owned
+configuration changes use the existing recoverable plugin transaction; gateway
+selection includes `proxy.yaml` in that transaction. Arbitrary plugin side effects
+are outside that guarantee. Structured lifecycle feedback uses the shared reporter.
+
 ## Declaring the module API contract
 
 Every top-level plugin module/package, whether bundled, loaded from a directory,
@@ -480,11 +593,10 @@ __version__ = "0.2.0"
 and compatibility:
 
 ```
-NAME         VERSION  SOURCE   STATE    COMPATIBILITY  FLAG
-k8s          0.4.0    in-tree  enabled  compatible     integration.k8s
-lil          0.4.0    in-tree  enabled  compatible     registry.lil
-oci_relay    0.1.3    in-tree  enabled  compatible     plugins.oci_relay
-sparkarena   0.4.0    in-tree  enabled  compatible     integration.arena
+NAME         VERSION  SOURCE   STATE    COMPATIBILITY  FEATURES
+k8s          0.4.0    in-tree  enabled  compatible     api.run.k8s, cli.setup.k8s, executor.k8s
+litellm      0.4.0    in-tree  enabled  compatible     gateway.litellm
+oci_relay    0.1.4    in-tree  enabled  compatible
 ```
 
 Versions come from registered modules or literal source declarations, without
@@ -538,10 +650,10 @@ example-hardware = "example_hardware"
 ```
 
 The entry point targets a **module**, with `SPARKRUN_PLUGIN_API_VERSION = 1`.
-Select it using `integrations: {example-hardware: true}` in user config or an
-`ApplicationProfile` integration list. Installation alone never imports it.
+Select it using `sparkrun plugins enable example-hardware`, a `plugins.enabled`
+configuration override, or an `ApplicationProfile` integration list. Installation alone never imports it.
 Selected installed integrations use the existing class scan and `register(v)`
-hook. They do not require the development-only `core.external_plugins` flag.
+hook. They do not require the `core.external_plugins` flag.
 Configured directory loading and its existing kill switch remain available.
 
 A module can expose `FEATURE_DEFINITIONS`, a sequence of `FeatureFlag` objects;
@@ -596,8 +708,8 @@ These identifiers serve different purposes:
 | Identifier | Example | Purpose |
 | --- | --- | --- |
 | Python distribution/package | `example-framework` | Installation and dependency versions. |
-| Installed plugin ID | `example-framework` in `sparkrun.plugins` | Selection in `ApplicationProfile.integrations` or config `integrations`. |
-| Feature gate | `integration.arena` | Enable a capability or bundled plugin; it is not an installed plugin ID. |
+| Installed plugin ID | `example-framework` in `sparkrun.plugins` | Selection in `ApplicationProfile.integrations` or config `plugins.enabled`. |
+| Feature gate | `gateway.litellm` | Enable a capability of a loaded plugin; it is distinct from plugin loading state. |
 | Benchmark framework | `llama-benchy` | Measurement implementation selected with `framework`. |
 | Benchmark integration | `arena` | Publication hooks selected with `BenchmarkOptions.integrations`. |
 
@@ -809,8 +921,9 @@ Use the same `feature_flag` on the lifecycle and option specs. Option and lifecy
 registrations participate in rollback for every plugin loader.
 
 The in-tree [sparkarena plugin](../src/sparkrun/plugins/sparkarena/README.md) provides a
-complete example. `integration.arena` gates its commands, flags, and lifecycle.
-Sparkrun enables it by default; application profiles can override that default.
+complete example. Its plugin loading state gates the commands, flags, and lifecycle.
+Sparkrun enables it by default; use `sparkrun plugins disable sparkarena` to opt out.
+Application profiles can override that default.
 Saved integrations resume automatically when available. Disabling or uninstalling
 one leaves its saved data intact and permits local benchmarking to continue;
 explicitly selecting an unavailable integration fails with a clear error.
@@ -850,8 +963,8 @@ and adapter examples, ID rules, and Kubernetes operations.
 ## Kubernetes plugin and executor-owned launches
 
 The in-tree [Kubernetes plugin](../src/sparkrun/plugins/k8s/README.md) is loaded
-through `integration.k8s`: off for Sparkrun stable/beta and on for alpha.
-Application profiles can override that policy. Its `FEATURE_DEFINITIONS` register
+with `sparkrun plugins enable k8s`: off by default for Sparkrun stable/beta and on
+for alpha. Application profiles can override that policy. Its static declarations register
 `executor.k8s`, `cli.setup.k8s`, and `api.run.k8s` only after the loading gate is
 on. All three child features default on inside the enabled plugin. Explicit
 child overrides do not load a disabled parent.

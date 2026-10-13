@@ -5,6 +5,7 @@ from types import ModuleType
 from unittest.mock import Mock
 
 import pytest
+
 import yaml
 
 from sparkrun import api
@@ -50,7 +51,7 @@ def prepare_application(tmp_path, monkeypatch, *, alternate=False, enabled=True,
 def test_first_management_call_initializes_profile_config_and_plugins(tmp_path, monkeypatch, alternate, first_call):
     from sparkrun.proxy import gateway
     from sparkrun.proxy.gateway import register_gateway
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     config, identity = prepare_application(tmp_path, monkeypatch, alternate=alternate, provider="fixture")
     observed = []
@@ -135,3 +136,8 @@ def test_initialization_interrupt_is_not_swallowed(monkeypatch):
     monkeypatch.setattr("sparkrun.application.initialize", Mock(side_effect=KeyboardInterrupt))
     with pytest.raises(KeyboardInterrupt):
         api.proxy.status()
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

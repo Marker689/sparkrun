@@ -56,7 +56,8 @@ class PluginManager:
             "source": candidate.source,
             "revision": candidate.revision,
             "enable_external": enable_external,
-            "enable_feature": metadata.feature if enable else None,
+            "enable_plugin": metadata.name if enable else None,
+            "enable_feature": None,
             "legacy_paths": [str(p) for p in legacy_paths],
         }
         try:
@@ -156,14 +157,33 @@ class PluginManager:
                 features = {}
             if external:
                 features["core.external_plugins"] = True
-            if enable and candidate.metadata.feature:
-                features[candidate.metadata.feature] = True
-            if external or enable:
+            if external:
                 config.set("features", features)
+            from sparkrun.core.plugin_policy import set_plugin_override
+            from sparkrun.core.plugin_lifecycle import run_hook, apply_plan
+
+            if enable:
+                set_plugin_override(config, name, True)
+            details = {
+                "module": candidate.metadata.module,
+                "package": str(candidate.package_path),
+                "metadata": candidate.metadata.to_dict(),
+                "declarations": candidate.metadata.declarations,
+            }
+            plan = run_hook(
+                config, name, details, "plugin.update" if previous else "plugin.install", previous=previous, current=records[name]
+            )
+            apply_plan(config, plan)
+            messages = list(plan.messages)
+            if enable:
+                plan = run_hook(config, name, details, "plugin.enable", current=records[name])
+                apply_plan(config, plan)
+                messages.extend(plan.messages)
             warning = self.store.commit(records, config, baseline)
             return {
                 "name": name,
                 "status": "updated" if previous else "installed",
+                "messages": messages,
                 "version": candidate.metadata.version,
                 "revision": candidate.revision,
                 "generation": identifier,
@@ -231,6 +251,7 @@ class PluginManager:
             self._compatible(metadata)
             package = self.store.generation_path(name, target) / "payload" / Path(*module_parts(metadata.module))
             validate_candidate(metadata, package, config.config_path)
+            previous = deepcopy(record)
             record.update(
                 metadata=receipt["metadata"],
                 revision=receipt["revision"],
@@ -238,10 +259,21 @@ class PluginManager:
                 previous_generations=[record["active_generation"], *history],
             )
             records[name] = record
+            from sparkrun.core.plugin_lifecycle import run_hook, apply_plan
+
+            details = {
+                "module": metadata.module,
+                "package": str(package),
+                "metadata": metadata.to_dict(),
+                "declarations": metadata.declarations,
+            }
+            plan = run_hook(config, name, details, "plugin.rollback", previous=previous, current=record)
+            apply_plan(config, plan)
             warning = self.store.commit(records, config, baseline)
             return {
                 "name": name,
                 "status": "rolled back",
+                "messages": list(plan.messages),
                 "version": metadata.version,
                 "revision": receipt["revision"],
                 "history_pruned": getattr(self.store, "history_pruned", False),
@@ -254,7 +286,36 @@ class PluginManager:
             name, _record = self.store.select(records, selector)
             return {"name": name, "status": "planned removal"}
         with self.store.mutation() as (config, records, baseline):
-            name, _record = self.store.select(records, selector)
+            name, record = self.store.select(records, selector)
+            from sparkrun.core.plugin_lifecycle import run_hook, apply_plan
+            from sparkrun.core.plugin_policy import plugin_state
+
+            if plugin_state(name, config, source="external").required:
+                raise PluginError("Plugin %s is required by this application" % name)
+            warning = None
+            messages = []
+            try:
+                self.store.receipt(name, record["active_generation"])
+                metadata = PluginMetadata.from_dict(record["metadata"])
+                package = self.store.generation_path(name, record["active_generation"]) / "payload" / Path(*module_parts(metadata.module))
+                details = {
+                    "module": metadata.module,
+                    "package": str(package),
+                    "metadata": metadata.to_dict(),
+                    "declarations": metadata.declarations,
+                }
+                plan = run_hook(config, name, details, "plugin.remove", previous=record)
+                apply_plan(config, plan)
+                messages = list(plan.messages)
+            except PluginError as exc:
+                warning = "Removed without completing its hook: " + str(exc)
             del records[name]
-            warning = self.store.commit(records, config, baseline)
-            return {"name": name, "status": "removed", "history_pruned": getattr(self.store, "history_pruned", False), "warning": warning}
+            cleanup = self.store.commit(records, config, baseline)
+            warning = warning or cleanup
+            return {
+                "name": name,
+                "status": "removed",
+                "messages": messages,
+                "history_pruned": getattr(self.store, "history_pruned", False),
+                "warning": warning,
+            }

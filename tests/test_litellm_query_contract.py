@@ -6,8 +6,9 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
+
 from sparkrun.proxy.contracts import GatewayQueryError, ProxyModel
-from sparkrun.proxy.engine import ProxyEngine
+from sparkrun.plugins.litellm.engine import ProxyEngine
 from sparkrun.proxy.supervisor import GatewaySupervisor
 
 
@@ -78,3 +79,8 @@ def test_gateway_contract_has_no_legacy_model_hooks():
     for cls in (GatewaySupervisor, ProxyEngine):
         assert not hasattr(cls, "list_models_via_api")
         assert not hasattr(cls, "model_query_error")
+
+
+@pytest.fixture(autouse=True)
+def _gateway_provider(loaded_litellm_plugin):
+    pass

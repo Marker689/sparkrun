@@ -96,7 +96,7 @@ def test_the_daemon_config_names_a_gateway_and_state_dir_not_a_port(tmp_path):
 
     import yaml
 
-    from sparkrun.proxy.engine import ProxyEngine
+    from sparkrun.plugins.litellm.engine import ProxyEngine
 
     state_dir = tmp_path / "proxy"
     engine = ProxyEngine(master_key="sk-secret", state_dir=state_dir)

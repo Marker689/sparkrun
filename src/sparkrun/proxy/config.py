@@ -92,34 +92,12 @@ class ProxyConfig:
 
     @contextmanager
     def _write_lock(self):
-        """Serialize read-modify-write transactions across processes.
+        """Serialize all proxy writers, including plugin activation, on every OS."""
+        from sparkrun.utils.fs import file_lock
 
-        A stable sidecar is locked rather than ``proxy.yaml`` itself, because
-        the config is replaced by rename — a lock held on the old inode would
-        not be seen by the next writer.
-
-        Degrades to no locking where ``fcntl`` is unavailable (Windows), which
-        is **strictly weaker**: concurrent writers can still interleave their
-        read-modify-write.  Correct for the single-writer case a Windows
-        control node has today — the auto-discover daemon is a POSIX-only fork
-        path — and the atomic replace below means the file is never truncated
-        or half-written either way.
-        """
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with file_lock(self._lock_path):
             yield
-            return
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(self._lock_path, flags, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "r+") as lock_file:
-                descriptor = -1
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                yield
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
 
     def _write_atomic(self, data: dict[str, Any]) -> None:
         """Replace the config in one step, never leaving a partial file."""
@@ -157,7 +135,16 @@ class ProxyConfig:
         has_pending = has_pending or self._pending_bindings is not _UNCHANGED
         has_pending = has_pending or self._pending_discovered_models is not _UNCHANGED
 
+        from sparkrun.core.config import _lifecycle_snapshot
+
+        if _lifecycle_snapshot is not None:
+            raise ValueError("Lifecycle hooks must return configuration plans")
         with self._write_lock():
+            journal = self.config_path.parent / "plugins-transaction.yaml"
+            if journal.exists():
+                pending = yaml.safe_load(journal.read_text())
+                if not isinstance(pending, dict) or pending.get("state") != "committed":
+                    raise ValueError("Interrupted plugin activation; run a plugin management command to recover")
             latest = self._read() if has_pending else copy.deepcopy(self._data)
 
             if self._pending_proxy:
