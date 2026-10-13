@@ -12,9 +12,9 @@ preferred_versions:
     "scitrera-app-framework": "0.0.69"
     "vpd": "0.9.13"
     "six": "1.17.0" # transitive dependency of vpd but we pin the version for security reasons
-    "click": "8.3.3"
+    "click": "8.4.2"
     "pyyaml": "6.0.3"
-    "huggingface_hub": "1.14.0"
+    "huggingface-hub": "2.2.0"
     "textual": "8.2.5"
     "ruff": "0.16.6"
     "pyright": "1.1.414"
@@ -26,6 +26,9 @@ ci:
   # whatever PR happened to run next. Bump deliberately.
   repo_tools_source: "git+https://github.com/scitrera/repo-tools.git@4a2ae8b966a875f6dc21ec8c142220a0471e06e8"
   test_branches: [ main, develop, develop-next ]
+  # The pinned generator cannot add reusable release gates. Maintain this one
+  # workflow explicitly; its test/type/portable/wheel dependencies are tested.
+  skip_workflows: [ publish-python ]
   # Cut a GitHub release on every version tag, with the built sdist + wheel
   # attached and notes generated from the commits since the previous tag.
   # Without this a tag lands on PyPI while the repo's Releases page shows
@@ -37,8 +40,8 @@ ci:
     # requires-python is >=3.12; 3.11 would not install.
     test_versions: [ "3.12", "3.13" ]
     install: 'pip install -e ".[dev]"'
-    # Matches what publish.yml ran: fail fast, long tracebacks.
-    test_command: 'pytest -v --tb=long -x'
+    # Collect all failures for the release review.
+    test_command: 'pytest -v --tb=long'
     # Match the development environment and hooks; exclusions live in pyproject.toml.
     lint: ruff
     format_check: true

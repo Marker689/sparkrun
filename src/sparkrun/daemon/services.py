@@ -63,7 +63,19 @@ class Services:
                         "result": previous["result"],
                         "error": previous["error"],
                     }
-                if previous["state"] not in TERMINAL or previous["state"] == "lost" or time.time() - previous["created"] < interval:
+                if previous["state"] not in TERMINAL:
+                    continue
+                last_attempt = previous["created"]
+                if previous["state"] == "lost":
+                    from sparkrun.core.process_identity import alive
+
+                    # Only this read-only periodic observation is retried. A
+                    # registered worker must be gone; an unregistered worker
+                    # never received authorization to execute the lost job.
+                    if previous["worker"] and alive(previous["worker"]["process"]):
+                        continue
+                    last_attempt = previous["updated"]
+                if time.time() - last_attempt < interval:
                     continue
             op = get_daemon_op(name)
             from sparkrun.core.runtime_lease import consistent_runtime

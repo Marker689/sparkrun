@@ -66,6 +66,9 @@ sparkrun update
 
 Upgrades sparkrun (when installed via `uv tool`), applies compatible updates to trusted managed plugins, and refreshes recipe registries. Use `--no-update-plugins` for a local plugin compatibility audit without plugin updates. See [plugin management](docs/PLUGINS.md#install-and-manage-external-plugins).
 
+Moving from 0.3.x or a preview build? See the [0.4.0 upgrade guide](docs/UPGRADING_0_4.md)
+for plugin installation, changed defaults, and Python API migration.
+
 ### Update channels (advanced)
 
 Opt into preview builds installed from git instead of PyPI:

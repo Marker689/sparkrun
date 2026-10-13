@@ -120,7 +120,13 @@ def setup_install(ctx, shell, no_update_registries, stable, beta, alpha, yolo):
     """
     import subprocess
 
-    from sparkrun.cli._self_update import channel_from_flags, install_argv, installed_tool_executable
+    from sparkrun.cli._self_update import (
+        channel_from_flags,
+        install_argv,
+        installation_prefix,
+        environment_executable,
+        update_registries_after_core,
+    )
     from sparkrun.core.channels import CHANNEL_STABLE
 
     config = _get_context(ctx).config
@@ -137,11 +143,20 @@ def setup_install(ctx, shell, no_update_registries, stable, beta, alpha, yolo):
 
     label = "" if channel == CHANNEL_STABLE else "%s channel " % channel
     click.echo(f"Installing {get_application_profile().command} %svia uv tool install..." % label)
-    result = subprocess.run(
-        install_argv(uv, channel),
-        capture_output=True,
-        text=True,
-    )
+    from sparkrun.core.runtime_lease import guarded_update
+
+    try:
+        target_prefix = installation_prefix(uv)
+        result = guarded_update(
+            config,
+            subprocess.run,
+            install_argv(uv, channel),
+            target_prefix=target_prefix,
+            capture_output=True,
+            text=True,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     if result.returncode != 0:
         click.echo(f"Error installing {get_application_profile().command}: %s" % result.stderr.strip(), err=True)
         sys.exit(1)
@@ -166,20 +181,12 @@ def setup_install(ctx, shell, no_update_registries, stable, beta, alpha, yolo):
     # Step 3: Install tab-completion
     ctx.invoke(setup_completion, shell=shell)
 
-    # Step 4: Update recipe registries
+    # Use the resulting environment, which may differ from a uvx caller.
     if not no_update_registries:
-        click.echo()
-        click.echo("Updating recipe registries...")
-        executable = installed_tool_executable(uv)
-        if executable is None:
-            click.echo("Warning: could not locate the installed tool for registry update.", err=True)
-            return
-        reg_result = subprocess.run(
-            [str(executable), "registry", "update"],
-            capture_output=False,
+        update_registries_after_core(
+            config.config_path,
+            executable=environment_executable(target_prefix, get_application_profile().command),
         )
-        if reg_result.returncode != 0:
-            click.echo("Warning: registry update failed (non-fatal).", err=True)
 
 
 @setup.command("update")

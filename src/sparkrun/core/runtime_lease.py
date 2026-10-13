@@ -179,13 +179,13 @@ def assert_generations_available(root, records):
                 )
 
 
-def environment_state():
-    """One protected coordination directory for this interpreter installation."""
+def environment_state(prefix=None):
+    """One protected coordination directory for the selected installation."""
     import sys
     import tempfile
     from sparkrun.daemon.state import private_directory
 
-    key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()[:20]
+    key = hashlib.sha256(str(Path(sys.prefix if prefix is None else prefix).resolve()).encode()).hexdigest()[:20]
     from sparkrun.core.process_identity import user_identity
 
     uid = user_identity()
@@ -222,9 +222,10 @@ def runtime_lease(config, *, kind, expected=None):
                 path.unlink(missing_ok=True)
 
 
-def assert_runtime_idle(config):
+def assert_runtime_idle(config, *, target_prefix=None):
     """Protect the entire interpreter installation, including other bindings."""
-    leases = [v for v in live_leases(environment_state()) if v["process"]["pid"] != os.getpid()]
+    environment = environment_state() if target_prefix is None else environment_state(target_prefix)
+    leases = [v for v in live_leases(environment) if v["process"]["pid"] != os.getpid()]
     if leases:
         raise RuntimeError(
             "Core update requires stopping daemons and draining workers first (active PIDs: %s)"
@@ -233,15 +234,16 @@ def assert_runtime_idle(config):
 
 
 @contextmanager
-def update_guard(config):
+def update_guard(config, *, target_prefix=None):
     """Serialize replacement against process lease creation across all bindings."""
-    with file_lock(environment_state() / "runtime.lock"):
-        assert_runtime_idle(config)
+    environment = environment_state() if target_prefix is None else environment_state(target_prefix)
+    with file_lock(environment / "runtime.lock"):
+        assert_runtime_idle(config, target_prefix=target_prefix)
         yield
 
 
-def guarded_update(config, runner, *args, **kwargs):
-    with update_guard(config):
+def guarded_update(config, runner, *args, target_prefix=None, **kwargs):
+    with update_guard(config, target_prefix=target_prefix):
         return runner(*args, **kwargs)
 
 

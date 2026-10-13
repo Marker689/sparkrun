@@ -45,6 +45,17 @@ inference launch, state-bound integration hooks, or measurement commands. Previe
 completed-result loading, and publication-only retries do not require measurement
 tools. Resumes keep their saved execution policy and reacquire credentials.
 
+The measurement process runner supports Linux, macOS, and Windows controllers
+with Python 3.12 or newer. Framework dependencies and remote inference runtime
+requirements still apply. It requests UTF-8 output from Python tools and drains
+stdout/stderr with incremental decoding and
+credential redaction, enforces the measurement deadline even when a descendant
+holds a pipe open, and checks operation cancellation while output is quiet.
+Timeouts, cancellation, and callback errors terminate the owned measurement tree.
+POSIX containment uses a process group; Windows uses a parent-owned Job Object
+and starts the command only after assignment succeeds. Deliberate POSIX session
+escape is outside that measurement process-group guarantee.
+
 ## Progress and decisions
 
 The API does not instantiate a terminal progress UI. `progress_callback` receives

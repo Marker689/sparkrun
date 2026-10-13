@@ -1,20 +1,18 @@
-"""Private benchmark process lifetime and redacted output handling (POSIX hosts)."""
+"""Private benchmark process lifetime and redacted output handling (portable controllers)."""
 
 from __future__ import annotations
 
 import codecs
-import logging
 import os
 import re
-import selectors
-import signal
 import subprocess
 import time
 from collections.abc import Callable, Sequence
 
 from sparkrun.benchmarking._credentials import BenchmarkCredentials
 
-logger = logging.getLogger(__name__)
+from sparkrun.core.operation import CURRENT
+from sparkrun.core.subprocesses import owned_process
 
 
 class _Output:
@@ -61,51 +59,40 @@ def run_benchmark_process(
     stdout: Callable[[str], None],
     stderr: Callable[[str], None] | None = None,
 ) -> int:
-    """Run one owned process group with a deadline including pipe draining.
+    """Drain both output pipes on the caller's thread under one deadline.
 
-    A missing stderr sink merges stderr into stdout. Callbacks run synchronously;
-    their errors/interrupts propagate after cleanup. No reader threads or raw
-    credential-bearing output survive the operation. Escaped process groups are
-    not adopted; closing our pipes never waits for their EOF after timeout.
+    Python 3.12 supports nonblocking pipes on Windows as well as POSIX. Polling
+    two pipes avoids Windows' socket-only selector and reader-thread leaks.
+    Callbacks remain synchronous; errors/cancellation unwind owned containment.
     """
     deadline = time.monotonic() + timeout if timeout is not None else None
-    proc = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if stderr is not None else subprocess.STDOUT,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        start_new_session=True,
-    )
-    try:
-        with selectors.DefaultSelector() as selector:
-            for stream, sink in ((proc.stdout, stdout), (proc.stderr, stderr)):
-                if stream is not None and sink is not None:
-                    os.set_blocking(stream.fileno(), False)
-                    selector.register(stream, selectors.EVENT_READ, _Output(sink, credentials))
-            while proc.poll() is None or selector.get_map():
-                remaining = deadline - time.monotonic() if deadline is not None else None
-                if remaining is not None and remaining <= 0 and timeout is not None:
-                    # Avoid attaching secret-bearing command arguments to the exception.
-                    raise subprocess.TimeoutExpired("benchmark", timeout)
-                for key, _ in selector.select(min(remaining, 0.1) if remaining is not None else 0.1):
-                    data = os.read(key.fd, 65536)
-                    key.data.feed(data, final=not data)
-                    if not data:
-                        selector.unregister(key.fileobj)
-            return proc.returncode
-    finally:
-        # Kill the group even if its leader exited: workers may still be
-        # running or holding a pipe. The session belongs only to this call.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            logger.warning("Benchmark process did not exit after termination")
-        finally:
-            if proc.stdout is not None:
-                proc.stdout.close()
-            if proc.stderr is not None:
-                proc.stderr.close()
+    operation = CURRENT.get()
+    # The transport decoder is UTF-8; Python tools must not inherit Windows'
+    # pipe code page (or a controller's explicit legacy IO encoding).
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    with owned_process(command, env=env, separate_stderr=stderr is not None) as proc:
+        streams = {}
+        for stream, sink in ((proc.stdout, stdout), (proc.stderr, stderr)):
+            if stream is not None and sink is not None:
+                os.set_blocking(stream.fileno(), False)
+                streams[stream.fileno()] = _Output(sink, credentials)
+        while proc.poll() is None or streams:
+            if operation is not None:
+                operation.check()
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0 and timeout is not None:
+                # Never attach credential-bearing command arguments.
+                raise subprocess.TimeoutExpired("benchmark", timeout)
+            received = False
+            for fd, output in list(streams.items()):
+                try:
+                    data = os.read(fd, 65536)
+                except BlockingIOError:
+                    continue
+                received = True
+                output.feed(data, final=not data)
+                if not data:
+                    del streams[fd]
+            if not received:
+                time.sleep(min(remaining, 0.01) if remaining is not None else 0.01)
+        return proc.returncode

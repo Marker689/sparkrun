@@ -320,9 +320,11 @@ An update that would evict a leased generation waits for the user to drain/stop
 its owners. Unmanaged external directories cannot provide immutable-generation
 guarantees.
 
-`sparkrun update` and `setup update` refuse to replace an interpreter installation
+`sparkrun update`, `setup update`, and `setup install` refuse to replace an interpreter installation
 while any daemon/worker lease in that installation is live, including another
-config binding. Stop/drain all such instances first, update, then restart. Normal
+config binding. Installation checks the destination tool environment even when
+invoked from a temporary `uvx` environment. Stop/drain all such instances first,
+update, then restart. Normal
 plugin compatibility evaluation stays in plugin management/update; daemon startup
 does not add a compatibility audit. The existing default plugin-update behavior
 and `--no-update-plugins` remain intact.
@@ -408,7 +410,11 @@ remains the default.
 
 `daemon.discovery_interval` enables advisory endpoint snapshots at
 `/v1/snapshots/discovery.snapshot`; it defaults to zero to avoid an unused duplicate
-sweep. Gateway discovery instead uses `proxy.discovery_backend: daemon` and the
+sweep. A lost periodic snapshot is replaced after the configured interval once
+its registered worker is confirmed gone. The lost job remains available for
+diagnosis; an uncertain or still-live worker blocks the retry. This recovery
+applies only to the periodic read-only observation, never to mutating jobs.
+Gateway discovery instead uses `proxy.discovery_backend: daemon` and the
 proxy's own scope, interval and removal grace. The gateway and watcher run as
 separate service jobs, share the ordinary job/event machinery, and survive an
 API-process restart. See [gateway discovery and workload transport](#gateway-discovery-and-workload-recovery)

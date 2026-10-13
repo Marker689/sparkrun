@@ -37,25 +37,54 @@ def resolve_uv() -> str | None:
     return shutil.which("uv")
 
 
+def environment_executable(prefix: str | Path, command: str) -> Path:
+    """Resolve an entry point inside a Python tool environment on this OS."""
+    return Path(prefix) / ("Scripts" if sys.platform == "win32" else "bin") / (command + ".exe" if sys.platform == "win32" else command)
+
+
 def owning_executable() -> str:
     """The executable inside the running tool environment, independent of PATH."""
-    return str(Path(sys.prefix) / "bin" / get_application_profile().command)
+    return str(environment_executable(sys.prefix, get_application_profile().command))
 
 
-def installed_tool_executable(uv: str) -> Path | None:
+def installed_tool_executable(uv: str, *, strict: bool = False) -> Path | None:
     """Resolve the owning installed tool, including after an install from uvx."""
     try:
-        check = subprocess.run([uv, "tool", "list", "--show-paths"], capture_output=True, text=True)
-    except OSError:
+        check = subprocess.run([uv, "tool", "list", "--show-paths"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if strict:
+            raise RuntimeError("Cannot locate the destination uv environment") from exc
         return None
     if check.returncode:
+        if strict:
+            raise RuntimeError("Cannot locate the destination uv environment: " + check.stderr.strip())
         return None
     expected = re.sub(r"[-_.]+", "-", get_application_profile().package).lower()
     for line in check.stdout.splitlines():
         match = re.fullmatch(r"([^ ]+) v[^ ]+ \((.+)\)", line.strip())
         if match and re.sub(r"[-_.]+", "-", match[1]).lower() == expected:
-            return Path(match[2]).resolve() / "bin" / get_application_profile().command
+            return environment_executable(Path(match[2]).resolve(), get_application_profile().command)
     return None
+
+
+def installation_prefix(uv: str) -> Path:
+    """Resolve the destination, including a first install or a caller in uvx.
+
+    Discovery failures cannot authorize a forced replacement. The package name
+    is the normalized owning distribution, not its possibly different command.
+    """
+    installed = installed_tool_executable(uv, strict=True)
+    if installed is not None:
+        return installed.parent.parent
+    try:
+        result = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True, timeout=15)
+        path = Path(result.stdout.strip())
+        if result.returncode or not path.is_absolute():
+            raise RuntimeError("Cannot locate the destination uv tools directory")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("Cannot locate the destination uv tools directory") from exc
+    package = re.sub(r"[-_.]+", "-", get_application_profile().package).lower()
+    return (path / package).resolve()
 
 
 def is_uv_tool_install(uv: str) -> bool:
@@ -106,7 +135,7 @@ def update_argv(uv: str, channel: str) -> list[str]:
 
 def owning_interpreter() -> str:
     """Fresh Python from the tool environment, even after uv replaces it."""
-    return str(Path(sys.prefix) / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
+    return str(environment_executable(sys.prefix, "python"))
 
 
 def identity_probe_argv() -> list[str]:
@@ -253,7 +282,7 @@ def reconcile_plugin_updates(config_path, *, update: bool = True) -> bool:
     return changed
 
 
-def update_registries_after_core(config_path) -> None:
+def update_registries_after_core(config_path, *, executable=None) -> None:
     """Attempt registry refresh without importing plugins into the recovery command."""
     import os
     from sparkrun.core.application_profile import child_environment
@@ -262,7 +291,7 @@ def update_registries_after_core(config_path) -> None:
     click.echo("Updating recipe registries...")
     try:
         result = subprocess.run(
-            [owning_executable(), "registry", "update"],
+            [str(executable) if executable is not None else owning_executable(), "registry", "update"],
             env={**os.environ, **child_environment(config_path=config_path)},
             capture_output=False,
             timeout=300,

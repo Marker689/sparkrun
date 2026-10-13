@@ -133,9 +133,7 @@ class WorkerJob:
             raise
 
     def _kill_on_close(self, enabled):
-        info = win32job.QueryInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation)
-        info["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE if enabled else 0
-        win32job.SetInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation, info)
+        _kill_on_close(self.handle, enabled)
 
     def release_success(self):
         self._kill_on_close(False)
@@ -154,3 +152,30 @@ def terminate_worker_job(identity):
             win32job.TerminateJobObject(job, 1)
     finally:
         win32api.CloseHandle(job)
+
+
+def _kill_on_close(handle, enabled):
+    info = win32job.QueryInformationJobObject(handle, win32job.JobObjectExtendedLimitInformation)
+    info["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE if enabled else 0
+    win32job.SetInformationJobObject(handle, win32job.JobObjectExtendedLimitInformation, info)
+
+
+class ChildJob:
+    """Parent-owned containment for a gated child, including its descendants."""
+
+    def __init__(self, pid):
+        # Native API accepts NULL for an unnamed job; pywin32's stub says str.
+        self.handle = cast(Any, win32job.CreateJobObject(None, cast(Any, None)))
+        try:
+            _kill_on_close(self.handle, True)
+            process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
+            try:
+                win32job.AssignProcessToJobObject(self.handle, process)
+            finally:
+                win32api.CloseHandle(process)
+        except BaseException:
+            self.handle.Close()
+            raise
+
+    def close(self):
+        self.handle.Close()
