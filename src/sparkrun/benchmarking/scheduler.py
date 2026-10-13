@@ -248,7 +248,7 @@ def run_schedule(
             observation = _AttemptProgress(fw, run_args, task_events, state.benchmark_id, idx, task.label)
             t_start = time.monotonic()
             try:
-                log_fh = open(log_file, "w")
+                log_fh = open(log_file, "w", encoding="utf-8")
                 try:
 
                     def output(line, sink=log_fh):

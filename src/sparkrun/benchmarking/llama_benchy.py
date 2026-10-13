@@ -585,7 +585,7 @@ class LlamaBenchyFramework(BenchmarkingPlugin):
             try:
                 from pathlib import Path
 
-                json_text = Path(result_file).read_text()
+                json_text = Path(result_file).read_text(encoding="utf-8")
             except (OSError, FileNotFoundError):
                 logger.debug("Could not read result file %s, falling back to stdout", result_file)
 

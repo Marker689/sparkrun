@@ -393,7 +393,7 @@ class ToolEvalBenchFramework(BenchmarkingPlugin):
         from pathlib import Path
 
         json_data: dict[str, Any] = {}
-        text = Path(result_file).read_text() if result_file else (stdout or "").strip()
+        text = Path(result_file).read_text(encoding="utf-8") if result_file else (stdout or "").strip()
         if text:
             try:
                 json_data = json.loads(text)

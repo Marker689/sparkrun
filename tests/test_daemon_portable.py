@@ -405,18 +405,17 @@ def test_allow_insecure_does_not_accept_partial_tls(binding, option):
     assert binding.read_state() is None
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX system temporary directory aliases")
-def test_runtime_lease_canonicalizes_system_temp_root(tmp_path, monkeypatch):
-    import tempfile
+@pytest.mark.skipif(os.name == "nt", reason="POSIX OS account directory aliases")
+def test_runtime_lease_canonicalizes_account_home(tmp_path, monkeypatch):
     from sparkrun.core.runtime_lease import environment_state
 
     target = tmp_path / "real-temp"
     target.mkdir()
     alias = tmp_path / "system-temp"
     alias.symlink_to(target, target_is_directory=True)
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(alias))
+    monkeypatch.setattr("sparkrun.core.runtime_lease._account_home", lambda: alias)
     directory = environment_state()
-    assert directory.parent == target.resolve()
+    assert directory.parent == target.resolve() / ".sparkrun-runtime"
     assert directory.is_dir() and directory.stat().st_mode & 0o777 == 0o700
 
 

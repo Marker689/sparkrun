@@ -28,6 +28,17 @@ def user_id():
     return win32security.ConvertSidToStringSid(user_sid())
 
 
+def account_home():
+    """Read the OS account profile, not the process's USERPROFILE environment."""
+    import win32profile
+
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        return Path(win32profile.GetUserProfileDirectory(token))
+    finally:
+        win32api.CloseHandle(token)
+
+
 def _trusted_sids():
     return {user_id(), "S-1-5-18", "S-1-5-32-544"}  # current user, SYSTEM, administrators
 

@@ -25,4 +25,4 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
       - run: uv sync --locked
       - name: Real daemon, benchmark process and update contracts
-        run: uv run --locked pytest -v --tb=long tests/test_daemon_portable.py tests/test_daemon_client.py tests/test_daemon_telemetry.py tests/test_daemon_http_routes.py tests/test_daemon_plugin_namespaces.py tests/test_daemon_services.py tests/test_benchmark_process_portable.py tests/test_update_portable.py
+        run: uv run --locked pytest -v --tb=long tests/test_daemon_portable.py tests/test_daemon_client.py tests/test_daemon_telemetry.py tests/test_daemon_http_routes.py tests/test_daemon_plugin_namespaces.py tests/test_daemon_services.py tests/test_benchmark_process_portable.py tests/test_update_portable.py tests/test_runtime_lease_portable.py tests/test_benchmark_encoding_portable.py

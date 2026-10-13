@@ -620,18 +620,23 @@ def _detect_remote_sparkrun(host, ssh_kwargs, dry_run=False):
 
 
 def _install_remote_sparkrun(host, ssh_kwargs, dry_run=False):
-    """Install sparkrun on a remote host via uvx.
+    """Bootstrap a fresh remote uv tool installation, only for explicit --install.
 
-    Returns True on success, False on failure.
+    Never repair/replace an existing environment here: a missing PATH shim does
+    not mean its daemons have stopped. Replacements belong to setup install's
+    destination-aware runtime guard. Returns True on success, False on failure.
     """
     from sparkrun.orchestration.ssh import run_remote_script
 
     from sparkrun.core.channels import channel_requirement
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.utils.shell import quote
+    import re
 
     requirement = channel_requirement(SparkrunConfig().self_update_channel)
-    script = textwrap.dedent("""\
+    package = re.sub(r"[-_.]+", "-", get_application_profile().package).lower()
+    script = (
+        textwrap.dedent("""\
         #!/usr/bin/env bash
         set -euo pipefail
         export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
@@ -641,11 +646,24 @@ def _install_remote_sparkrun(host, ssh_kwargs, dry_run=False):
             echo "Install uv first: https://docs.astral.sh/uv/" >&2
             exit 1
         fi
-        "$UV_PATH" tool install @REQUIREMENT@ --force
-    """).replace("@REQUIREMENT@", quote(requirement))
+        TOOL_DIR=$("$UV_PATH" tool dir)
+        case "$TOOL_DIR" in
+            /*) ;;
+            *) echo "ERROR: Cannot locate the destination uv tools directory" >&2; exit 1 ;;
+        esac
+        if [ -e "$TOOL_DIR"/@PACKAGE@ ] || [ -L "$TOOL_DIR"/@PACKAGE@ ]; then
+            echo "ERROR: Existing uv environment found; automatic replacement is disabled." >&2
+            echo "Stop/drain its daemons and workers, then run the application's setup install command remotely." >&2
+            exit 1
+        fi
+        "$UV_PATH" tool install @REQUIREMENT@
+    """)
+        .replace("@PACKAGE@", quote(package))
+        .replace("@REQUIREMENT@", quote(requirement))
+    )
 
     if dry_run:
-        click.echo(render_identity_text("Would install {app_command} on %s via: uvx {app_command} setup install" % host))
+        click.echo("Would install on %s via: uv tool install %s (only if its uv environment is absent)" % (host, quote(requirement)))
         return True
 
     result = run_remote_script(host, script, **ssh_kwargs, timeout=120)
@@ -819,6 +837,9 @@ def export_systemd(
 
     By default, prints generated artifacts (unit file, scripts) for review.
     Use --install to deploy to the head node, or --uninstall to remove.
+    Rendering requires an existing remote executable; --dry-run uses placeholder
+    paths. Installation can bootstrap a missing uv tool, but never replaces an
+    existing environment. Use setup install on that host to repair/update it.
 
     \b
     Examples:
@@ -879,13 +900,21 @@ def export_systemd(
         _do_uninstall(slug, systemd_cluster_name, head_host, ssh_user, ssh_kwargs, dry_run)
         return
 
-    # Detect sparkrun on head node (needed for unit file), auto-install if missing
+    # Rendering needs real deployment paths, but cannot authorize installation.
     sparkrun_path, user_home = _detect_remote_sparkrun(head_host, ssh_kwargs, dry_run=dry_run)
     if sparkrun_path is None:
+        if not do_install:
+            raise click.ClickException(
+                render_identity_text(
+                    "{app_command} not found on '%s'; no installation was attempted. "
+                    "Install it on the head node, or re-run with --install to deploy "
+                    "(--dry-run previews artifacts with placeholder paths)." % head_host
+                )
+            )
         click.echo(render_identity_text("{app_command} not found on %s, attempting auto-install..." % head_host))
         if not _install_remote_sparkrun(head_host, ssh_kwargs, dry_run=dry_run):
             click.echo(render_identity_text("Error: Failed to install {app_command} on '%s'." % head_host), err=True)
-            click.echo(render_identity_text("  Install manually: ssh %s 'uvx {app_command} setup install'" % head_host), err=True)
+            click.echo("  Use the application's guarded setup install command on the head node, then retry.", err=True)
             sys.exit(1)
         sparkrun_path, user_home = _detect_remote_sparkrun(head_host, ssh_kwargs, dry_run=dry_run)
         if sparkrun_path is None:

@@ -124,8 +124,6 @@ def fetch_inventory(request: ModelArtifactRequest, *, token: str | None = None, 
     result = inventory_from_info(info)
     index = next((f for f in info.siblings or () if f.rfilename == "model.safetensors.index.json"), None)
     if index is not None and request.file_selection != "all":
-        if index.size is None or index.size > 16 * 1024 * 1024:
-            raise ModelArtifactError("safetensors index metadata exceeds the 16 MiB inventory limit; use file selection all")
         entry = next(f for f in result["files"] if f["path"] == index.rfilename)
         try:
             result["weight_map"] = read_weight_index(request.repo, info.sha, request.endpoint, token, entry)
@@ -147,10 +145,25 @@ def read_weight_index(repo, revision, endpoint, token, entry):
     from tempfile import TemporaryDirectory
     from huggingface_hub import hf_hub_download
 
+    # This function is shared with the generated adapter: keep admission and
+    # diagnostics here so local and delegated acquisition enforce one policy.
+    limit = 16 * 1024 * 1024
+    label = f"{repo}@{revision}/{entry['path']} (endpoint {endpoint})"
+    size = entry.get("size")
+    if size is None:
+        raise ValueError(f"safetensors index size metadata is missing for {label}; cannot enforce the 16 MiB inventory limit")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise ValueError(f"safetensors index size metadata is invalid for {label}: {size!r}")
+    if size > limit:
+        raise ValueError(
+            f"safetensors index {label} is {size} bytes ({size / 1024**2:.2f} MiB), exceeding the 16 MiB inventory limit; "
+            "use file selection all only if the full repository is intended"
+        )
     with TemporaryDirectory(prefix="sparkrun-index-") as directory:
         path = hf_hub_download(repo, entry["path"], revision=revision, endpoint=endpoint, token=token, local_dir=directory)
-        raw = Path(path).read_bytes()
-    if len(raw) != entry["size"]:
+        with Path(path).open("rb") as stream:
+            raw = stream.read(size + 1)
+    if len(raw) != size:
         raise ValueError("safetensors index size does not match origin inventory")
     algorithm = entry["checksum_algorithm"]
     digest = (

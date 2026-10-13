@@ -803,7 +803,7 @@ def _write_measurement(execution: BenchmarkExecution, *, tp: int, output_path: s
     if startup := startup_timing_metadata(execution.readiness, resumed=execution.resumed):
         data["sparkrun_benchmark"]["timing"] = {"startup": startup}
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(public_benchmark_data(data), f, default_flow_style=False, sort_keys=False, indent=2)
     logger.info("Results exported to %s", output_path)
     return output_path

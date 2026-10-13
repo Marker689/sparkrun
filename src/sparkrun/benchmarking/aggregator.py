@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def read_task_result(path: Path) -> dict[str, Any] | None:
     """Read one task artifact, returning None for missing or unusable JSON."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         logger.warning("aggregator: skipping %s — %s", path.name, exc)
         return None

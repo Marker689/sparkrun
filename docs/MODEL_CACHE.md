@@ -77,6 +77,14 @@ Unfamiliar nested component trees remain included to avoid discarding separate
 vision/encoder weights. No shard count is inferred from safetensors filenames.
 Without a root index, the complete repository inventory is selected.
 
+Index-based selection accepts at most **16 MiB for the index JSON itself**;
+this is an inventory parsing bound, not a limit on weight files, total model
+size, or VRAM. Missing index-size metadata is reported separately from an
+oversized index, with the repository, resolved revision, and endpoint. The
+same checks apply to controller and delegated acquisition. Selection `all`
+skips index-based filtering and can include additional weight formats; it does
+not repair missing inventory metadata.
+
 This addresses [#142](https://github.com/spark-arena/sparkrun/issues/142) without
 checking for a GPT-OSS model name. At GPT-OSS-120B commit
 `b5c939de8f754692c1647ca79fbf85e8c1e70f8a`, metadata and the index select 15 root

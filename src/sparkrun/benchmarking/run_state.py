@@ -282,7 +282,7 @@ def hold_state_dir(benchmark_id: str, cache_dir: str | None = None):
             logger.debug("Could not create benchmark state lock at %s", lock_path, exc_info=True)
             return True
         try:
-            with os.fdopen(fd, "w") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(payload)
         except OSError:
             logger.debug("Could not write benchmark state lock at %s", lock_path, exc_info=True)
@@ -291,7 +291,7 @@ def hold_state_dir(benchmark_id: str, cache_dir: str | None = None):
     acquired = _acquire()
     if not acquired:
         try:
-            held = json.loads(lock_path.read_text())
+            held = json.loads(lock_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             # Unreadable or truncated — a half-written lock from a run that
             # died mid-create. Treat as stale rather than blocking forever.
@@ -306,7 +306,7 @@ def hold_state_dir(benchmark_id: str, cache_dir: str | None = None):
         if not _acquire():
             # Lost the reclaim race to another run that was also waiting.
             try:
-                held = json.loads(lock_path.read_text())
+                held = json.loads(lock_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 held = {}
             raise StateDirLocked(benchmark_id, held)
@@ -317,7 +317,7 @@ def hold_state_dir(benchmark_id: str, cache_dir: str | None = None):
         # Release only our own lock: a run whose directory was rmtree'd and
         # recreated by someone else must not delete the new owner's lock.
         try:
-            current = json.loads(lock_path.read_text())
+            current = json.loads(lock_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             current = None
         if current is None or (current.get("pid") == os.getpid() and current.get("host") == lock_hostname()):
@@ -431,7 +431,7 @@ class BenchmarkRunState:
         from sparkrun.benchmarking.metadata import public_benchmark_data
 
         data = public_benchmark_data(asdict(self))
-        with open(tmp_path, "w") as fh:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
 
         tmp_path.replace(state_path)
@@ -449,7 +449,7 @@ class BenchmarkRunState:
 
         state_path = _state_dir_for(benchmark_id, cache_dir) / "state.yaml"
         try:
-            with open(state_path) as fh:
+            with open(state_path, encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
             _validate_state_data(data, benchmark_id)
             if data.get("base_args", {}).get("api_key"):

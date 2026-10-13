@@ -841,7 +841,7 @@ class TestExportSystemdCommand:
 
         result = runner.invoke(
             main,
-            ["export", "systemd", _TEST_RECIPE_NAME, "--hosts", "10.0.0.1"],
+            ["export", "systemd", _TEST_RECIPE_NAME, "--hosts", "10.0.0.1", "--install"],
         )
         assert result.exit_code != 0
         assert "Failed to install sparkrun" in result.output
@@ -862,10 +862,11 @@ class TestExportSystemdCommand:
 
         monkeypatch.setattr("sparkrun.cli._export._detect_remote_sparkrun", mock_detect)
         monkeypatch.setattr("sparkrun.cli._export._install_remote_sparkrun", mock_install)
+        monkeypatch.setattr("sparkrun.cli._export._do_install", lambda *args: None)
 
         result = runner.invoke(
             main,
-            ["export", "systemd", _TEST_RECIPE_NAME, "--hosts", "10.0.0.1"],
+            ["export", "systemd", _TEST_RECIPE_NAME, "--hosts", "10.0.0.1", "--install"],
         )
         assert result.exit_code == 0
         assert "sparkrun not found" in result.output

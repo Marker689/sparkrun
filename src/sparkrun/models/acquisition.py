@@ -81,8 +81,6 @@ if payload['revision'] is None:
     result = dict(revision=info.sha, files=files)
     index = next((f for f in info.siblings or () if f.rfilename == 'model.safetensors.index.json'), None)
     if index is not None and request['file_selection'] != 'all':
-        if index.size is None or index.size > 16 * 1024 * 1024:
-            raise ValueError('safetensors index exceeds the 16 MiB inventory limit; use file selection all')
         entry = next(f for f in files if f['path'] == index.rfilename)
         result['weight_map'] = read_weight_index(repo, info.sha, request['endpoint'], payload['token'], entry)
 else:

@@ -324,8 +324,18 @@ guarantees.
 while any daemon/worker lease in that installation is live, including another
 config binding. Installation checks the destination tool environment even when
 invoked from a temporary `uvx` environment. Stop/drain all such instances first,
-update, then restart. Normal
-plugin compatibility evaluation stays in plugin management/update; daemon startup
+update, then restart. Coordination is stored under `.sparkrun-runtime` in the
+OS account's home/profile directory, keyed by user and canonical interpreter
+installation. It is shared across application/config bindings and does not follow
+`HOME`, `USERPROFILE`, XDG, or temporary-directory overrides. The directory uses
+private permissions (an owner-only ACL on Windows).
+
+When upgrading from a 0.4.0 pre-release that stored runtime leases in temporary
+directories, stop and restart all daemons/workers. Updates check old records in
+known temp roots and the current config as a transition safeguard, but cannot
+discover every custom temp root used by old processes on other config bindings.
+
+Normal plugin compatibility evaluation stays in plugin management/update; daemon startup
 does not add a compatibility audit. The existing default plugin-update behavior
 and `--no-update-plugins` remain intact.
 

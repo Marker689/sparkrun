@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from importlib.machinery import ModuleSpec, PathFinder
 import hashlib
 import json
@@ -157,7 +157,7 @@ def live_leases(root):
         return []
     result = []
     for path in directory.glob("*.json"):
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         if alive(data["process"]):
             result.append(data)
         else:
@@ -179,17 +179,55 @@ def assert_generations_available(root, records):
                 )
 
 
+def _account_home():
+    """OS account directory, independent of HOME/USERPROFILE/XDG/TEMP overrides."""
+    if os.name == "nt":
+        from sparkrun.utils.windows import account_home
+
+        return account_home()
+    import pwd
+
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def _environment_name(prefix=None):
+    from sparkrun.core.process_identity import user_identity
+
+    key = hashlib.sha256(str(Path(sys.prefix if prefix is None else prefix).resolve()).encode()).hexdigest()[:20]
+    return f"sparkrun-runtime-{user_identity()}-{key}"
+
+
 def environment_state(prefix=None):
-    """One protected coordination directory for the selected installation."""
-    import sys
+    """One protected coordination directory per OS user and installation.
+
+    Keep it outside the replaceable environment and independent of shell,
+    service, application profile, config, and temporary-directory settings.
+    Resolve the OS home first (macOS may expose it through a system alias).
+    """
+    from sparkrun.daemon.state import private_directory
+
+    home = _account_home()
+    if not home.is_absolute():
+        raise RuntimeError("OS account home must be an absolute path for runtime coordination")
+    return private_directory(home.resolve() / ".sparkrun-runtime" / _environment_name(prefix))
+
+
+def _legacy_environment_states(prefix=None):
+    """Known pre-release temp roots; old daemons must be restarted on upgrade.
+
+    Also inspect the config's duplicate records in assert_runtime_idle. Arbitrary
+    temp roots belonging to old processes on other bindings cannot be discovered
+    reliably; these compatibility checks do not authorize keeping them running.
+    """
     import tempfile
     from sparkrun.daemon.state import private_directory
 
-    key = hashlib.sha256(str(Path(sys.prefix if prefix is None else prefix).resolve()).encode()).hexdigest()[:20]
-    from sparkrun.core.process_identity import user_identity
-
-    uid = user_identity()
-    return private_directory(Path(tempfile.gettempdir()).resolve() / f"sparkrun-runtime-{uid}-{key}")
+    roots = {Path(tempfile.gettempdir()).resolve()}
+    if os.name != "nt":
+        roots.update(Path(path).resolve() for path in ("/tmp", "/var/tmp", "/usr/tmp"))
+    else:
+        roots.add(_account_home().resolve() / "AppData" / "Local" / "Temp")
+    return [private_directory(path) for root in sorted(roots) if (path := root / _environment_name(prefix)).exists()]
 
 
 @contextmanager
@@ -225,11 +263,12 @@ def runtime_lease(config, *, kind, expected=None):
 def assert_runtime_idle(config, *, target_prefix=None):
     """Protect the entire interpreter installation, including other bindings."""
     environment = environment_state() if target_prefix is None else environment_state(target_prefix)
-    leases = [v for v in live_leases(environment) if v["process"]["pid"] != os.getpid()]
+    roots = [environment, *_legacy_environment_states(target_prefix), config.config_path.parent]
+    leases = {v["process"]["pid"] for root in roots for v in live_leases(root) if v["process"]["pid"] != os.getpid()}
     if leases:
         raise RuntimeError(
             "Core update requires stopping daemons and draining workers first (active PIDs: %s)"
-            % ", ".join(str(v["process"]["pid"]) for v in leases)
+            % ", ".join(str(pid) for pid in sorted(leases))
         )
 
 
@@ -237,7 +276,10 @@ def assert_runtime_idle(config, *, target_prefix=None):
 def update_guard(config, *, target_prefix=None):
     """Serialize replacement against process lease creation across all bindings."""
     environment = environment_state() if target_prefix is None else environment_state(target_prefix)
-    with file_lock(environment / "runtime.lock"):
+    with ExitStack() as locks:
+        locks.enter_context(file_lock(environment / "runtime.lock"))
+        for legacy in _legacy_environment_states(target_prefix):
+            locks.enter_context(file_lock(legacy / "runtime.lock"))
         assert_runtime_idle(config, target_prefix=target_prefix)
         yield
 

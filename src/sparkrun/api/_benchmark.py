@@ -208,7 +208,7 @@ def _write_consolidated(state_dir: Path, consolidated: dict[str, Any]) -> Path:
     """Write the consolidated dict to ``<state_dir>/consolidated.json`` and return the path."""
     state_dir.mkdir(parents=True, exist_ok=True)
     p = state_dir / "consolidated.json"
-    p.write_text(json.dumps(consolidated, indent=2))
+    p.write_text(json.dumps(consolidated, indent=2), encoding="utf-8")
     return p
 
 
@@ -1557,8 +1557,8 @@ def _measurement_output_paths(output_file, results) -> dict[str, Path]:
 def _emit_results_outputs(results: dict[str, Any], paths: dict[str, Path], emitter: _ProgressEmitter, *, outputs=None) -> dict[str, Path]:
     """Write planned JSON/CSV exports and record only successful artifacts."""
     writers = {
-        "json": lambda data, path: path.write_text(json.dumps(data, indent=2)),
-        "csv": lambda data, path: path.write_text(data),
+        "json": lambda data, path: path.write_text(json.dumps(data, indent=2), encoding="utf-8"),
+        "csv": lambda data, path: path.write_text(data, encoding="utf-8"),
     }
     written: dict[str, Path] = {}
     for fmt, writer in writers.items():
@@ -1752,7 +1752,7 @@ def _complete_saved_benchmark(state, integrations, cache_dir, *, emitter, fw=Non
     result_path = state.state_dir(cache_dir) / "result.yaml"
     if not state.extras.get("measurement_complete") or not result_path.is_file():
         raise BenchmarkFailed("Completed tasks have no validated benchmark results; rerun with --fresh.", exit_code=1)
-    result.results = _framework_results(yaml.safe_load(result_path.read_text()), state.framework)
+    result.results = _framework_results(yaml.safe_load(result_path.read_text(encoding="utf-8")), state.framework)
     result.success = True
     # Presentation is optional: an unavailable framework must not prevent
     # retrieval/publication of already committed measurements.
