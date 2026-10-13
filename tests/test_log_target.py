@@ -1,6 +1,7 @@
 """Public resolved-target contracts for TUI clients and finite log export."""
 
 from dataclasses import FrozenInstanceError
+import os
 import subprocess
 import sys
 import threading
@@ -211,3 +212,73 @@ def test_cli_rejects_negative_tail_before_reading():
     result = CliRunner().invoke(command, [CID, "--tail", "-1"])
     assert result.exit_code == 2
     assert "Invalid value" in result.output and "--tail" in result.output
+
+
+@pytest.mark.parametrize("follow", [False, True])
+@pytest.mark.skipif(os.name == "nt", reason="Local executor fixture requires POSIX bash/tail")
+def test_local_target_reads_entire_log_when_tail_is_none(tmp_path, monkeypatch, follow):
+    from sparkrun.orchestration.executors.local import LocalExecutor
+    from sparkrun.orchestration.executors._base import ExecutorConfig
+
+    path = tmp_path / "model.log"
+    expected = ["line-%d" % n for n in range(30)]
+    path.write_text("\n".join(expected) + "\n")
+    executor = LocalExecutor(ExecutorConfig(log_file=str(path)))
+    source = LogSource("localhost", "local-reader")
+    target = api.LogTarget("cid", "sglang", (source,), executor, {})
+    monkeypatch.setattr("sparkrun.orchestration.ssh.should_run_locally", lambda *a: True)
+    reader = target.read(tail=None, follow=follow)
+    try:
+        assert [next(reader).text for _ in expected] == expected
+        if not follow:
+            assert list(reader) == []
+    finally:
+        reader.close()
+
+
+@pytest.fixture
+def diagnostic_ssh(tmp_path, monkeypatch):
+    """Exercise real command/SSH quoting and distinct transport stderr locally."""
+    if os.name == "nt":
+        pytest.skip("Remote POSIX shell emulation requires bash/tail")
+    ssh = tmp_path / "ssh.py"
+    ssh.write_text(
+        "import subprocess, sys\n"
+        "print('SSH warning', file=sys.stderr, flush=True)\n"
+        "sys.exit(subprocess.call(' '.join(sys.argv[1:]), shell=True))\n"
+    )
+    monkeypatch.setattr("sparkrun.orchestration.ssh.should_run_locally", lambda *a: False)
+    monkeypatch.setattr("sparkrun.orchestration.ssh.build_ssh_cmd", lambda *a, **kw: [sys.executable, str(ssh)])
+
+
+@pytest.mark.parametrize("skip,count", [(0, 5), (5, 5), (8, 5), (10, 5)])
+def test_page_offsets_exclude_ssh_diagnostics(tmp_path, diagnostic_ssh, caplog, skip, count):
+    from sparkrun.orchestration.executors.local import LocalExecutor
+    from sparkrun.orchestration.executors._base import ExecutorConfig
+
+    path = tmp_path / "model.log"
+    rows = ["line-%d" % n for n in range(10)]
+    path.write_text("\n".join(rows) + "\n")
+    executor = LocalExecutor(ExecutorConfig(log_file=str(path)))
+    source = LogSource("remote", "local-reader")
+    target = api.LogTarget("cid", "sglang", (source,), executor, {})
+    page = target.page(source, skip=skip, count=count)
+    end = max(0, len(rows) - skip)
+    assert [line.text for line in page] == rows[max(0, end - count) : end]
+    assert "SSH warning" in caplog.text
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_docker_workload_stderr_survives_transport_diagnostic_separation(tmp_path, monkeypatch, diagnostic_ssh, follow):
+    from sparkrun.core.log_source import MODE_STDOUT
+
+    # A Docker stand-in reproduces docker logs' two output descriptors. The
+    # real DockerExecutor builds the command, which runs through the SSH fixture.
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\nprintf 'workload stdout\\n'\nprintf 'workload stderr\\n' >&2\n")
+    docker.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+    source = LogSource("remote", "docker-reader", mode=MODE_STDOUT)
+    target = api.LogTarget("cid", "vllm-ray", (source,), DockerExecutor(), {})
+    assert [line.text for line in target.read(follow=follow)] == ["workload stdout", "workload stderr"]
+    assert [line.text for line in target.page(source, skip=1, count=1)] == ["workload stdout"]

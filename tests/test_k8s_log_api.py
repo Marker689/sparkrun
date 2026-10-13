@@ -89,8 +89,8 @@ def test_closing_logs_stops_local_reader_without_deleting_job(log_env, monkeypat
     processes = []
     original = readers._spawn
 
-    def spawn(cmd):
-        proc = original(cmd)
+    def spawn(cmd, **kwargs):
+        proc = original(cmd, **kwargs)
         processes.append(proc)
         return proc
 

@@ -673,7 +673,10 @@ class DockerExecutor(Executor):
         for a not-yet-existing file instead of erroring out.
         """
         if source.mode != MODE_FILE:
-            return self.logs_cmd(source.container, follow=follow, tail=tail)
+            # Docker forwards workload stderr on its own stderr. Merge it here,
+            # before the SSH boundary, so the reader can isolate SSH diagnostics
+            # without discarding application log records.
+            return self.logs_cmd(source.container, follow=follow, tail=tail) + " 2>&1"
 
         path = source.path or SERVE_LOG_PATH
         inner = ["tail"]

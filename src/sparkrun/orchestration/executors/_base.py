@@ -560,6 +560,11 @@ class Executor(Plugin):
         for ``local``).  Only executors with an in-container filesystem
         indirection — docker, whose sleep-infinity containers hide the serve
         log from ``docker logs`` — need to override.
+
+        Return workload log records on stdout, including any workload stderr.
+        The reader captures command/transport stderr separately as diagnostics,
+        so warnings cannot change paging offsets. Implementations whose log
+        tool forwards workload stderr must merge it inside this command.
         """
         return self.logs_cmd(source.container, follow=follow, tail=tail)
 

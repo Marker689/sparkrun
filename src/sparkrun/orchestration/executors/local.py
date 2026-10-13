@@ -425,8 +425,7 @@ class LocalExecutor(Executor):
         parts = ["tail"]
         if follow:
             parts.append("-F")  # -F survives logfile rotation/recreation
-        if tail is not None:
-            parts.extend(["-n", str(int(tail))])
+        parts.extend(["-n", str(int(tail)) if tail is not None else "+1"])
         parts.append(log_file)
         return " ".join(parts)
 

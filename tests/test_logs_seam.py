@@ -79,7 +79,7 @@ class TestDockerReadLogsCmd:
         source = LogSource(host="h1", container="cid_worker", mode=MODE_STDOUT, path=None)
         cmd = DockerExecutor().read_logs_cmd(source, follow=True, tail=50)
 
-        assert cmd == "docker logs -f --tail 50 cid_worker"
+        assert cmd == "docker logs -f --tail 50 cid_worker 2>&1"
 
     def test_custom_path_is_honoured(self):
         source = LogSource(host="h1", container="c", mode=MODE_FILE, path="/var/log/custom.log")
@@ -179,6 +179,7 @@ class _FakeProc:
         from io import StringIO
 
         self.stdout = StringIO("".join(lines))
+        self.stderr = None
         self._done = False
 
     def poll(self):
@@ -197,7 +198,7 @@ class _FakeProc:
 def _fake_spawn(mapping):
     """Return a _spawn stub that keys canned output off the container name."""
 
-    def _spawn(cmd):
+    def _spawn(cmd, **kwargs):
         joined = " ".join(cmd)
         for container, lines in mapping.items():
             if container in joined:
@@ -270,7 +271,7 @@ class TestReadOrdering:
     def test_follow_survives_one_source_failing(self, monkeypatch):
         """A dead worker must not take the head's stream down with it."""
 
-        def _spawn(cmd):
+        def _spawn(cmd, **kwargs):
             if "c_node_1" in " ".join(cmd):
                 raise OSError("ssh: connect failed")
             return _FakeProc(["alive\n"])
@@ -287,7 +288,7 @@ class TestReadOrdering:
         """Closing the generator early must reap the reader subprocesses."""
         procs = []
 
-        def _spawn(cmd):
+        def _spawn(cmd, **kwargs):
             proc = _FakeProc(["x\n"] * 100)
             proc.poll = lambda: None  # pretend still running so terminate() is exercised
             procs.append(proc)
@@ -469,8 +470,8 @@ def test_cancel_reaps_real_quiet_busy_and_child_readers(monkeypatch, command):
     original = logs._spawn
     started = threading.Event()
 
-    def spawn(cmd):
-        proc = original(cmd)
+    def spawn(cmd, **kwargs):
+        proc = original(cmd, **kwargs)
         spawned.append(proc)
         started.set()
         return proc

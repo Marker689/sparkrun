@@ -87,8 +87,8 @@ def test_closing_daemon_stream_cancels_silent_finite_reader(monkeypatch):
     started = threading.Event()
     processes = []
 
-    def spawn(cmd):
-        process = original(cmd)
+    def spawn(cmd, **kwargs):
+        process = original(cmd, **kwargs)
         processes.append(process)
         started.set()
         return process

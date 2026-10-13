@@ -82,6 +82,12 @@ the resolution arguments and filters.
 - Finite reads group sources using `core.log_source.source_sort_key`. Follow
   merges arrival order and adds local arrival timestamps; these are not remote
   event timestamps. Per-source ordering is preserved.
+- Executor-backed reads keep transport/reader diagnostics outside `LogLine`
+  records. Diagnostics are logged separately, drained concurrently, and retained
+  as a bounded tail in subprocess failures' `stderr`. They never consume paging
+  offsets. Docker workload stderr is combined with workload stdout inside the
+  executor command, before the SSH boundary, so application errors remain in
+  the log history.
 - Nonzero reader exits raise `subprocess.CalledProcessError` by default. Spawn
   failures also propagate. `check=False` opts out of exit-status checking and
   permits best-effort following when one source fails.

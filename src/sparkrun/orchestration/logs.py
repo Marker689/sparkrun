@@ -29,6 +29,8 @@ renders it.  Nothing here imports ``api`` (layering).
 from __future__ import annotations
 
 import logging
+from collections import deque
+from contextlib import contextmanager, ExitStack
 import math
 import os
 import queue
@@ -81,11 +83,49 @@ def build_read_command(
     return build_ssh_cmd(source.host, **kwargs) + ["bash", "-c", quote(command)]
 
 
-def _spawn(cmd: list[str]) -> subprocess.Popen:
+def _spawn(cmd: list[str], *, merge_stderr: bool = True) -> subprocess.Popen:
     # Background SSH readers must not consume the CLI/TUI's keystrokes.
     return subprocess.Popen(
-        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
     )
+
+
+@contextmanager
+def _reader_process(cmd: list[str], source: LogSource, *, merge_stderr: bool):
+    """Own the process and drain diagnostics without buffering unbounded output."""
+    proc = _spawn(cmd, merge_stderr=merge_stderr)
+    diagnostics: deque[str] = deque(maxlen=16)
+    stderr_thread = None
+
+    def drain() -> None:
+        assert proc.stderr is not None
+        # Bound both the retained tail and individual chunks, even for a tool
+        # emitting a very long line. Drain concurrently to avoid pipe deadlock.
+        while chunk := proc.stderr.readline(4096):
+            diagnostics.append(chunk)
+            logger.warning("Log reader %s: %s", source.label, chunk.rstrip("\n"))
+
+    try:
+        if proc.stderr is not None:
+            thread = threading.Thread(target=drain, name="sparkrun-log-stderr-%s" % source.label, daemon=True)
+            thread.start()
+            stderr_thread = thread
+        yield proc, diagnostics
+    finally:
+        # Reap children before joining: a child can hold stderr open after its
+        # parent exits. Consumers inspect diagnostics only after this cleanup.
+        _terminate(proc)
+        if stderr_thread is not None:
+            stderr_thread.join()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def _line(source: LogSource, text: str, *, timestamp: float | None = None) -> LogLine:
@@ -113,7 +153,7 @@ def _read_one(
     """Yield every line from a single source, then return."""
     cmd = build_read_command(executor, source, follow=follow, tail=tail, ssh_kwargs=ssh_kwargs)
     logger.debug("Reading logs from %s: %s", source.label, " ".join(cmd))
-    yield from read_log_command(cmd, source, cancel=cancel, check=check, timeout=timeout)
+    yield from read_log_command(cmd, source, cancel=cancel, check=check, timeout=timeout, merge_stderr=False)
 
 
 def read_log_command(
@@ -123,11 +163,14 @@ def read_log_command(
     check: bool = False,
     cancel: threading.Event | None = None,
     timeout: float | None = None,
+    merge_stderr: bool = True,
 ) -> Iterator[LogLine]:
     """Read a local argv into structured lines; closing the iterator stops it.
 
-    Stderr is merged into the captured stream. Native control-plane plugins
-    reuse this reader without routing a local client command through SSH.
+    Direct callers retain merged stderr by default. Executor-backed readers
+    set merge_stderr=False: stderr is drained/logged separately and its bounded
+    tail is attached to read failures. Native control-plane plugins reuse this
+    reader without routing a local client command through SSH.
     With check=True, a nonzero reader exit raises CalledProcessError.
     Cancellation ends iteration normally, including while waiting on a silent
     command. A positive finite timeout bounds the command's wall-clock lifetime
@@ -137,47 +180,44 @@ def read_log_command(
         raise ValueError("Log read timeout must be positive and finite")
     if cancel is not None and cancel.is_set():
         return
-    proc = _spawn(cmd)
-    finished = threading.Event()
-    expired = threading.Event()
-    deadline = None if timeout is None else time.monotonic() + timeout
+    with _reader_process(cmd, source, merge_stderr=merge_stderr) as (proc, diagnostics):
+        finished = threading.Event()
+        expired = threading.Event()
+        deadline = None if timeout is None else time.monotonic() + timeout
 
-    def watch() -> None:
-        while not finished.wait(0.05):
-            if cancel is not None and cancel.is_set():
-                _terminate(proc)
-                return
-            if deadline is not None and time.monotonic() >= deadline:
-                expired.set()
-                _terminate(proc)
-                return
+        def watch() -> None:
+            while not finished.wait(0.05):
+                if cancel is not None and cancel.is_set():
+                    _terminate(proc)
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    expired.set()
+                    _terminate(proc)
+                    return
 
-    watcher = None
-    try:
-        if cancel is not None or timeout is not None:
-            thread = threading.Thread(target=watch, name="sparkrun-log-watch-%s" % source.label, daemon=True)
-            thread.start()
-            watcher = thread
-        assert proc.stdout is not None
-        for text in proc.stdout:
-            if expired.is_set() or (cancel is not None and cancel.is_set()):
-                break
-            yield _line(source, text)
-        rc = proc.wait()
-        if cancel is not None and cancel.is_set():
-            return
-        if expired.is_set():
-            assert timeout is not None
-            raise subprocess.TimeoutExpired(cmd, timeout)
-        if check and rc != 0:
-            raise subprocess.CalledProcessError(rc, cmd)
-    finally:
-        finished.set()
-        if watcher is not None:
-            watcher.join()
-        _terminate(proc)
-        if proc.stdout is not None:
-            proc.stdout.close()
+        watcher = None
+        try:
+            if cancel is not None or timeout is not None:
+                thread = threading.Thread(target=watch, name="sparkrun-log-watch-%s" % source.label, daemon=True)
+                thread.start()
+                watcher = thread
+            assert proc.stdout is not None
+            for text in proc.stdout:
+                if expired.is_set() or (cancel is not None and cancel.is_set()):
+                    break
+                yield _line(source, text)
+            rc = proc.wait()
+        finally:
+            finished.set()
+            if watcher is not None:
+                watcher.join()
+    if cancel is not None and cancel.is_set():
+        return
+    if expired.is_set():
+        assert timeout is not None
+        raise subprocess.TimeoutExpired(cmd, timeout, stderr="".join(diagnostics))
+    if check and rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd, stderr="".join(diagnostics))
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -266,31 +306,28 @@ def _interleave(
                 pass
 
     def pump(source: LogSource) -> None:
-        proc = None
         try:
             cmd = build_read_command(executor, source, follow=True, tail=tail, ssh_kwargs=ssh_kwargs)
             logger.debug("Following logs from %s: %s", source.label, " ".join(cmd))
-            with lock:
-                if stop.is_set():
-                    return
-                proc = _spawn(cmd)
-                procs.append(proc)
-            assert proc.stdout is not None
-            for text in proc.stdout:
-                if stop.is_set():
-                    break
-                put(_line(source, text, timestamp=time.time()))
-            if check and not stop.is_set() and (rc := proc.wait()) != 0:
-                raise subprocess.CalledProcessError(rc, cmd)
+            with ExitStack() as readers:
+                with lock:
+                    if stop.is_set():
+                        return
+                    proc, diagnostics = readers.enter_context(_reader_process(cmd, source, merge_stderr=False))
+                    procs.append(proc)
+                assert proc.stdout is not None
+                for text in proc.stdout:
+                    if stop.is_set():
+                        break
+                    put(_line(source, text, timestamp=time.time()))
+                rc = proc.wait() if check and not stop.is_set() else 0
+            if check and not stop.is_set() and rc != 0:
+                raise subprocess.CalledProcessError(rc, cmd, stderr="".join(diagnostics))
         except Exception as error:
             logger.debug("Log reader for %s failed: %s", source.label, error)
             if check:
                 put(error)
         finally:
-            if proc is not None:
-                _terminate(proc)
-                if proc.stdout is not None:
-                    proc.stdout.close()
             put(_QUEUE_SENTINEL)
 
     threads = [threading.Thread(target=pump, args=(source,), daemon=True, name="sparkrun-logs-%s" % source.label) for source in sources]

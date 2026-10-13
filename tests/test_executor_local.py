@@ -256,7 +256,7 @@ class TestLocalExecutorBasics:
     def test_logs_cmd_no_follow_no_dash_F(self):
         cmd = _local().logs_cmd("foo_solo", follow=False, tail=None)
         assert "-F" not in cmd
-        assert "-n" not in cmd
+        assert "-n +1" in cmd
 
     def test_exec_cmd_runs_in_subshell_with_prelude(self):
         ex = _local(working_dir="/srv")

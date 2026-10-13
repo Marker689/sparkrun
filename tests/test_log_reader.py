@@ -21,8 +21,8 @@ def spawned(monkeypatch):
     processes = []
     original = logs._spawn
 
-    def spawn(command):
-        proc = original(command)
+    def spawn(command, **kwargs):
+        proc = original(command, **kwargs)
         processes.append(proc)
         return proc
 
@@ -36,7 +36,8 @@ def spawned(monkeypatch):
 def assert_reaped(processes):
     assert processes and all(proc.poll() is not None for proc in processes)
     assert all(proc.stdout.closed for proc in processes)
-    assert not any(t.name == "sparkrun-log-watch-" + SOURCE.label for t in threading.enumerate())
+    assert all(proc.stderr is None or proc.stderr.closed for proc in processes)
+    assert not any(t.name in {"sparkrun-log-watch-" + SOURCE.label, "sparkrun-log-stderr-" + SOURCE.label} for t in threading.enumerate())
 
 
 @pytest.mark.parametrize(
@@ -141,4 +142,42 @@ def test_finite_cancel_does_not_open_later_sources(monkeypatch, spawned):
 def test_reader_has_no_terminal_stdin(spawned):
     command = [sys.executable, "-c", "import sys; print('eof:' + str(sys.stdin.read() == ''))"]
     assert [line.text for line in logs.read_log_command(command, SOURCE, check=True, timeout=5)] == ["eof:True"]
+    assert_reaped(spawned)
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_transport_diagnostics_are_logged_without_becoming_records(monkeypatch, spawned, caplog, follow):
+    command = [sys.executable, "-c", "import sys; print('SSH warning', file=sys.stderr, flush=True); print('model output', flush=True)"]
+    monkeypatch.setattr(logs, "build_read_command", lambda *a, **kw: command)
+    lines = list(logs.read_log_sources(Mock(), [SOURCE], follow=follow, check=True))
+    assert [line.text for line in lines] == ["model output"]
+    assert "SSH warning" in caplog.text
+    assert_reaped(spawned)
+
+
+def test_large_diagnostics_are_drained_and_bounded_on_failure(monkeypatch, spawned, caplog):
+    caplog.set_level("CRITICAL", logger=logs.__name__)
+    command = [sys.executable, "-c", "import sys; sys.stderr.write('x' * 262144 + 'failure-detail'); sys.exit(7)"]
+    monkeypatch.setattr(logs, "build_read_command", lambda *a, **kw: command)
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        list(logs.read_log_sources(Mock(), [SOURCE], check=True, timeout=5))
+    assert error.value.returncode == 7
+    assert error.value.stderr.endswith("failure-detail")
+    assert len(error.value.stderr) <= 16 * 4096
+    assert_reaped(spawned)
+
+
+def test_cancel_reaps_reader_while_draining_stderr(monkeypatch, spawned):
+    command = [
+        sys.executable,
+        "-c",
+        "import sys,time; print('ready', flush=True)\nwhile True:\n sys.stderr.write('x' * 4096)\n sys.stderr.flush()",
+    ]
+    monkeypatch.setattr(logs, "build_read_command", lambda *a, **kw: command)
+    monkeypatch.setattr(logs.logger, "warning", lambda *a, **kw: None)
+    cancel = threading.Event()
+    reader = logs.read_log_sources(Mock(), [SOURCE], cancel=cancel, check=True)
+    assert next(reader).text == "ready"
+    cancel.set()
+    assert list(reader) == []
     assert_reaped(spawned)
