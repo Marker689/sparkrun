@@ -149,14 +149,16 @@ Both return after submission. Use `plugins.k8s.api.logs(name=..., kind="jobset")
 or `kind="job"`, optionally with `follow=True`, to consume structured `LogLine`
 records. Close the iterator when stopping early. `setup k8s launch --follow` and
 `setup k8s run-job --follow` render that iterator in the CLI. Native `run` JobSet
-submission returns without attachment; use the explicit plugin log API.
+submission returns without attachment; use `api.logs(workload_id=result.cluster_id)`
+or `api.open_log_target(workload_id=result.cluster_id)` for shared log consumption.
 Native `RunResult.cluster_id` remains the portable workload ID. Use
 `api.stop(cluster_id=result.cluster_id)` for shared teardown; the saved native
 resource reference and resolved Kubernetes target survive a new API session and
 changes to defaults. `api.status(..., executor="k8s")` reports submitted JobSets
 for intent discovery and replacement. Use `result.metadata["k8s_jobset"]` for the
-plugin's direct resource/log API. Common `api.logs()` explicitly rejects native
-resource records until that surface supports controller-owned log sources.
+plugin's direct resource/log API. Shared logging resolves individual owned native
+pod/container sources from the saved destination, including completed containers.
+See [LOGGING_API.md](LOGGING_API.md) for filtering, paging, and restart semantics.
 The manifest retains portable identity, fingerprint, and host scope as annotations.
 Explicit JobSet names and generated suffixes are validated before replacement.
 Kubernetes lifecycle operations consistently translate operational failures into

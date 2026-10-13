@@ -338,7 +338,7 @@ def _render_logs(sctx, *, cluster_id=None, recipe=None, hosts, cluster=None, ove
     """
     try:
         stream = api.logs(
-            cluster_id,
+            workload_id=cluster_id,
             recipe=recipe,
             hosts=tuple(hosts),
             cluster=cluster,
@@ -352,12 +352,13 @@ def _render_logs(sctx, *, cluster_id=None, recipe=None, hosts, cluster=None, ove
         multi = scope == SCOPE_ALL and len(hosts) > 1
         try:
             for line in stream:
-                click.echo("[%s/%s] %s" % (line.host, line.role, line.text) if multi else line.text)
+                prefix = multi or (scope == SCOPE_ALL and line.resource is not None)
+                click.echo("[%s] %s" % (line.label, line.text) if prefix else line.text)
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
                 close()
-    except (api.JobNotFound, api.AmbiguousWorkload, api.SparkrunError) as e:
+    except (api.JobNotFound, api.AmbiguousWorkload, api.SparkrunError, api.LogSourceChanged) as e:
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
     except KeyboardInterrupt:

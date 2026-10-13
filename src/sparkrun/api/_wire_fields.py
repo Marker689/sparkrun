@@ -710,8 +710,19 @@ DTO_FIELDS = {
     "sparkrun.plugins.k8s.orchestration.scheduling.FeasibilityReport": ["feasible", "classes"],
 }
 
-DTO_FIELDS["sparkrun.core.log_source.LogLine"] = ["host", "container", "text", "stream", "timestamp", "role", "rank"]
-DTO_FIELDS["sparkrun.core.log_source.LogSource"] = ["host", "container", "path", "rank", "role", "mode"]
+DTO_FIELDS["sparkrun.core.log_source.LogLine"] = [
+    "host",
+    "container",
+    "text",
+    "stream",
+    "timestamp",
+    "role",
+    "rank",
+    "source_id",
+    "resource",
+]
+DTO_FIELDS["sparkrun.core.log_source.LogSource"] = ["host", "container", "path", "rank", "role", "mode", "source_id", "resource"]
+DTO_FIELDS["sparkrun.core.log_source.LogResource"] = ["kind", "namespace", "name", "uid", "instance"]
 
 DTO_FIELDS.update(
     {

@@ -41,10 +41,13 @@ class JobSetLaunchError(SparkrunError):
 def _operation_errors(operation: str):
     """Translate operational failures; argument checks run outside this boundary."""
     from ..orchestration.errors import K8sError, OwnershipError
+    from sparkrun.core.log_source import LogSourceChanged
 
     try:
         yield
     except SparkrunError:
+        raise
+    except LogSourceChanged:
         raise
     except OwnershipError as exc:
         raise SparkrunError(str(exc)) from exc

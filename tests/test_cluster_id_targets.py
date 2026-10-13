@@ -38,7 +38,7 @@ def test_logs_accepts_status_short_canonical_id() -> None:
 
     assert result.exit_code == 0, result.output
     api_logs.assert_called_once()
-    assert api_logs.call_args.args[0] == _FULL_CANONICAL
+    assert api_logs.call_args.kwargs["workload_id"] == _FULL_CANONICAL
     assert api_logs.call_args.kwargs["hosts"] == ("10.24.11.13",)
 
 

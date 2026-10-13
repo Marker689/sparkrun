@@ -2,8 +2,8 @@
 
 `sparkrun.api.open_log_target()` resolves a workload into a reusable `LogTarget`.
 `sparkrun.api.logs()` is the convenience wrapper for one read. Both use the
-runtime's `LogSource` descriptions, the executor's existing `read_logs_cmd()`, and
-the shared reader in `sparkrun.orchestration.logs`.
+runtime's `LogSource` descriptions (or native executor discovery), the executor's
+`read_logs_cmd()`, and the shared reader in `sparkrun.orchestration.logs`.
 
 ## Resolve a target
 
@@ -13,28 +13,33 @@ from sparkrun import api
 
 cancel = threading.Event()
 target = api.open_log_target(
-    cluster_id,
+    workload_id,
     cluster="lab",
     scope="all",
     sctx=sctx,
     cancel=cancel,
 )
 
-print(target.cluster_id, target.runtime)
+print(target.workload_id, target.runtime)
 for source in target.sources:
-    print(source.host, source.container, source.role, source.rank)
+    print(source.source_id, source.label, source.role, source.rank)
 ```
 
-`LogTarget` is frozen. Its public data is `cluster_id`, the canonical `runtime`
+`LogTarget` is frozen. Its public data is `workload_id`, the canonical `runtime`
 name, and `sources: tuple[LogSource, ...]`. Executor and connection details are
 private. Opening a target resolves transport, preserves the workload's recorded
-SSH identity, and checks liveness. It does not spawn log readers. The target has
+destination, and checks availability. It does not spawn log readers. The target has
 no `close()` method; each read owns its own processes. Reopen the target when
 placement changes or when a fresh liveness check is needed.
 
-Resolution accepts the same workload selectors as `api.logs`: a `cluster_id`,
+Resolution accepts the same workload selectors as `api.logs`: a `workload_id`,
 or a `recipe` plus a host source (`hosts`, `cluster`, or configured defaults).
-`cluster_id` takes precedence. Recipe overrides participate in intent discovery.
+`workload_id` takes precedence. Recipe overrides participate in intent discovery.
+The identifier is the value currently returned as `RunResult.cluster_id`; this
+logging API calls it `workload_id` to distinguish a workload from its host cluster.
+The Python keyword, `LogTarget` field, and daemon query all use `workload_id`.
+The unreleased `cluster_id` spelling is no longer accepted on these log surfaces;
+saved metadata and other lifecycle APIs retain their existing names.
 
 `hosts` describes the **full workload topology**. To inspect one worker, use
 `host=` or `container=` instead of shortening `hosts`; rank and solo/cluster
@@ -46,15 +51,13 @@ container naming depend on that topology.
 | `scope="all"` | All sources described by the runtime. |
 | `host="worker"` | Filter all workload sources. Exact host identity wins; otherwise match hostname case-insensitively, ignoring a `user@` prefix. Ambiguous normalized identities require an exact selector. Does not change the connection user. |
 | `container="..."` | Filter all workload sources by exact container/source name. |
-| Both filters | Intersection. Explicit filters select from all sources even with the default head scope. |
+| `source_id="log_..."` | Select one opaque source identity, including native resource and container instance. |
+| Combined filters | Intersection. Explicit filters select from all sources even with the default head scope. |
 
 Unmatched filters raise `JobNotFound`. Filtered liveness checks inspect only the
 selected sources. Without filters, a head-only request still checks all nodes
 and can recommend `--all-sources` when workers survive a failed head. No read or
 failed precheck deletes job metadata or releases model-cache claims.
-
-Native Kubernetes controller workloads continue using their plugin's log API;
-this target API does not add native JobSet support.
 
 ## Read, follow, and cancel
 
@@ -131,11 +134,11 @@ cancellation event before marking history exhausted.
 
 ## Daemon
 
-`GET /v1/streams/logs` accepts `host` and `container` with the same semantics.
+`GET /v1/streams/logs` accepts `host`, `container`, and `source_id` with the same semantics.
 `hosts` remains a comma-separated full host list. Example query:
 
 ```text
-/v1/streams/logs?cluster_id=WORKLOAD_ID&host=worker-2&tail=200&follow=true
+/v1/streams/logs?workload_id=WORKLOAD_ID&host=worker-2&tail=200&follow=true
 ```
 
 The daemon validates filters, `scope=head|all`, a nonnegative integer `tail`,
@@ -155,3 +158,46 @@ and atomic publication belong in the frontend. Keep export contents streaming;
 do not buffer the entire log to call a whole-file write helper. Atomic
 no-overwrite publication must never fall back to a check followed by replacement.
 There is no `LogTarget.dump` or `windowing_supported` property.
+
+## Native Kubernetes workloads
+
+Saved native JobSet/Job workloads use the same API and daemon endpoint. The K8s
+executor recovers the saved kubeconfig, context, and namespace. It checks application
+ownership and the workload annotation, then follows controller UID ownership from
+JobSet to Jobs to Pods. Matching labels alone do not establish membership.
+`kubectl` runs locally on the CLI/daemon host; it never SSHes to a scheduled node.
+Daemon clients cannot supply kubeconfig paths or arbitrary Kubernetes resources.
+
+Each regular container is a source. `host` is the scheduled node, `container` is
+the actual container name, and `resource` is a `LogResource` containing `kind`,
+`namespace`, pod `name`, pod `uid`, and an opaque container `instance` token.
+The instance includes restart count and runtime container ID. These fields and
+`source_id` accompany every `LogLine`, including daemon SSE records. Container
+names can repeat across pods; use `source_id` to select exactly one stream.
+
+`scope="head"` selects the first regular container of rank zero; `scope="all"`
+includes readable regular containers and sidecars across the snapshot. Rank comes
+from the JobSet's replicated-job layout and controller labels/annotations, not pod
+name parsing. Launcher Jobs use rank zero. Completed containers remain readable;
+queued workloads and containers that have not started report that logs are not
+available. Init containers and previous container instances are outside this cut.
+
+Reads check pod UID and container instance before starting and after normal EOF.
+A detected replacement/restart raises `LogSourceChanged`; reopen the target and
+clear the old paging offsets. A page that detects such a change is not returned.
+These checks cannot make Kubernetes resource lookup and log opening atomic: finite
+exports must still discard partial output on failure. Follow never reconnects to
+replacement pods automatically. Reopen explicitly to discover newly created pods.
+
+The existing `plugins.k8s.api.logs(name=..., kind="jobset"|"job")` uses the same
+resolver/readers and supports cancellation and source filters. It defaults to all
+sources. Use the core target API for reusable targets/paging of saved workloads.
+
+Kubernetes application stdout/stderr arrive through the kubectl log payload;
+kubectl's own stderr remains diagnostic output.
+
+Kubernetes serves only the latest retained log file through `kubectl logs`; paging
+does not retrieve older rotated files or provide an archive. See the
+[Kubernetes logging reference](https://kubernetes.io/docs/concepts/cluster-administration/logging/).
+Full-history reads explicitly set `--tail=-1`; the selector-dependent kubectl
+default is not used ([command reference](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_logs/)).

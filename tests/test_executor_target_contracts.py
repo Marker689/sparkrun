@@ -211,15 +211,16 @@ def test_cli_early_ensure_observes_recipe_target(lifecycle_env, monkeypatch):
     api.plan.assert_not_called()
 
 
-def test_recipe_lifecycle_discovery_uses_recipe_destination(lifecycle_env):
+def test_recipe_lifecycle_discovery_uses_recipe_destination(lifecycle_env, monkeypatch):
     env = lifecycle_env
     first = run(env.options, sctx=env.sctx)
     env.recipe.executor = "k8s"
     env.recipe.executor_config = {"k8s_namespace": "other-namespace"}
     second = run(env.options, sctx=env.sctx)
-    with pytest.raises(api.SparkrunError, match="Native") as rejected:
-        list(api.logs(recipe=env.recipe, hosts=("localhost",), sctx=env.sctx))
-    assert second.cluster_id in str(rejected.value)
+    sources = Mock(return_value=[])
+    monkeypatch.setattr("sparkrun.plugins.k8s.executor.K8sExecutor.native_log_sources", sources)
+    assert list(api.logs(recipe=env.recipe, hosts=("localhost",), sctx=env.sctx)) == []
+    assert sources.call_args.args[0] == second.cluster_id
     stopped = stop(recipe=env.recipe, hosts=("localhost",), sctx=env.sctx)
     assert stopped.success and stopped.cluster_id == second.cluster_id
     assert env.objects[env.target]

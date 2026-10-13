@@ -28,7 +28,9 @@ can produce them without importing ``api`` — the layering rule is
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import json
 
 SERVE_LOG_PATH = "/tmp/sparkrun_serve.log"
 """In-container path the sleep-infinity + exec launch redirects serve output to.
@@ -48,6 +50,25 @@ SCOPE_HEAD = "head"
 
 SCOPE_ALL = "all"
 """Every source the runtime can name: head plus each worker/rank."""
+
+
+class LogSourceChanged(ValueError):
+    """A resolved resource or container instance changed; reopen the log target."""
+
+
+@dataclass(frozen=True)
+class LogResource:
+    """Native resource identity, independent of its control-plane connection.
+
+    ``instance`` is an opaque container-instance token. For Kubernetes it
+    includes restart count and container ID; it is not a historical log cursor.
+    """
+
+    kind: str
+    namespace: str
+    name: str
+    uid: str
+    instance: str
 
 
 @dataclass(frozen=True)
@@ -75,11 +96,21 @@ class LogSource:
     rank: int | None = None
     mode: str = MODE_FILE
     path: str | None = SERVE_LOG_PATH
+    resource: LogResource | None = None
+    source_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        resource = self.resource
+        identity = [self.host, self.container, self.mode, self.path]
+        if resource is not None:
+            identity += [resource.kind, resource.namespace, resource.name, resource.uid, resource.instance]
+        digest = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+        object.__setattr__(self, "source_id", "log_" + digest)
 
     @property
     def label(self) -> str:
-        """Short ``host/role`` label for prefixing interleaved output."""
-        return "%s/%s" % (self.host, self.role)
+        """Human-readable source label, including native pod/container identity."""
+        return _source_label(self)
 
 
 @dataclass(frozen=True)
@@ -107,17 +138,33 @@ class LogLine:
     """Role of the source that produced this line (see :attr:`LogSource.role`)."""
     rank: int | None = None
     """Rank of the source that produced this line, when known."""
+    source_id: str | None = None
+    """Identity of the resolved source, including its native container instance."""
+    resource: LogResource | None = None
+
+    @property
+    def label(self) -> str:
+        """Human-readable label matching the resolved source."""
+        return _source_label(self)
 
 
-def source_sort_key(source: LogSource) -> tuple[float, str, str]:
+def _source_label(source: LogSource | LogLine) -> str:
+    if source.resource is not None:
+        return "%s/%s/%s" % (source.resource.namespace, source.resource.name, source.container)
+    return "%s/%s" % (source.host, source.role)
+
+
+def source_sort_key(source: LogSource) -> tuple[float, str, str, str]:
     """Deterministic read/display order: primary source, ranks, unranked workers."""
     rank = source.rank if source.rank is not None else (-1 if source.role in {"head", "solo"} else float("inf"))
-    return rank, source.host, source.container
+    return rank, source.host, source.container, source.resource.name if source.resource is not None else ""
 
 
 __all__ = [
     "LogLine",
     "LogSource",
+    "LogResource",
+    "LogSourceChanged",
     "MODE_FILE",
     "MODE_STDOUT",
     "SCOPE_ALL",

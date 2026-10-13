@@ -88,9 +88,11 @@ For a JobSet use `name=submitted.name, kind="jobset"` (the default kind).
 Forward the same kubeconfig/context/namespace used for submission. Ownership and
 target checks run when `logs()` is called; the local reader starts on iteration.
 `follow=False` reads available output; `tail=N` limits kubectl's requested tail.
-Kubectl stdout/stderr are merged into captured `LogLine` records; a nonzero reader
-exit raises `SparkrunError` after any diagnostic lines. Closing the iterator stops
-and reaps the local reader, leaving the Kubernetes workload running.
+Application stdout/stderr arrive as `LogLine` records with pod/container identity;
+kubectl diagnostics are logged separately and never count toward paging offsets.
+A nonzero reader exit raises `SparkrunError`. Cancellation defaults to the current
+operation's event; closing or cancelling reaps local readers and leaves the workload
+running. Resolution reports when submitted workloads have no readable pods yet.
 
 The CLI's `setup k8s launch --follow` and `setup k8s run-job --follow` render this
 iterator and stop reading on Ctrl-C. Dry-run never reads logs. The native
@@ -160,6 +162,12 @@ skip-run and pending-task resume) rejects this executor before submission or
 endpoint probing. Completed-artifact processing and publication-only resume-by-ID
 do not need a live endpoint.
 
-Use the plugin log API with the returned `k8s_jobset` reference. Common `api.logs()`
-rejects recorded native resources with a diagnostic rather than guessing child
-Pod names. Direct Pod-command launching remains a separate experimental path.
+Use `api.logs(workload_id=result.cluster_id)` or
+`api.open_log_target(workload_id=result.cluster_id)` for native run logs. Sources
+retain pod/container identity and support filtering, following, and paging through
+the shared API and `/v1/streams/logs?workload_id=...`. The saved Kubernetes
+destination is reused; readers run on the controller without SSH to worker nodes.
+The plugin log API still accepts the returned `k8s_jobset` reference and uses the
+same source resolver/readers. Reopen after pending pods start or containers restart;
+sources are a snapshot, and paging is limited to the latest retained log file.
+Direct Pod-command launching remains a separate experimental path.

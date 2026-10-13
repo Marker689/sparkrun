@@ -23,7 +23,7 @@ def test_log_stream_forwards_source_filters_without_rewriting_hosts(binding, mon
     reader = Mock(side_effect=lambda **kw: iter([LogLine("user@worker", "workload_node_1", "ready", role="node_1", rank=1)]))
     monkeypatch.setattr("sparkrun.api.logs", reader)
     params = {
-        "cluster_id": "workload",
+        "workload_id": "workload",
         "hosts": "head,user@worker",
         "host": "worker",
         "container": "workload_node_1",
@@ -41,7 +41,22 @@ def test_log_stream_forwards_source_filters_without_rewriting_hosts(binding, mon
 
 
 @pytest.mark.parametrize(
-    "query", ["host=", "host=%20", "container=", "container=%20", "scope=workers", "tail=-1", "tail=abc", "follow=yes", "unknown=value"]
+    "query",
+    [
+        "host=",
+        "host=%20",
+        "container=",
+        "container=%20",
+        "source_id=",
+        "source_id=%20",
+        "cluster_id=old-name",
+        "workload_id=",
+        "scope=workers",
+        "tail=-1",
+        "tail=abc",
+        "follow=yes",
+        "unknown=value",
+    ],
 )
 def test_log_stream_rejects_bad_queries_before_opening_reader(binding, monkeypatch, query):
     _, token = TokenStore(binding).create("reader", scope="read")

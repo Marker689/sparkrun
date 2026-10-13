@@ -245,7 +245,7 @@ def test_new_local_launch_without_explicit_user_is_recoverable(run_env, monkeypa
     monkeypatch.setattr("sparkrun.orchestration.ssh.run_remote_scripts_parallel", remote)
     assert check_job_running(cluster_id=launched.cluster_id, cache_dir=str(env.sctx.config.cache_dir)).running
     monkeypatch.setattr("sparkrun.orchestration.logs.read_log_sources", lambda *a, **kw: iter(()))
-    assert list(logs(cluster_id=launched.cluster_id, sctx=env.sctx)) == []
+    assert list(logs(workload_id=launched.cluster_id, sctx=env.sctx)) == []
 
     def cleanup(grouped, **kwargs):
         calls.append(kwargs["ssh_kwargs"])

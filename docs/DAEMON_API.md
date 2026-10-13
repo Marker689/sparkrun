@@ -112,7 +112,7 @@ ColdSnap continues implementing the common lifecycle provider without HTTP route
 | POST | `/v1/jobs/{id}/input` | job access + operation scope; secret if needed | Exactly `prompt_id`, `value`; answer a live worker prompt. |
 | GET | `/v1/jobs/{id}/events` | job access | Durable SSE; `Last-Event-ID`; expired cursor → 410, later expiry → `gap` event. |
 | GET | `/v1/events` | read + job visibility | SSE snapshots of visible jobs every 2 seconds; no inventory stream or replay cursor. |
-| GET | `/v1/streams/logs` | read | SSE; optional `cluster_id`, `recipe`, comma-separated `hosts`, `cluster`, `host`, `container`, `scope=head/all`, nonnegative `tail`, `follow=true/false`. Disconnect cancels finite/follow readers. |
+| GET | `/v1/streams/logs` | read | SSE; optional `workload_id`, `recipe`, comma-separated `hosts`, `cluster`, `host`, `container`, `source_id`, `scope=head/all`, nonnegative `tail`, `follow=true/false`. Includes saved native Kubernetes workloads. Records carry source identity/resource metadata. Disconnect cancels finite/follow readers. |
 | GET | `/v1/streams/monitor` | read | SSE; optional comma-separated `hosts`, `cluster`, `interval` (1–60 seconds). Shared latest frames, not durable history. |
 | GET | `/v1/reservations` | admin | Execution claims and verified owner liveness; dead claims remain until reconciled. |
 | POST | `/v1/reservations/{owner}/reconcile` | admin | `{"acknowledge_effects":true}`; releases only a verified dead owner's claims. |

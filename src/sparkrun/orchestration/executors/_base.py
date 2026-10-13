@@ -546,7 +546,7 @@ class Executor(Plugin):
         *,
         follow: bool = False,
         tail: int | None = None,
-    ) -> str:
+    ) -> str | list[str]:
         """Generate the command that reads *source* on this substrate.
 
         The read-path peer of :meth:`logs_cmd`: the runtime says *what* to
@@ -565,8 +565,27 @@ class Executor(Plugin):
         The reader captures command/transport stderr separately as diagnostics,
         so warnings cannot change paging offsets. Implementations whose log
         tool forwards workload stderr must merge it inside this command.
+
+        A local argv list bypasses shell/SSH dispatch, for native control-plane
+        clients. A string retains the normal host-local or SSH shell dispatch.
         """
         return self.logs_cmd(source.container, follow=follow, tail=tail)
+
+    def native_log_sources(self, cluster_id: str, *, metadata: dict, scope: str, cancel=None) -> list[LogSource]:
+        """Resolve and validate a snapshot of sources for a native workload.
+
+        Called only for saved ``native_resource`` metadata. Native resolution
+        owns availability checks, including completed pods and pending workloads;
+        it must not fall back to per-host container names or mutate resources.
+        """
+        raise NotImplementedError("Executor %r cannot read the recorded native workload" % self.executor_name)
+
+    def validate_log_source(self, source: LogSource, *, cancel=None, timeout: float | None = None) -> None:
+        """Check a native source's instance before/after reading; default no-op.
+
+        Raise LogSourceChanged if a resolved resource was replaced or restarted.
+        Implementations must honor cancellation and bound control-plane requests.
+        """
 
     @abstractmethod
     def status_cmd(self, container_name: str) -> str:

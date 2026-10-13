@@ -243,11 +243,25 @@ def test_native_status_failure_is_not_reported_as_empty_cluster(lifecycle_env, m
     assert not any(args[0] == "apply" for _, args in env.calls)
 
 
-def test_common_logs_reject_native_resource_without_guessing_pod_names(lifecycle_env):
+def test_common_logs_resolve_saved_native_destination_without_guessing_pod_names(lifecycle_env, monkeypatch):
     env = lifecycle_env
     result = run(env.options, sctx=env.sctx)
-    with pytest.raises(api.SparkrunError, match="plugin API"):
-        api.logs(cluster_id=result.cluster_id, sctx=env.sctx)
+    objects = env.objects[env.target]
+    objects[result.metadata["k8s_jobset"]]["metadata"]["uid"] = "submitted-jobset"
+    env.sctx.config.set("k8s", {"kubeconfig": "/different", "context": "changed", "namespace": "changed"})
+    seen = []
+
+    def query(client, args, **kwargs):
+        seen.append((client.kubeconfig, client.context, client.namespace))
+        if args[1] == "jobset":
+            return client.run_json(args)
+        assert args[1] in {"jobs", "pods"}
+        return {"items": []}  # Controller submitted; no readable containers yet.
+
+    monkeypatch.setattr("sparkrun.plugins.k8s.orchestration.logs._query_json", query)
+    with pytest.raises(api.SparkrunError, match="pending, queued"):
+        api.logs(workload_id=result.cluster_id, sctx=env.sctx)
+    assert seen and all(destination == env.target for destination in seen)
     assert _record(env, result) is not None
     assert not any("logs" in args for _, args in env.calls)
 

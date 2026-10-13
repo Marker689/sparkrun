@@ -108,7 +108,7 @@ def test_saved_local_principal_survives_cluster_edits(local_job, monkeypatch, op
             return iter(())
 
         monkeypatch.setattr("sparkrun.orchestration.logs.read_log_sources", read)
-        assert list(logs(cluster_id=f.cid, sctx=env.sctx)) == []
+        assert list(logs(workload_id=f.cid, sctx=env.sctx)) == []
         assert load_job_metadata(f.cid, sctx=env.sctx)
     else:
         assert check_job_running(cluster_id=f.cid, cache_dir=str(env.sctx.config.cache_dir)).running

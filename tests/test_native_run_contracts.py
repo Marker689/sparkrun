@@ -80,9 +80,14 @@ def test_native_plan_run_manifest_and_lifecycle_reference(native_env, monkeypatc
     lookup = Mock(return_value=manifest)
     monkeypatch.setattr(env.client, "run_json", lookup)
     monkeypatch.setattr(env.client, "run", Mock(return_value=Mock(success=True)))
-    monkeypatch.setattr("sparkrun.plugins.k8s.api._logs.read_log_command", lambda *a, **kw: iter(()))
+    manifest["metadata"]["uid"] = "submitted-jobset"
+    monkeypatch.setattr(
+        "sparkrun.plugins.k8s.orchestration.logs._query_json",
+        lambda client, args, **kw: manifest if args[1] == "jobset" else {"items": []},
+    )
     assert k8s.jobset_status(env.sctx, name=name) == manifest
-    assert list(k8s.logs(env.sctx, name=name)) == []
+    with pytest.raises(api.SparkrunError, match="pending, queued"):
+        k8s.logs(env.sctx, name=name)
     assert k8s.stop_jobset(env.sctx, name=name)
     assert all(call.args[0][2] == name for call in lookup.call_args_list)
 

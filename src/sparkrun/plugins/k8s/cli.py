@@ -39,17 +39,17 @@ def build_setup_command():
 
     def follow_logs(sctx, *, name, kind, namespace, kubeconfig, context):
         from . import api
-        from sparkrun.api import SparkrunError
+        from sparkrun.api import SparkrunError, LogSourceChanged
 
         try:
             with closing(
                 api.logs(sctx, name=name, kind=kind, namespace=namespace, kubeconfig=kubeconfig, context=context, follow=True)
             ) as lines:
                 for line in lines:
-                    click.echo(line.text)
+                    click.echo("[%s] %s" % (line.label, line.text) if line.resource is not None else line.text)
         except KeyboardInterrupt:
             pass  # Stop the local reader; the submitted workload keeps running.
-        except SparkrunError as exc:
+        except (SparkrunError, LogSourceChanged) as exc:
             raise click.ClickException(str(exc)) from exc
 
     SETUP_K8S_FEATURE = "cli.setup.k8s"

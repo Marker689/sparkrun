@@ -601,11 +601,11 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
             if arguments["follow"] not in {"true", "false"}:
                 raise ValueError("follow must be true or false")
             arguments["follow"] = arguments["follow"] == "true"
-        schema = fields("cluster_id recipe hosts cluster scope tail" if kind == "logs" else "hosts cluster interval")
+        schema = fields("workload_id recipe hosts cluster scope tail" if kind == "logs" else "hosts cluster interval")
         if kind == "logs":
             schema["follow"] = B
             schema["scope"] = {"type": "string", "enum": ["head", "all"]}
-            for selector in ("host", "container"):
+            for selector in ("host", "container", "source_id"):
                 schema[selector] = {**S, "minLength": 1}
                 if selector in arguments and not arguments[selector].strip():
                     raise ValueError("%s must be a non-empty string" % selector)

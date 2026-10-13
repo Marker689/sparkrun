@@ -92,6 +92,7 @@ from sparkrun.core.context import SparkrunContext
 from sparkrun.api._intent import IntentMatch, find_running_intent
 from sparkrun.api._jobs import list_jobs
 from sparkrun.api._logs import LogTarget, logs, open_log_target
+from sparkrun.core.log_source import LogResource, LogSourceChanged
 from sparkrun.api._materialize import materialize
 from sparkrun.api._models import (
     JobInfo,
@@ -185,6 +186,8 @@ __all__ = [
     "StopAllResult",
     "LogLine",
     "LogSource",
+    "LogResource",
+    "LogSourceChanged",
     "LogTarget",
     "JobInfo",
     "IntentMatch",

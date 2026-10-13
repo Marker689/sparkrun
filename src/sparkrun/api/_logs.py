@@ -42,13 +42,13 @@ def _nonnegative_int(name: str, value: int) -> None:
 class LogTarget:
     """Resolved workload log sources; obtain one with :func:`open_log_target`.
 
-    Resolution and the liveness precheck happen once. Each read opens fresh
+    Resolution and the availability precheck happen once. Each read opens fresh
     reader processes; the target itself owns no running processes and needs no
     close. Close partially consumed iterators (or set their cancellation event)
     to release readers. Reopen the target after workload placement changes.
     """
 
-    cluster_id: str
+    workload_id: str
     runtime: str
     sources: tuple[LogSource, ...]
     _executor: Executor = field(repr=False, compare=False)
@@ -131,7 +131,7 @@ class LogTarget:
 
 
 def logs(
-    cluster_id: str | None = None,
+    workload_id: str | None = None,
     *,
     recipe: str | Recipe | None = None,
     hosts: list[str] | tuple[str, ...] | None = None,
@@ -140,6 +140,7 @@ def logs(
     scope: str = SCOPE_HEAD,
     host: str | None = None,
     container: str | None = None,
+    source_id: str | None = None,
     follow: bool = False,
     tail: int | None = None,
     cache_dir: str | None = None,
@@ -157,7 +158,7 @@ def logs(
     if tail is not None:
         _nonnegative_int("tail", tail)
     return open_log_target(
-        cluster_id,
+        workload_id,
         recipe=recipe,
         hosts=hosts,
         overrides=overrides,
@@ -165,6 +166,7 @@ def logs(
         scope=scope,
         host=host,
         container=container,
+        source_id=source_id,
         cache_dir=cache_dir,
         sctx=sctx,
         cancel=cancel,
@@ -172,7 +174,7 @@ def logs(
 
 
 def open_log_target(
-    cluster_id: str | None = None,
+    workload_id: str | None = None,
     *,
     recipe: "str | Recipe | None" = None,
     hosts: list[str] | tuple[str, ...] | None = None,
@@ -181,25 +183,26 @@ def open_log_target(
     scope: str = SCOPE_HEAD,
     host: str | None = None,
     container: str | None = None,
+    source_id: str | None = None,
     cache_dir: str | None = None,
     sctx: "SparkrunContext | None" = None,
     cancel: threading.Event | None = None,
 ) -> LogTarget:
-    """Resolve log sources and check liveness without opening log readers.
+    """Resolve log sources and check availability without opening log readers.
 
-    Either ``cluster_id`` *or* (``recipe`` + a host source) is required.
-    When both are given, ``cluster_id`` wins — the same contract as
+    Either ``workload_id`` *or* (``recipe`` + a host source) is required.
+    When both are given, ``workload_id`` wins — the same contract as
     :func:`sparkrun.api.stop`.  The recipe form resolves through live intent
     discovery (:func:`~sparkrun.api._resolve.discover_cluster_id_by_intent`)
     rather than deriving a cluster_id, so it finds the workload regardless of
     which placement token the scheduler assigned it.
 
     Args:
-        cluster_id: The cluster ID returned by :func:`sparkrun.api.run`.
+        workload_id: Workload identity returned in ``RunResult.cluster_id``.
         recipe: Recipe name or object, when addressing the workload by
             recipe instead of by id.
         hosts: Explicit host list.  Required for the recipe form; for the
-            cluster_id form it defaults to the hosts recorded in
+            workload_id form it defaults to the hosts recorded in
             ``~/.cache/sparkrun/jobs/``.
         overrides: Recipe overrides used at launch.  They participate in the
             intent, so port / parallelism overrides must match for the
@@ -211,9 +214,11 @@ def open_log_target(
             Exact matches win; otherwise ignore hostname case and a ``user@``
             prefix. An ambiguous normalized host is rejected. This selector
             never changes the resolved connection user or placement.
-        container: Exact container/source name filter. If either selector is
-            supplied, filter all sources regardless of scope; both selectors
+        container: Exact container/source name filter. If any selector is
+            supplied, filter all sources regardless of scope; all selectors
             intersect. Use these instead of reducing ``hosts`` to one worker.
+        source_id: Exact opaque source identity, including the native resource
+            and container instance when available. Intersects other filters.
         cache_dir: Override for the sparkrun cache root.  Defaults to
             the supplied or current application configuration, without plugin bootstrap.
         sctx: Optional shared :class:`SparkrunContext`.
@@ -224,7 +229,7 @@ def open_log_target(
         JobNotFound: No hosts can be determined, or no running workload
             matches the recipe or source filters.
         AmbiguousWorkload: The recipe matches several running workloads.
-        SparkrunError: Neither ``cluster_id`` nor ``recipe`` was given, or
+        SparkrunError: Neither ``workload_id`` nor ``recipe`` was given, or
             *scope* is not a valid value.
     """
     from sparkrun.api._resolve import (
@@ -238,9 +243,11 @@ def open_log_target(
     from sparkrun.orchestration.executor import resolve_executor
     from sparkrun.orchestration.job_metadata import generate_intent_id, load_job_metadata
 
+    # Persistent metadata and runtime naming still use the internal cluster_id.
+    cluster_id = workload_id
     if scope not in (SCOPE_HEAD, SCOPE_ALL):
         raise SparkrunError("Invalid log scope %r: expected %r or %r" % (scope, SCOPE_HEAD, SCOPE_ALL))
-    for name, value in (("host", host), ("container", container)):
+    for name, value in (("host", host), ("container", container), ("source_id", source_id)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError("%s must be a non-empty string" % name)
 
@@ -251,7 +258,7 @@ def open_log_target(
     resolved_recipe = None
     if not cluster_id:
         if recipe is None:
-            raise SparkrunError("Log resolution requires cluster_id or recipe+hosts")
+            raise SparkrunError("Log resolution requires workload_id or recipe+hosts")
         cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
         prepare_transport(cluster_def)
         resolved_recipe = resolve_recipe(recipe, sctx=sctx)
@@ -284,18 +291,13 @@ def open_log_target(
         elif cluster is not None:
             target_hosts = list(resolve_cluster(cluster, sctx=sctx).hosts)
         else:
-            raise JobNotFound("No hosts known for cluster_id %r" % cluster_id)
+            raise JobNotFound("No hosts known for workload_id %r" % workload_id)
         # No explicit cluster → recover the one the job was launched on, so
         # the log reads connect as that launch did rather than as this
         # control node's own login (issue #277).
         cluster_def = resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx)
-        prepare_transport(cluster_def)
-
-    if meta and meta.get("native_resource") is not None:
-        raise SparkrunError(
-            "Native workload %r uses a controller resource; read its logs through the %r plugin API with reference %r"
-            % (cluster_id, meta.get("executor"), meta["native_resource"])
-        )
+        if not (meta and meta.get("native_resource") is not None):
+            prepare_transport(cluster_def)
 
     runtime = _resolve_runtime_for_job(meta, cluster_id, recipe=resolved_recipe, sctx=sctx)
     from sparkrun.core._executor_destination import metadata_executor_overrides
@@ -305,6 +307,7 @@ def open_log_target(
         cli_overrides=metadata_executor_overrides(meta),
         rootless=False,
         auto_user=False,
+        config=sctx.config if sctx is not None else None,
         v=sctx.variables if sctx is not None else None,
     )
 
@@ -313,27 +316,29 @@ def open_log_target(
     cluster_def = bind_job_cluster(cluster_def, executor.resolve_target(dry_run=True), meta)
     sctx, ssh_kwargs = scope_operation(cluster_def, sctx=sctx, prepare=False)
 
-    filtered = host is not None or container is not None
+    cancel = cancel if cancel is not None else getattr(getattr(sctx, "operation", None), "cancel", None)
+    filtered = any(value is not None for value in (host, container, source_id))
     effective_scope = SCOPE_ALL if filtered else scope
+    if meta and meta.get("native_resource") is not None:
+        try:
+            sources = executor.native_log_sources(cluster_id, metadata=meta, scope=effective_scope, cancel=cancel)
+        except (SparkrunError, ValueError):
+            raise
+        except Exception as exc:
+            raise SparkrunError("Native log resolution failed: %s" % exc) from exc
+        if cancel is not None and cancel.is_set():
+            sources = []
+        else:
+            sources = _filter_sources(sources, cluster_id, host=host, container=container, source_id=source_id)
+        return LogTarget(cluster_id, runtime.runtime_name, tuple(sources), executor, {}, cancel)
+
     sources = runtime.log_sources(
         cluster_id,
         target_hosts,
         is_solo=len(target_hosts) <= 1,
         scope=effective_scope,
     )
-    if host is not None:
-        exact = [source for source in sources if source.host == host]
-        if exact:
-            sources = exact
-        else:
-            normalized = host.strip().rsplit("@", 1)[-1].lower()
-            sources = [source for source in sources if source.host.strip().rsplit("@", 1)[-1].lower() == normalized]
-            if len({source.host for source in sources}) > 1:
-                raise SparkrunError("Ambiguous log host %r; use the exact host including its user prefix" % host)
-    if container is not None:
-        sources = [source for source in sources if source.container == container]
-    if filtered and not sources:
-        raise JobNotFound("No log sources match host=%r container=%r for workload %s" % (host, container, cluster_id))
+    sources = _filter_sources(sources, cluster_id, host=host, container=container, source_id=source_id)
 
     # Liveness precheck: check ALL nodes (not just the head log source) —
     # in a multi-node job the head may have crashed while workers are still
@@ -358,8 +363,29 @@ def open_log_target(
     # or cache claims, even when all selected containers are confirmed absent.
     _verify_log_source_alive(executor, all_sources, ssh_kwargs, cluster_id, cache_dir, scope=effective_scope)
 
-    cancel = cancel if cancel is not None else getattr(getattr(sctx, "operation", None), "cancel", None)
     return LogTarget(cluster_id, runtime.runtime_name, tuple(sources), executor, dict(ssh_kwargs), cancel)
+
+
+def _filter_sources(sources, cluster_id, *, host=None, container=None, source_id=None):
+    """Apply the same selectors to host-native and controller-native sources."""
+    if host is not None:
+        exact = [source for source in sources if source.host == host]
+        if exact:
+            sources = exact
+        else:
+            normalized = host.strip().rsplit("@", 1)[-1].lower()
+            sources = [source for source in sources if source.host.strip().rsplit("@", 1)[-1].lower() == normalized]
+            if len({source.host for source in sources}) > 1:
+                raise SparkrunError("Ambiguous log host %r; use the exact host including its user prefix" % host)
+    if container is not None:
+        sources = [source for source in sources if source.container == container]
+    if source_id is not None:
+        sources = [source for source in sources if source.source_id == source_id]
+    if not sources and any(value is not None for value in (host, container, source_id)):
+        raise JobNotFound(
+            "No log sources match host=%r container=%r source_id=%r for workload %s" % (host, container, source_id, cluster_id)
+        )
+    return sources
 
 
 def _verify_log_source_alive(
@@ -535,13 +561,13 @@ def _resolve_runtime_for_job(meta: dict | None, cluster_id: str, *, recipe=None,
     runtime_name = getattr(recipe, "runtime", None) or (meta or {}).get("runtime")
     if not runtime_name:
         raise JobNotFound(
-            "No job metadata (or no runtime recorded) for cluster_id %r, so sparkrun can't tell where "
+            "No job metadata (or no runtime recorded) for workload_id %r, so sparkrun can't tell where "
             "this workload's logs live. Address it by recipe instead: api.logs(recipe=..., hosts=...)." % cluster_id
         )
     try:
         return get_runtime(runtime_name, sctx.variables if sctx is not None else None)
     except ValueError as e:
-        raise SparkrunError("Cannot resolve runtime %r for cluster_id %r: %s" % (runtime_name, cluster_id, e)) from e
+        raise SparkrunError("Cannot resolve runtime %r for workload_id %r: %s" % (runtime_name, cluster_id, e)) from e
 
 
 __all__ = ["LogTarget", "logs", "open_log_target"]

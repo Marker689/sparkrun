@@ -219,6 +219,34 @@ class K8sExecutor(Executor):
 
         return query_native_status(self._client(), hosts)
 
+    def native_log_sources(self, cluster_id, *, metadata, scope, cancel=None):
+        from .orchestration.logs import resolve_sources
+
+        reference = metadata.get("native_resource")
+        if not isinstance(reference, dict) or reference.get("kind") not in {"JobSet", "Job"}:
+            raise ValueError("Unsupported native Kubernetes workload reference")
+        return resolve_sources(
+            self._client(),
+            name=reference.get("name"),
+            kind=reference["kind"].lower(),
+            cluster_id=cluster_id,
+            uid=reference.get("uid"),
+            scope=scope,
+            cancel=cancel,
+        )
+
+    def read_logs_cmd(self, source, *, follow=False, tail=None):
+        if source.resource is None:
+            return super().read_logs_cmd(source, follow=follow, tail=tail)
+        from .orchestration.logs import read_command
+
+        return read_command(self._client(), source, follow=follow, tail=tail)
+
+    def validate_log_source(self, source, *, cancel=None, timeout=None):
+        from .orchestration.logs import validate_source
+
+        validate_source(self._client(), source, cancel=cancel, timeout=timeout)
+
     def _kubectl_prefix(self) -> str:
         """Build ``kubectl [--kubeconfig K] [--context C] [-n NS]`` prefix."""
         return self._client().prefix_string()

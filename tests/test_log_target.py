@@ -29,7 +29,7 @@ def open_target(tmp_path, monkeypatch):
     def resolve(*, runtime="sglang", hosts=("h1", "User@H2", "h3"), **kwargs):
         recipe = Recipe({"sparkrun_version": "2", "runtime": runtime, "model": "test/model"})
         save_job_metadata(CID, recipe, list(hosts), cache_dir=str(tmp_path))
-        return api.open_log_target(CID, cache_dir=str(tmp_path), **kwargs)
+        return api.open_log_target(workload_id=CID, cache_dir=str(tmp_path), **kwargs)
 
     return resolve
 
@@ -38,7 +38,7 @@ def test_target_metadata_is_immutable_and_resolution_opens_no_readers(open_targe
     spawn = Mock(side_effect=AssertionError("resolution spawned a log reader"))
     monkeypatch.setattr(logs, "_spawn", spawn)
     target = open_target(runtime="vllm-ray", scope="all")
-    assert target.cluster_id == CID
+    assert target.workload_id == CID
     assert target.runtime == "vllm-ray"
     assert isinstance(target.sources, tuple)
     assert target.sources[0].container == CID + "_head"
@@ -72,7 +72,10 @@ def test_normalized_ambiguous_host_requires_exact_identity(open_target):
     assert [s.host for s in target.sources] == ["bob@h1"]
 
 
-@pytest.mark.parametrize("kwargs", [{"host": ""}, {"host": "  "}, {"container": ""}, {"container": "\t"}, {"scope": "bogus"}])
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"host": ""}, {"host": "  "}, {"container": ""}, {"container": "\t"}, {"source_id": ""}, {"source_id": " "}, {"scope": "bogus"}],
+)
 def test_invalid_selectors_fail_eagerly(open_target, kwargs):
     with pytest.raises((ValueError, api.SparkrunError)):
         open_target(**kwargs)
@@ -282,3 +285,15 @@ def test_docker_workload_stderr_survives_transport_diagnostic_separation(tmp_pat
     target = api.LogTarget("cid", "vllm-ray", (source,), DockerExecutor(), {})
     assert [line.text for line in target.read(follow=follow)] == ["workload stdout", "workload stderr"]
     assert [line.text for line in target.page(source, skip=1, count=1)] == ["workload stdout"]
+
+
+def test_public_log_identifier_is_workload_id():
+    import inspect
+
+    for function in (api.logs, api.open_log_target):
+        assert "workload_id" in inspect.signature(function).parameters
+        assert "cluster_id" not in inspect.signature(function).parameters
+        with pytest.raises(TypeError, match="cluster_id"):
+            function(cluster_id="unreleased-name")
+    assert "workload_id" in api.LogTarget.__dataclass_fields__
+    assert "cluster_id" not in api.LogTarget.__dataclass_fields__

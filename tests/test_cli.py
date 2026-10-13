@@ -4388,7 +4388,7 @@ class TestLogCommand:
             mock_logs.assert_called_once()
             call_kwargs = mock_logs.call_args.kwargs
             # Recipe target: no literal cluster_id, resolved by live intent instead.
-            assert mock_logs.call_args.args[0] is None
+            assert mock_logs.call_args.kwargs["workload_id"] is None
             assert call_kwargs["recipe"] is not None
             assert call_kwargs["tail"] == 50
 
@@ -5953,7 +5953,7 @@ class TestStopLogsClusterIdAndOverrides:
         with mock.patch("sparkrun.api.logs", return_value=iter(())) as mock_logs:
             result = runner.invoke(main, ["logs", "aabbccdd1122"])
             assert result.exit_code == 0, result.output
-            assert mock_logs.call_args.args[0] == "sparkrun_aabbccdd1122"
+            assert mock_logs.call_args.kwargs["workload_id"] == "sparkrun_aabbccdd1122"
             assert mock_logs.call_args.kwargs["hosts"] == ("10.0.0.1",)
 
     def test_logs_renders_api_lines_verbatim(self, runner, config_setup, reset_bootstrap):

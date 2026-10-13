@@ -27,6 +27,7 @@ FIELD_SCHEMAS = {
     "cluster": {"maxLength": 4096, "type": "string"},
     "cluster_candidates": {"maxLength": 4096, "type": "string"},
     "cluster_id": {"maxLength": 4096, "type": "string"},
+    "workload_id": {"maxLength": 4096, "minLength": 1, "type": "string"},
     "cluster_id_override": {"maxLength": 4096, "type": "string"},
     "cluster_ids": {"items": {"maxLength": 4096, "type": "string"}, "maxItems": 512, "minItems": 1, "type": "array"},
     "confirm": {"type": "boolean"},

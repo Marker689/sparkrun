@@ -40,7 +40,7 @@ import threading
 import time
 from typing import Generator, Iterator, Sequence
 
-from sparkrun.core.log_source import LogLine, LogSource, source_sort_key
+from sparkrun.core.log_source import LogLine, LogSource, LogSourceChanged, source_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,8 @@ def build_read_command(
 
     kwargs = dict(ssh_kwargs or {})
     command = executor.read_logs_cmd(source, follow=follow, tail=tail)
+    if isinstance(command, list):
+        return command
 
     if should_run_locally(source.host, kwargs.get("ssh_user")):
         return ["bash", "-c", command]
@@ -136,6 +138,8 @@ def _line(source: LogSource, text: str, *, timestamp: float | None = None) -> Lo
         role=source.role,
         rank=source.rank,
         timestamp=timestamp,
+        source_id=source.source_id,
+        resource=source.resource,
     )
 
 
@@ -151,9 +155,36 @@ def _read_one(
     timeout: float | None,
 ) -> Iterator[LogLine]:
     """Yield every line from a single source, then return."""
-    cmd = build_read_command(executor, source, follow=follow, tail=tail, ssh_kwargs=ssh_kwargs)
-    logger.debug("Reading logs from %s: %s", source.label, " ".join(cmd))
-    yield from read_log_command(cmd, source, cancel=cancel, check=check, timeout=timeout, merge_stderr=False)
+    with _validated_source(executor, source, cancel=cancel, timeout=timeout) as remaining:
+        if cancel is not None and cancel.is_set():
+            return
+        cmd = build_read_command(executor, source, follow=follow, tail=tail, ssh_kwargs=ssh_kwargs)
+        logger.debug("Reading logs from %s: %s", source.label, " ".join(cmd))
+        yield from read_log_command(cmd, source, cancel=cancel, check=check, timeout=remaining(), merge_stderr=False)
+
+
+@contextmanager
+def _validated_source(executor, source, *, cancel, timeout: float | None = None):
+    """Keep finite reads/pages tied to one native instance, within one deadline."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            assert timeout is not None
+            raise subprocess.TimeoutExpired(source.label, timeout)
+        return left
+
+    def validate():
+        if source.resource is not None and not (cancel is not None and cancel.is_set()):
+            executor.validate_log_source(source, cancel=cancel, timeout=remaining())
+
+    validate()
+    yield remaining
+    # Do not mask reader errors or run extra requests on generator.close().
+    validate()
 
 
 def read_log_command(
@@ -164,7 +195,7 @@ def read_log_command(
     cancel: threading.Event | None = None,
     timeout: float | None = None,
     merge_stderr: bool = True,
-) -> Iterator[LogLine]:
+) -> Generator[LogLine, None, None]:
     """Read a local argv into structured lines; closing the iterator stops it.
 
     Direct callers retain merged stderr by default. Executor-backed readers
@@ -307,9 +338,10 @@ def _interleave(
 
     def pump(source: LogSource) -> None:
         try:
-            cmd = build_read_command(executor, source, follow=True, tail=tail, ssh_kwargs=ssh_kwargs)
-            logger.debug("Following logs from %s: %s", source.label, " ".join(cmd))
             with ExitStack() as readers:
+                readers.enter_context(_validated_source(executor, source, cancel=stop))
+                cmd = build_read_command(executor, source, follow=True, tail=tail, ssh_kwargs=ssh_kwargs)
+                logger.debug("Following logs from %s: %s", source.label, " ".join(cmd))
                 with lock:
                     if stop.is_set():
                         return
@@ -325,7 +357,7 @@ def _interleave(
                 raise subprocess.CalledProcessError(rc, cmd, stderr="".join(diagnostics))
         except Exception as error:
             logger.debug("Log reader for %s failed: %s", source.label, error)
-            if check:
+            if check or isinstance(error, LogSourceChanged):
                 put(error)
         finally:
             put(_QUEUE_SENTINEL)

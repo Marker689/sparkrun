@@ -1023,8 +1023,15 @@ and return a removed-resource count (zero when already absent). Raise on errors;
 return `None` only to select ordinary container teardown. A recorded native
 reference cannot fall back silently. Implement `query_status()` with the same
 portable IDs so shared discovery, ensure, and replacement see the workloads.
-Common `api.logs()` currently rejects recorded native resources; provide a plugin
-log API rather than addressing controller children with container-style names.
+Implement `native_log_sources(cluster_id, *, metadata, scope, cancel)` to expose
+controller-owned sources through shared `api.logs(workload_id=...)` and
+`open_log_target()`. This hook owns availability/ownership checks, including
+completed or pending resources. `read_logs_cmd()` may return a local argv list
+for a control-plane client, bypassing SSH; string commands keep ordinary host
+dispatch. Native sources carry `LogResource` identity, checked by
+`validate_log_source(source, *, cancel, timeout)` before/after reading. Raise
+`LogSourceChanged` on replacement/restart and honor cancellation and deadlines.
+See [LOGGING_API.md](LOGGING_API.md) for public source/filter/paging contracts.
 Executors whose hosts represent a control plane rather than a serving endpoint
 set `supports_host_endpoint = False`. Benchmarking rejects them before launch,
 including skip-run discovery and resumes that need more measurements. Completed
