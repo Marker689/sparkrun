@@ -14,7 +14,9 @@ sparkrun benchmark resume <benchmark-id>
 ```
 
 `arena benchmark <recipe>` and `arena benchmark resume <benchmark-id>` are aliases
-for the same benchmark execution and integration lifecycle. `--local-test`
+for the same benchmark execution and integration lifecycle. They are hidden from
+help by default; `SPARKRUN_ADVANCED=1` shows them. Prefer `sparkrun benchmark <recipe> --arena`
+and `sparkrun benchmark resume <benchmark-id>`. `--local-test`
 skips authentication and upload, allows the recipe's own benchmark profile, and
 writes the submission artifacts to the active application's cache. The ordinary
 benchmark path requires `--arena` alongside `--local-test`.

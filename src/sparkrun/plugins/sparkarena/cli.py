@@ -35,7 +35,7 @@ def build_arena_command():
     from sparkrun.core.application_profile import render_identity_text
     from sparkrun.cli.ext import ExtensibleCommand
     from sparkrun.cli._benchmark import _shared_run_options, _invoke_benchmark, _resume_benchmark_run
-    from sparkrun.cli._common import with_host_context, dry_run_option
+    from sparkrun.cli._common import HIDE_ADVANCED_OPTIONS, with_host_context, dry_run_option
 
     ASCII_ART = r"""
     !       _____                  __      ___
@@ -49,7 +49,10 @@ def build_arena_command():
     @click.group()
     @click.pass_context
     def arena(ctx):
-        """Spark Arena leaderboard — login, benchmark, and submit results."""
+        """Manage Spark Arena authentication.
+
+        Run and submit benchmarks with `{app_command} benchmark <recipe> --arena`.
+        """
         pass
 
     @arena.command()
@@ -112,9 +115,12 @@ def build_arena_command():
                 args = ["run", *args]
             return super().parse_args(ctx, args)
 
-    @arena.group("benchmark", cls=_ArenaBenchmarkGroup)
+    @arena.group("benchmark", cls=_ArenaBenchmarkGroup, hidden=HIDE_ADVANCED_OPTIONS)
     def arena_benchmark():
-        """Benchmark a recipe and submit results to Spark Arena."""
+        """Benchmark a recipe and submit results to Spark Arena.
+
+        Prefer `{app_command} benchmark <recipe> --arena`.
+        """
 
     @arena_benchmark.command("run", cls=ExtensibleCommand, extension_target="benchmark.run")
     @_shared_run_options
