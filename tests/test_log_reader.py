@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from unittest.mock import Mock
 
 import psutil
@@ -73,15 +74,38 @@ def test_finite_cancel_reaps_readers_and_children(monkeypatch, spawned, script):
     reader = threading.Thread(target=consume, daemon=True)
     reader.start()
     try:
-        assert ready.wait(5)
+        try:
+            assert ready.wait(5)
+        finally:
+            cancel.set()
+            reader.join(5)
+        assert not reader.is_alive()
+        assert errors == []  # Termination requested by the caller is not a read failure.
+        assert_reaped(spawned)
+        # The reader SIGKILLs its process group and reaps only the leader; the
+        # grandchild's own exit is asynchronous. Under load it is still shown
+        # "running" (woken by the pending SIGKILL) for a moment, or exits
+        # between two probes. Wait for it rather than sampling once: a child
+        # the reader failed to signal sleeps for 60s and still fails here.
+        deadline = time.monotonic() + 5
+        while not all(_exited(child) for child in children):
+            assert time.monotonic() < deadline, [child.pid for child in children if not _exited(child)]
+            time.sleep(0.02)
     finally:
-        cancel.set()
-        reader.join(5)
-    assert not reader.is_alive()
-    assert errors == []  # Termination requested by the caller is not a read failure.
-    assert_reaped(spawned)
-    for child in children:
-        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+        # It ignores SIGTERM, so a failing run must not leave it behind.
+        for child in children:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+
+def _exited(process):
+    """Gone or a zombie awaiting its (new) parent's reap."""
+    try:
+        return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
 
 
 @pytest.mark.parametrize("follow", [False, True])
