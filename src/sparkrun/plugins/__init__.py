@@ -112,7 +112,33 @@ from sparkrun.proxy.gateway import register_gateway
 from sparkrun.proxy.supervisor import GatewaySupervisor
 from sparkrun.runtimes.base import RuntimePlugin
 
+from sparkrun.builders.base import BuilderPlugin
+from sparkrun.core.application_profile import get_application_profile
+from sparkrun.core.config import resolve_hf_token, resolve_sparkrun_cache_dir
+from sparkrun.core.context import SparkrunContext
+from sparkrun.core.execution import (
+    ActivationContext,
+    ActivationResult,
+    ExecutionContext,
+    LaunchAssetPolicy,
+    PreparationStep,
+    PreparedExecution,
+)
+from sparkrun.core.features import feature_gate_enabled
+from sparkrun.core.hardware import HostHardware
+from sparkrun.core.offline import resolve_offline
+from sparkrun.core.recipe import Recipe
+from sparkrun.core.timing import STATUS_ERROR, Timeline, timed
+from sparkrun.orchestration.job_metadata import derive_recipe_fingerprint, generate_intent_id
+from sparkrun.proxy import DEFAULT_MASTER_KEY, DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT
+from sparkrun.proxy.gateway import require_gateway_enabled
+from sparkrun.transports import open_cluster_host_session, prepare_cluster_transport
+from sparkrun.transports.session import HostCommandResult, HostSessionError
+from sparkrun.api._wire import object_schema
+
 __all__ = [
+    "ActivationContext",
+    "ActivationResult",
     "BenchTask",
     "BenchmarkDefaults",
     "BenchmarkIntegration",
@@ -122,12 +148,17 @@ __all__ = [
     "BenchmarkStateInfo",
     "BenchmarkingPlugin",
     "BuildContext",
+    "BuilderPlugin",
     "CliOptionSpec",
+    "DEFAULT_MASTER_KEY",
+    "DEFAULT_PROXY_HOST",
+    "DEFAULT_PROXY_PORT",
     "DIAGNOSTICS_API_VERSION",
     "DaemonOp",
     "DaemonRoute",
     "DiagnosticSection",
     "DiagnosticsReporter",
+    "ExecutionContext",
     "Executor",
     "ExecutorConfig",
     "ExecutorTarget",
@@ -144,6 +175,9 @@ __all__ = [
     "GatewaySupervisor",
     "HardwarePlatformPlugin",
     "HookLaunchContext",
+    "HostCommandResult",
+    "HostHardware",
+    "HostSessionError",
     "IMAGE_DISTRIBUTION_API_VERSION",
     "IMAGE_PULL_API_VERSION",
     "IMAGE_RUNTIME_API_VERSION",
@@ -153,6 +187,7 @@ __all__ = [
     "ImageDistributionUnsupported",
     "ImagePullRequest",
     "KVCacheStrategy",
+    "LaunchAssetPolicy",
     "LifecycleContext",
     "LifecyclePlan",
     "LogResource",
@@ -170,20 +205,33 @@ __all__ = [
     "PLUGIN_LIFECYCLE_API_VERSION",
     "PluginConflictError",
     "PluginDiagnostics",
+    "PreparationStep",
+    "PreparedExecution",
     "ProxyModel",
+    "Recipe",
     "RecipeFormat",
     "RecipeItemHandler",
     "RegistryEntry",
     "RunHandler",
     "RuntimePlugin",
+    "STATUS_ERROR",
+    "SparkrunContext",
+    "Timeline",
     "WORKLOAD_LIFECYCLE_API_VERSION",
     "WorkloadLifecycleProvider",
     "application_daemon_registration",
+    "derive_recipe_fingerprint",
     "enlist_registry_state",
     "env_template_launch_fields",
+    "feature_gate_enabled",
+    "generate_intent_id",
+    "get_application_profile",
     "get_feedback",
     "has_image_distribution_provider",
     "image_distribution_operation",
+    "object_schema",
+    "open_cluster_host_session",
+    "prepare_cluster_transport",
     "public_recipe_text",
     "register_benchmark_integration",
     "register_cli_command",
@@ -207,10 +255,15 @@ __all__ = [
     "register_workload_lifecycle",
     "render_env_template",
     "render_launch_env",
+    "require_gateway_enabled",
     "resolve_distributed_image",
+    "resolve_hf_token",
+    "resolve_offline",
+    "resolve_sparkrun_cache_dir",
     "run_pre_exec",
     "save_job_metadata",
     "select_gateway",
+    "timed",
     "try_image_copy",
     "try_image_pull",
 ]

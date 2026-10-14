@@ -152,6 +152,32 @@ they may move between releases without notice. The operational APIs a plugin
 `sparkrun.api` (including `sparkrun.api.setup`) and `sparkrun.application`; see
 the [0.4 migration guide](DISTRIBUTION_API_MIGRATION.md).
 
+Besides registration entry points, the surface carries the contracts a plugin
+cannot avoid touching: the execution-strategy types (`ExecutionContext`,
+`PreparationStep`, `PreparedExecution`, `ActivationContext`, `ActivationResult`,
+`LaunchAssetPolicy`), base classes and core types (`BuilderPlugin`, `Recipe`,
+`SparkrunContext`, `HostHardware`), the host-session seam
+(`open_cluster_host_session`, `prepare_cluster_transport`, `HostCommandResult`,
+`HostSessionError`), workload identity (`derive_recipe_fingerprint`,
+`generate_intent_id`), configuration helpers (`feature_gate_enabled`,
+`get_application_profile`, `resolve_hf_token`, `resolve_sparkrun_cache_dir`,
+`resolve_offline`), timing (`Timeline`, `timed`, `STATUS_ERROR`), gateway
+defaults (`DEFAULT_PROXY_HOST`, `DEFAULT_PROXY_PORT`, `DEFAULT_MASTER_KEY`,
+`require_gateway_enabled`) and the daemon-schema helper `object_schema`.
+
+### First-party coupling (unsupported)
+
+Sparkrun's own plugins (SparkRoute, ColdSnap) also reach internals that are
+**not** part of this surface and carry no stability promise: SparkRoute's
+integration with the daemon (`sparkrun.daemon.*`: tokens, job store, bindings,
+client), ColdSnap's use of the remote-execution primitives
+(`sparkrun.orchestration.primitives` / `ssh` / `sudo`), runtime-cache internals,
+image preparation, InfiniBand detection, hardware probing and the progress
+heartbeat, and plugin CLI commands' use of Click helpers
+(`sparkrun.cli._common` parameter types and options, `sparkrun.utils.cli_formatters`).
+These move in lockstep with Sparkrun releases. A third-party plugin that needs
+one of them should ask for a supported seam rather than import it.
+
 ## Registration conflicts
 
 Every in-process registry exposed here (recipe items and formats, registry
