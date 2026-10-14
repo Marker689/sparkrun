@@ -94,6 +94,7 @@ def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_p
             source=("external", metadata.module, str(source_path)),
             identity=PluginIdentity(normalize_plugin_id(metadata.name), metadata.module, ("external", metadata.module, str(source_path))),
             declarations=metadata.declarations,
+            application_profile_api=metadata.application_profile_api,
         )
     except BaseException:
         for name in list(sys.modules):
@@ -165,16 +166,6 @@ def load_managed_plugins(v, *, config=None):
             if name in rejected:
                 raise PluginError(rejected[name])
             metadata = PluginMetadata.from_dict(record["metadata"])
-            from sparkrun.core.application_profile import APPLICATION_PROFILE_API_VERSION, get_application_profile
-
-            if metadata.application_profile_api not in (None, APPLICATION_PROFILE_API_VERSION):
-                raise PluginError("Unsupported application profile API")
-            if (
-                get_application_profile().id != "sparkrun"
-                and metadata.module == "sparkrun.plugins.sparkroute"
-                and metadata.application_profile_api is None
-            ):
-                raise PluginError("SparkRoute must declare application profile API support for this application")
             if validating and _validation_candidate is not None:
                 package = _validation_candidate[1]
                 source = package

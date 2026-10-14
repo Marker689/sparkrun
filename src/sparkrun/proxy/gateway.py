@@ -122,6 +122,20 @@ def register_gateway(name: str, *, feature_flag: str, loader: "Callable[[], type
         _GATEWAY_OWNERS[name] = owner
 
 
+def _unregistered_profile_failure(name: str) -> str | None:
+    """Why gateway *name* has no implementation, when its plugin was refused for the application profile.
+
+    Only an unregistered gateway is explained: a registered one means its
+    plugin passed the same check at load. Assumes the providing plugin shares
+    the gateway's name, which holds for every first-party gateway.
+    """
+    if name in _GATEWAY_LOADERS:
+        return None
+    from sparkrun.core.in_tree_plugins import plugin_application_profile_failure
+
+    return plugin_application_profile_failure(name)
+
+
 def gateway_class(name: str) -> type:
     """Return the engine class implementing gateway *name*.
 
@@ -133,9 +147,7 @@ def gateway_class(name: str) -> type:
             while its plugin failed to load, and telling someone to enable a
             flag that is already on is a dead end.
     """
-    from sparkrun.core.in_tree_plugins import plugin_application_profile_failure
-
-    failure = plugin_application_profile_failure(name)
+    failure = _unregistered_profile_failure(name)
     if failure:
         raise GatewayUnavailableError(failure, gateway=name)
     loader = _GATEWAY_LOADERS.get(name)
@@ -207,9 +219,7 @@ def resolve_gateway(name: str | None = None, *, config: "SparkrunConfig | None" 
     enabled = list_gateways(config=config)
 
     if name:
-        from sparkrun.core.in_tree_plugins import plugin_application_profile_failure
-
-        failure = plugin_application_profile_failure(name)
+        failure = _unregistered_profile_failure(name)
         if failure:
             raise GatewayUnavailableError(failure, gateway=name)
         if is_gateway_enabled(name, config=config):
@@ -250,13 +260,11 @@ def require_gateway_enabled(name: str, *, config: "SparkrunConfig | None" = None
     after its flag has been turned off — the same rule
     ``cleanup_cluster_transport`` follows for transports.
     """
-    from sparkrun.core.in_tree_plugins import plugin_application_profile_failure
-
     from sparkrun.core.features import is_feature_enabled
 
     if not is_feature_enabled("gateway", config=config):
         raise GatewayUnavailableError("Gateway support is disabled. Enable it with: sparkrun setup features enable gateway", gateway=name)
-    failure = plugin_application_profile_failure(name)
+    failure = _unregistered_profile_failure(name)
     if failure:
         raise GatewayUnavailableError(failure, gateway=name)
     if is_gateway_enabled(name, config=config):

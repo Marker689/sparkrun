@@ -18,6 +18,20 @@ def plugin_origin(module: str, directory: Path | None = None) -> Path | None:
     return physical_origin(module)
 
 
+def sidecar_manifest(origin: Path | None) -> dict:
+    """The first readable ``plugin.toml`` / ``VENDORED.toml`` beside *origin*, else ``{}``."""
+    import tomllib
+
+    if origin is None:
+        return {}
+    for filename in ("plugin.toml", "VENDORED.toml"):
+        try:
+            return tomllib.loads((Path(origin).parent / filename).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
 def is_bundled_plugin(module: str, origin: Path | None) -> bool:
     """True only for a release-owned plugin at its shipped location.
 

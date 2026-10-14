@@ -39,6 +39,13 @@ class PluginCompatibilityError(ValueError):
         )
 
 
+class ApplicationProfileCompatibilityError(PluginCompatibilityError):
+    """A plugin's application-profile declaration does not fit the active profile."""
+
+    def __init__(self, message: str):
+        ValueError.__init__(self, message)
+
+
 class PluginConflictError(RuntimeError):
     """Two registrations claim one key; import order cannot resolve it."""
 
@@ -275,6 +282,9 @@ def format_plugin_failure(error: BaseException) -> str:
     return "%s: %s" % (type(error).__name__, error)
 
 
+_READ_BESIDE_MODULE = object()
+
+
 def load_and_register_plugin(
     loader: Callable[[], ModuleType],
     v: Variables | None,
@@ -283,6 +293,7 @@ def load_and_register_plugin(
     source: tuple[str, str, str | None] | None = None,
     identity=None,
     declarations=None,
+    application_profile_api: object = _READ_BESIDE_MODULE,
 ) -> ModuleType:
     """Import, validate and register one module in a single transaction.
 
@@ -290,8 +301,24 @@ def load_and_register_plugin(
     survive rollback for inventory; a successful retry clears the prior error.
     Every module declares SPARKRUN_PLUGIN_API_VERSION, regardless of source.
     Exceptions propagate after rollback; arbitrary plugin I/O is not undone.
+
+    ``application_profile_api`` is enforced here for every source, before the
+    import (:func:`~sparkrun.core.plugin_policy.application_profile_failure`).
+    Sources whose manifest is not beside the entry module (managed plugins)
+    pass the declared value, ``None`` when undeclared; otherwise it is read
+    from ``plugin.toml`` / ``VENDORED.toml`` next to the module.
     """
     try:
+        if identity is not None:
+            from sparkrun.core.managed_plugins import physical_origin
+            from sparkrun.core.plugin_policy import application_profile_failure, declared_application_profile_api
+
+            declared = application_profile_api
+            if declared is _READ_BESIDE_MODULE:
+                declared = declared_application_profile_api(physical_origin(identity.module))
+            failure = application_profile_failure(identity.plugin_id, declared)
+            if failure:
+                raise ApplicationProfileCompatibilityError(failure)
         with registry_transaction(v):
             from sparkrun.core.external_plugins import _register_plugin_module
 

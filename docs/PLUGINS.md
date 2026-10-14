@@ -802,6 +802,15 @@ controller `schema_version` are independent contracts. Also declare compatible
 core package ranges in project requirements. See
 [the application profile guide](APPLICATION_PROFILES.md).
 
+A plugin that supports alternate application profiles declares
+`application_profile_api = <version>` in `plugin.toml` (vendored snapshots carry
+it in `VENDORED.toml`; managed installs keep it in their metadata). Every
+loader enforces it before import: a declared value must equal the host's
+`APPLICATION_PROFILE_API_VERSION`. Undeclared plugins are treated as
+profile-agnostic, except first-party plugins whose earlier releases predate
+profile support (SparkRoute), which must declare it to load under an alternate
+profile.
+
 These identifiers serve different purposes:
 
 | Identifier | Example | Purpose |

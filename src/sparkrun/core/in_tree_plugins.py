@@ -19,8 +19,8 @@ existing first-party packages that *do* map cleanly onto one extension point
 Plugin loading is controlled by the shared ``plugins.enabled`` policy, checked
 before import. Existing whole-plugin flags remain migration fallbacks. Enabled
 plugins may register separate capability flags, which cannot load a disabled
-parent. ``IN_TREE_PLUGIN_FEATURES`` retains the known module inventory and legacy
-bindings. External loading additionally requires ``core.external_plugins``.
+parent. ``IN_TREE_PLUGIN_FEATURES`` (derived from ``plugin_policy.KNOWN_PLUGINS``)
+retains the known module inventory and legacy bindings. External loading additionally requires ``core.external_plugins``.
 
 A broken bundled plugin is logged and skipped so unrelated commands still work.
 
@@ -35,6 +35,7 @@ import logging
 import pkgutil
 from typing import TYPE_CHECKING
 
+from sparkrun.core.plugin_policy import KNOWN_PLUGINS, application_profile_failure, declared_application_profile_api
 from sparkrun.core.registration import load_and_register_plugin
 from sparkrun.core.registry_defaults import DeclarationTier
 
@@ -48,54 +49,31 @@ IN_TREE_PLUGIN_PACKAGE = "sparkrun.plugins"
 
 #: Plugins shipped and tested with this Sparkrun release. Namespace membership
 #: alone is not ownership: separately installed plugins can live there too.
-BUNDLED_PLUGIN_NAMES = frozenset({"k8s", "lil", "oci_relay", "sparkarena", "litellm"})
+BUNDLED_PLUGIN_NAMES = frozenset(known.module for known in KNOWN_PLUGINS.values() if known.bundled)
 
-#: In-tree plugin module name -> the feature flag gating it.
+#: In-tree plugin module name -> the legacy feature flag gating it, derived from
+#: :data:`~sparkrun.core.plugin_policy.KNOWN_PLUGINS`.
 #:
-#: Adding a plugin means adding an entry here. Kept as data rather than read
-#: off the plugin because the flag must resolve *before* the import — a plugin
-#: that declared its own gate could only be consulted by importing it, which is
-#: exactly what the gate is meant to avoid.
-# SparkRoute and ColdSnap are not bundled, but keep their pre-import gates for
-# users who install their packages separately into this plugin namespace. Such
-# packages load at the out-of-tree declaration tier (in_tree_declaration_tier).
-IN_TREE_PLUGIN_FEATURES: dict[str, str | None] = {
-    "litellm": None,
-    "sparkroute": "gateway.sparkroute",
-    "coldsnap": "plugins.coldsnap",
-    "oci_relay": "plugins.oci_relay",
-    "sparkarena": "integration.arena",
-    "k8s": "integration.k8s",
-    "lil": "registry.lil",
-}
+#: Adding a plugin means adding a ``KNOWN_PLUGINS`` entry. Kept as data rather
+#: than read off the plugin because the flag must resolve *before* the import —
+#: a plugin that declared its own gate could only be consulted by importing it,
+#: which is exactly what the gate is meant to avoid. SparkRoute and ColdSnap are
+#: not bundled, but keep their pre-import gates for users who install their
+#: packages separately into this plugin namespace. Such packages load at the
+#: out-of-tree declaration tier (in_tree_declaration_tier).
+IN_TREE_PLUGIN_FEATURES: dict[str, str | None] = {known.module: known.legacy_flag for known in KNOWN_PLUGINS.values()}
 
 
 def plugin_application_profile_api(name: str) -> int | None:
-    """Read the verified bundled declaration without importing the integration."""
-    from pathlib import Path
-    import tomllib
+    """The ``application_profile_api`` an in-namespace plugin declares, read without importing it."""
+    from sparkrun.core.plugin_metadata import plugin_origin
 
-    path = Path(__file__).resolve().parents[1] / "plugins" / name / "VENDORED.toml"
-    try:
-        value = tomllib.loads(path.read_text(encoding="utf-8")).get("application_profile_api")
-    except (OSError, ValueError):
-        return None
-    return value if type(value) is int else None
+    return declared_application_profile_api(plugin_origin(IN_TREE_PLUGIN_PACKAGE + "." + name))
 
 
 def plugin_application_profile_failure(name: str) -> str | None:
-    from sparkrun.core.application_profile import APPLICATION_PROFILE_API_VERSION, get_application_profile
-
-    if (
-        name == "sparkroute"
-        and get_application_profile().id != "sparkrun"
-        and plugin_application_profile_api(name) != APPLICATION_PROFILE_API_VERSION
-    ):
-        return (
-            "The pinned SparkRoute plugin does not declare support for this host's application profile API; "
-            "import a compatible plugin snapshot before using an alternate application profile"
-        )
-    return None
+    """Why in-namespace plugin *name* cannot load under the active application profile."""
+    return application_profile_failure(name, plugin_application_profile_api(name))
 
 
 def in_tree_declaration_tier(module: str) -> DeclarationTier:
@@ -129,7 +107,7 @@ def in_tree_plugin_enabled(name, v=None, *, config=None):
         declarations = read_declarations(plugin_origin(module), module)
     except (OSError, ValueError):
         declarations = {}  # Keep metadata-only disable/recovery available.
-    legacy = plugin_feature_flag(name) if not declarations and name != "litellm" else None
+    legacy = plugin_feature_flag(name) if not declarations else None
     return plugin_state(name, config if config is not None else _gate_config(v), legacy_feature=legacy).enabled
 
 

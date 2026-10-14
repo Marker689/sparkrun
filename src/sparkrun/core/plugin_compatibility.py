@@ -12,6 +12,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+from sparkrun.core.plugin_policy import known_plugin, requires_profile_api_declaration
 from sparkrun.core.registration import PLUGIN_API_VERSION
 
 
@@ -92,8 +93,9 @@ def evaluate_plugin_compatibility(data: dict, host: HostSnapshot) -> Compatibili
     elif type(api) is not int or api != host.plugin_api:
         incompatible.append("Plugin API %r is unsupported (host requires %s)" % (api, host.plugin_api))
     profile_api = data.get("application_profile_api")
-    if host.profile_id != "sparkrun" and data.get("module") == "sparkrun.plugins.sparkroute" and profile_api is None:
-        unknown.append("SparkRoute does not declare application profile API support")
+    if profile_api is None and requires_profile_api_declaration(data.get("name"), host.profile_id):
+        known = known_plugin(data.get("name"))
+        unknown.append("%s does not declare application profile API support" % (known.title if known else data.get("name")))
     if profile_api is not None and (type(profile_api) is not int or profile_api != host.profile_api):
         incompatible.append("Application profile API %r is unsupported" % profile_api)
 
@@ -135,9 +137,7 @@ def audit_plugin_compatibility(inventory: list[dict], host: HostSnapshot) -> lis
 
 def metadata_for_plugin(plugin) -> dict:
     """Collect whatever a provider declares, without importing it or guessing."""
-    import tomllib
-
-    from sparkrun.core.plugin_metadata import bundled_distribution, plugin_origin
+    from sparkrun.core.plugin_metadata import bundled_distribution, plugin_origin, sidecar_manifest
     from sparkrun.core.plugin_manifest import literal_attribute
 
     if plugin.managed:
@@ -151,15 +151,11 @@ def metadata_for_plugin(plugin) -> dict:
         data["requires_sparkrun"] = "==%s" % bundled.version
     if origin:
         data["plugin_api"] = literal_attribute(origin, "SPARKRUN_PLUGIN_API_VERSION")
-        for filename in ("plugin.toml", "VENDORED.toml"):
-            try:
-                declared = tomllib.loads((origin.parent / filename).read_text())
-                if declared.get("sparkrun") is not None:
-                    data["requires_sparkrun"] = declared["sparkrun"]
-                data["application_profile_api"] = declared.get("application_profile_api")
-                break
-            except (OSError, ValueError):
-                continue
+        declared = sidecar_manifest(origin)
+        if declared:
+            if declared.get("sparkrun") is not None:
+                data["requires_sparkrun"] = declared["sparkrun"]
+            data["application_profile_api"] = declared.get("application_profile_api")
     if bundled is not None or plugin.package:
         try:
             dist = bundled if bundled is not None else distributions.distribution(plugin.package)

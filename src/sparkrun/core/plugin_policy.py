@@ -39,13 +39,103 @@ def policy_source(kind: str) -> PluginSource:
         return PluginSource.IN_TREE
 
 
-LEGACY_PLUGIN_FLAGS = {
-    "k8s": "integration.k8s",
-    "lil": "registry.lil",
-    "sparkarena": "integration.arena",
-    "oci-relay": "plugins.oci_relay",
-    "coldsnap": "plugins.coldsnap",
+@dataclass(frozen=True)
+class KnownPlugin:
+    """What core knows about a first-party plugin before importing it."""
+
+    module: str
+    """Subpackage name under ``sparkrun.plugins``."""
+    title: str
+    legacy_flag: str | None = None
+    """Whole-plugin feature flag that gated loading before ``plugins.enabled``."""
+    flag_is_capability: bool = False
+    """The legacy flag is now the plugin's own capability flag. It then gates
+    loading only for an in-tree snapshot that declares no manifest (one that
+    predates the split); for anything else a capability toggle would disable
+    the plugin itself."""
+    bundled: bool = False
+    """Ships and is tested with this release."""
+    requires_profile_api: bool = False
+    """Releases exist that predate application-profile support, so under an
+    alternate application profile the plugin must declare
+    ``application_profile_api`` to load."""
+
+
+#: The one table of first-party plugins, keyed by normalized plugin ID. The
+#: in-tree loader's inventory and the legacy flag fallbacks derive from it.
+KNOWN_PLUGINS: dict[str, KnownPlugin] = {
+    "litellm": KnownPlugin("litellm", "LiteLLM", bundled=True),
+    "sparkroute": KnownPlugin("sparkroute", "SparkRoute", "gateway.sparkroute", flag_is_capability=True, requires_profile_api=True),
+    "coldsnap": KnownPlugin("coldsnap", "ColdSnap", "plugins.coldsnap"),
+    "oci-relay": KnownPlugin("oci_relay", "OCI Relay", "plugins.oci_relay", bundled=True),
+    "sparkarena": KnownPlugin("sparkarena", "Spark Arena", "integration.arena", bundled=True),
+    "k8s": KnownPlugin("k8s", "Kubernetes", "integration.k8s", bundled=True),
+    "lil": KnownPlugin("lil", "lil", "registry.lil", bundled=True),
 }
+
+#: Plugin ID -> whole-plugin flag still honored as a loading fallback for every source.
+LEGACY_PLUGIN_FLAGS = {
+    plugin_id: known.legacy_flag for plugin_id, known in KNOWN_PLUGINS.items() if known.legacy_flag and not known.flag_is_capability
+}
+
+
+def known_plugin(name: object) -> KnownPlugin | None:
+    try:
+        return KNOWN_PLUGINS.get(normalize_plugin_id(name))
+    except ValueError:
+        return None
+
+
+def declared_application_profile_api(origin) -> int | None:
+    """``application_profile_api`` from the manifest beside a plugin's entry module.
+
+    Reads the source manifest (``plugin.toml``) or vendoring record
+    (``VENDORED.toml``) in the package directory, without importing anything.
+    Managed plugins carry the same value in their install metadata instead.
+    """
+    from sparkrun.core.plugin_metadata import sidecar_manifest
+
+    value = sidecar_manifest(origin).get("application_profile_api")
+    return value if type(value) is int else None
+
+
+def application_profile_failure(plugin_id: object, declared_api: object, *, profile_id: str | None = None) -> str | None:
+    """Why a plugin cannot load under the active application profile, or ``None``.
+
+    A declared ``application_profile_api`` must equal the host's, for every
+    plugin source. An undeclared one is profile-agnostic, except for a plugin
+    whose older releases predate profile support (``requires_profile_api``):
+    those must declare it before running under an alternate profile.
+    """
+    from sparkrun.core.application_profile import APPLICATION_PROFILE_API_VERSION, get_application_profile
+
+    if declared_api is not None:
+        if type(declared_api) is not int or declared_api != APPLICATION_PROFILE_API_VERSION:
+            return "%s declares application profile API %r; this host implements %s" % (
+                plugin_id,
+                declared_api,
+                APPLICATION_PROFILE_API_VERSION,
+            )
+        return None
+    known = known_plugin(plugin_id)
+    # Resolve the active profile only when it matters: reading it selects the
+    # default profile, which must not happen before an application chooses one.
+    if (
+        known is not None
+        and known.requires_profile_api
+        and requires_profile_api_declaration(plugin_id, profile_id or get_application_profile().id)
+    ):
+        return (
+            "The pinned %s plugin does not declare support for this host's application profile API; "
+            "import a compatible plugin snapshot before using an alternate application profile" % known.title
+        )
+    return None
+
+
+def requires_profile_api_declaration(plugin_id: object, profile_id: str) -> bool:
+    """True when *plugin_id* must declare ``application_profile_api`` under *profile_id*."""
+    known = known_plugin(plugin_id)
+    return profile_id != "sparkrun" and known is not None and known.requires_profile_api
 
 
 @dataclass(frozen=True)
