@@ -190,9 +190,10 @@ Sparkrun's own plugins (SparkRoute, ColdSnap) also reach internals that are
 **not** part of this surface and carry no stability promise: SparkRoute's
 integration with the daemon (`sparkrun.daemon.*`: tokens, job store, bindings,
 client), ColdSnap's use of the remote-execution primitives
-(`sparkrun.orchestration.primitives` / `ssh` / `sudo`), runtime-cache internals,
-image preparation, InfiniBand detection, hardware probing and the progress
-heartbeat, and plugin CLI commands' use of Click helpers
+(`sparkrun.orchestration.primitives` / `ssh` / `sudo`, `sparkrun.utils.shell.quote`),
+runtime-cache internals, image preparation and transfer-mode resolution
+(`orchestration.distribution.resolve_auto_transfer_mode`), InfiniBand detection,
+hardware probing and the progress heartbeat, and plugin CLI commands' use of Click helpers
 (`sparkrun.cli._common` parameter types and options, `sparkrun.utils.cli_formatters`).
 These move in lockstep with Sparkrun releases. A third-party plugin that needs
 one of them should ask for a supported seam rather than import it.
