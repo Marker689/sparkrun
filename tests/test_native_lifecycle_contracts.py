@@ -81,6 +81,16 @@ def _record(env, result):
     return load_job_metadata(result.workload_id, cache_dir=str(env.sctx.config.cache_dir))
 
 
+def test_native_run_records_owner_and_ssh_user(lifecycle_env):
+    """The activation path rewrites job metadata wholesale, so it must carry owner and ssh_user."""
+    env = lifecycle_env
+    env.sctx.config.ssh_user = "dgxuser"
+    result = run(replace(env.options, owner="supervisor"), sctx=env.sctx)
+    saved = _record(env, result)
+    assert saved["owner"] == "supervisor"
+    assert saved["ssh_user"] == "dgxuser"
+
+
 @pytest.mark.parametrize("target_source", ["settings", "cluster", "recipe", "caller", "current-context"])
 def test_native_run_stop_by_id_recovers_exact_target_after_context_change(lifecycle_env, target_source):
     env = lifecycle_env

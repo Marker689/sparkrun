@@ -108,6 +108,8 @@ def run_k8s(
             before_start(executor=executor)
         # Persist before submission: an interrupted/ambiguous apply must still
         # be recoverable through the common stop API after process restart.
+        # save_job_metadata rewrites the file wholesale, so this write carries
+        # everything the launcher's own writes do (owner and ssh_user too).
         save_job_metadata(
             cluster_id,
             recipe,
@@ -117,7 +119,9 @@ def run_k8s(
             container_image=image,
             runtime=runtime,
             recipe_fingerprint=plan.recipe_fingerprint,
+            owner=options.owner,
             cluster_name=plan.cluster.name if plan.cluster else None,
+            ssh_user=getattr(sctx.config, "ssh_user", None),
             executor=executor,
             native_resource=resource,
             sctx=sctx,
