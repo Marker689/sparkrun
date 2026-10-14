@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sparkrun.api._benchmark_models import ResumeMode, BenchmarkDecision
+    from ._common import HostContext
 
 
 class _CliEmitter(_ProgressEmitter):
@@ -348,6 +349,7 @@ def _invoke_benchmark(ctx, *, category, **kwargs):
         scheduler_name=kwargs.pop("scheduler_name"),
         host_list=kwargs.pop("host_list", None),
         cluster_mgr=kwargs.pop("cluster_mgr", None),
+        host_context=kwargs.pop("host_context", None),
         category=category,
         integrations=integrations,
         offline=kwargs.pop("offline", None),
@@ -508,6 +510,7 @@ def _run_benchmark(
     scheduler_name: str | None = None,
     host_list=None,
     cluster_mgr=None,
+    host_context: "HostContext | None" = None,
     category: str | None = None,
     offline: bool | None = None,
 ):
@@ -587,16 +590,13 @@ def _run_benchmark(
             sys.exit(1)
         _overrides_from_flags[k2] = coerce_value(v2.strip())
 
-    from ._common import resolve_cluster_config
+    if host_context is None:
+        # Direct callers that bypass ``with_host_context`` (tests, plugins).
+        from ._common import resolve_host_context
 
-    cluster_cfg = resolve_cluster_config(cluster_name, hosts, hosts_file, cluster_mgr)
-    _named_cluster = None
-    if cluster_mgr is not None and cluster_cfg.name:
-        try:
-            _named_cluster = cluster_mgr.get(cluster_cfg.name)
-        except Exception as error:  # an unreadable cluster is reported by the launch itself
-            logger.debug("Could not load cluster %s for its offline default: %s", cluster_cfg.name, error)
-    _enter_offline_mode(offline, _named_cluster, benchmark_apps=True)
+        host_context = resolve_host_context(hosts, hosts_file, cluster_name, sctx.config, sctx=sctx)
+    cluster_cfg = host_context.cluster
+    _enter_offline_mode(offline, host_context.cluster_def, benchmark_apps=True)
 
     opts = BenchmarkOptions(
         recipe=recipe_name,

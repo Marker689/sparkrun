@@ -23,7 +23,7 @@ from ._common import (
     print_json,
     recipe_override_options,
     report_launch_validation,
-    resolve_cluster_config,
+    HostContext,
     with_host_context,
 )
 
@@ -618,6 +618,7 @@ def load_cmd(
     dry_run,
     *,
     host_list: list[str],
+    host_context: HostContext,
     cluster_mgr=None,
 ):
     """Load a model via {app_command} run and register with proxy.
@@ -640,14 +641,7 @@ def load_cmd(
     v = sctx.variables
     config = sctx.config
 
-    named_cluster = None
-    if cluster_mgr is not None and (cluster_name or (not hosts and not hosts_file)):
-        _name = cluster_name or cluster_mgr.get_default()
-        try:
-            named_cluster = cluster_mgr.get(_name) if _name else None
-        except Exception as error:  # an unreadable cluster is reported by the launch itself
-            logger.debug("Could not load cluster %s for its offline default: %s", _name, error)
-    offline_early = _enter_offline_mode(offline, named_cluster)
+    offline_early = _enter_offline_mode(offline, host_context.cluster_def)
 
     # Load recipe (defer resolution until overrides are built)
     recipe, _recipe_path, _registry_mgr = _load_recipe(config, recipe_name, resolve=False, retry_after_update=True, offline=offline_early)
@@ -684,7 +678,7 @@ def load_cmd(
         sys.exit(1)
 
     # Resolve cache dir, transfer mode, and transfer interface from cluster config
-    cluster_cfg = resolve_cluster_config(cluster_name, hosts, hosts_file, cluster_mgr)
+    cluster_cfg = host_context.cluster
     local_cache_dir, remote_cache_dir, effective_transfer_mode, effective_transfer_interface = cluster_cfg.resolve_transfer_config(config)
 
     # Preserve the resolved cluster alongside the full candidate host set.

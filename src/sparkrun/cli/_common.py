@@ -16,7 +16,7 @@ import click.shell_completion  # enables click.shell_completion.CompletionItem i
 if TYPE_CHECKING:
     from sparkrun.core.context import SparkrunContext
     from sparkrun.core.recipe import Recipe
-    from sparkrun.core.cluster_manager import ClusterManager
+    from sparkrun.core.cluster_manager import ClusterDefinition, ClusterManager
 
 from scitrera_app_framework.util import ext_parse_bool
 from sparkrun.core.recipe import (
@@ -482,6 +482,11 @@ class HostContext:
     one of ``hosts`` / ``hosts-file`` / ``cluster`` / ``default-cluster`` /
     ``config``.  Commands report it so a user can tell *what* they are looking
     at when they named nothing."""
+    cluster_def: ClusterDefinition | None = None
+    """The effective cluster's loaded definition (``None`` when hosts are
+    unattached).  What a launch forwards as ``cluster=``: unlike the name it
+    carries per-host hardware, executor, transport and offline settings, and
+    it is loaded once here instead of by each command."""
 
     @property
     def cluster_name(self) -> str | None:
@@ -528,6 +533,14 @@ def resolve_host_context(hosts, hosts_file, cluster_name, config, v=None, sctx: 
         # resolve_hosts only warns on an unknown name and falls through to the
         # default cluster, so a typo would silently target a different cluster.
         _require_cluster(cluster_mgr, cluster_name)
+    # The effective cluster: the named one, else (when no hosts were given) the
+    # default.  ``get_default`` already drops a default naming a deleted
+    # cluster, so one that exists but cannot be read is an error here — not a
+    # silent fall-through to an anonymous host list that loses its user,
+    # executor and transport.
+    explicit_hosts = bool(hosts or hosts_file)
+    effective_name = cluster_name or (None if explicit_hosts else cluster_mgr.get_default())
+    cluster_def = _load_cluster_or_exit(cluster_mgr, effective_name) if effective_name else None
     host_list = resolve_hosts(
         hosts=hosts,
         hosts_file=hosts_file,
@@ -538,10 +551,15 @@ def resolve_host_context(hosts, hosts_file, cluster_name, config, v=None, sctx: 
     if not host_list:
         click.echo("Error: No hosts specified. Use --hosts or configure defaults.", err=True)
         sys.exit(1)
-    # Resolve the cluster once: its name identifies what the user is looking
+    # Project the cluster once: its name identifies what the user is looking
     # at (including the default-cluster fallback), and its SSH user is applied
-    # to *config* so downstream SSH calls pick it up automatically.
-    cluster_cfg = resolve_cluster_config(cluster_name, hosts, hosts_file, cluster_mgr)
+    # to *config* so downstream SSH calls pick it up automatically.  Explicit
+    # hosts suppress the cluster's transfer defaults, as resolve_cluster_config
+    # does.
+    if cluster_def is not None:
+        cluster_cfg = ResolvedClusterConfig.from_definition(cluster_def, include_transfer=not explicit_hosts)
+    else:
+        cluster_cfg = ResolvedClusterConfig()
     if cluster_cfg.user:
         config.ssh_user = cluster_cfg.user
 
@@ -555,7 +573,18 @@ def resolve_host_context(hosts, hosts_file, cluster_name, config, v=None, sctx: 
         source = "default-cluster"
     else:
         source = "config"
-    return HostContext(host_list=host_list, cluster_mgr=cluster_mgr, cluster=cluster_cfg, source=source)
+    return HostContext(host_list=host_list, cluster_mgr=cluster_mgr, cluster=cluster_cfg, source=source, cluster_def=cluster_def)
+
+
+def _load_cluster_or_exit(cluster_mgr, name: str) -> ClusterDefinition:
+    """Load cluster *name*, turning an unreadable definition into a usage error."""
+    from yaml import YAMLError
+    from sparkrun.core.cluster_manager import ClusterError
+
+    try:
+        return cluster_mgr.get(name)
+    except (ClusterError, OSError, ValueError, TypeError, YAMLError) as exc:
+        raise click.ClickException("Cannot load cluster '%s': %s" % (name, exc)) from None
 
 
 def _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, v=None, sctx: SparkrunContext | None = None):
@@ -578,14 +607,19 @@ def with_host_context(func):
 
     Reads ``hosts``, ``hosts_file``, and ``cluster_name`` from the Click
     kwargs already present (supplied by :func:`host_options`), calls
-    :func:`_resolve_hosts_or_exit`, and injects the results as additional
+    :func:`resolve_host_context`, and injects the results as additional
     keyword arguments:
 
-    - ``host_list``   — resolved list of host strings
-    - ``cluster_mgr`` — :class:`ClusterManager` instance
+    - ``host_list``    — resolved list of host strings
+    - ``cluster_mgr``  — :class:`ClusterManager` instance
+    - ``host_context`` — the full :class:`HostContext` (effective cluster name
+      and loaded definition), only when the function declares a
+      ``host_context`` parameter or accepts ``**kwargs``
 
     The decorated function must accept ``**kwargs`` or declare ``host_list``
-    and ``cluster_mgr`` as explicit keyword parameters.
+    and ``cluster_mgr`` as explicit keyword parameters.  Commands that forward
+    a cluster to the api layer use ``host_context.cluster_def`` rather than
+    re-resolving "the named or default cluster" themselves.
 
     Usage::
 
@@ -595,6 +629,11 @@ def with_host_context(func):
         def my_cmd(hosts, hosts_file, cluster_name, host_list, cluster_mgr):
             ...
     """
+
+    import inspect
+
+    params = inspect.signature(func).parameters
+    wants_context = "host_context" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -625,9 +664,11 @@ def with_host_context(func):
 
                 config = SparkrunConfig()
 
-        host_list, cluster_mgr = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, sctx=sctx)
-        kwargs["host_list"] = host_list
-        kwargs["cluster_mgr"] = cluster_mgr
+        hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx=sctx)
+        kwargs["host_list"] = hctx.host_list
+        kwargs["cluster_mgr"] = hctx.cluster_mgr
+        if wants_context:
+            kwargs["host_context"] = hctx
         return func(*args, **kwargs)
 
     return wrapper

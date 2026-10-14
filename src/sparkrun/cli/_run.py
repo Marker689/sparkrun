@@ -40,7 +40,7 @@ from ._common import (
     _render_capacity_diagnostics,
     recipe_override_options,
     report_launch_validation,
-    resolve_cluster_config,
+    HostContext,
     with_host_context,
     HIDE_ADVANCED_OPTIONS,
 )
@@ -315,6 +315,7 @@ def run(
     extra_args,
     *,
     host_list: list[str],
+    host_context: HostContext,
     cluster_mgr=None,
 ):
     """Run an inference recipe.
@@ -357,18 +358,12 @@ def run(
     if solo:
         click.echo("Notice: --solo flag is not recommended; it is better to explicitly specify parallelism via e.g. --tp 1", err=True)
 
-    # Resolve the named cluster definition when one is in play.  Carries
-    # per-host hardware metadata so downstream code can compute placement,
-    # fit, and per-host backend selection. Explicit hosts can restrict a
-    # named cluster without discarding its identity or settings.
-    cluster_def = None
-    if cluster_mgr is not None and (cluster_name or (not hosts and not hosts_file)):
-        _name = cluster_name or cluster_mgr.get_default()
-        if _name:
-            try:
-                cluster_def = cluster_mgr.get(_name)
-            except Exception:
-                cluster_def = None
+    # The effective (named or default) cluster definition, loaded once by
+    # ``with_host_context``.  Carries per-host hardware metadata so downstream
+    # code can compute placement, fit, and per-host backend selection. Explicit
+    # hosts can restrict a named cluster without discarding its identity or
+    # settings.
+    cluster_def = host_context.cluster_def
 
     # Find and load recipe (defer resolution until overrides are built).
     # Retry after a registry refresh when the recipe isn't found, so that
@@ -456,7 +451,7 @@ def run(
 
     # Resolve cache dir, transfer mode, and transfer interface from cluster
     # config.  Independent of placement, so it can precede the plan.
-    cluster_cfg = resolve_cluster_config(cluster_name, hosts, hosts_file, cluster_mgr)
+    cluster_cfg = host_context.cluster
     local_cache_dir, remote_cache_dir, effective_transfer_mode, effective_transfer_interface = cluster_cfg.resolve_transfer_config(
         config, transfer_mode_override=transfer_mode
     )

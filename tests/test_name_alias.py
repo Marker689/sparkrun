@@ -19,7 +19,13 @@ def test_run_with_name_override(monkeypatch):
     monkeypatch.setattr("sparkrun.core.launcher.launch_inference", mock_launch)
 
     monkeypatch.setattr("sparkrun.core.launcher.post_launch_lifecycle", MagicMock())
-    monkeypatch.setattr("sparkrun.cli._common._resolve_hosts_or_exit", lambda *args, **kwargs: (["localhost"], None))
+    from sparkrun.cli._common import HostContext
+    from sparkrun.core.cluster_manager import ResolvedClusterConfig
+
+    monkeypatch.setattr(
+        "sparkrun.cli._common.resolve_host_context",
+        lambda *args, **kwargs: HostContext(host_list=["localhost"], cluster_mgr=None, cluster=ResolvedClusterConfig()),
+    )
     mock_recipe = MagicMock()
     mock_recipe.readiness = {}
     mock_recipe.runtime = "vllm"
@@ -44,11 +50,6 @@ def test_run_with_name_override(monkeypatch):
     mock_recipe.executor = ""
     mock_recipe.build_config_chain.return_value = {"port": 8000}
     monkeypatch.setattr("sparkrun.cli._run._load_recipe", lambda *args, **kwargs: (mock_recipe, "path", None))
-
-    mock_ret = MagicMock()
-    mock_ret.topology = None
-    mock_ret.resolve_transfer_config.return_value = (None, None, None, None)
-    monkeypatch.setattr("sparkrun.cli._run.resolve_cluster_config", lambda *args, **kwargs: mock_ret)
 
     mock_runtime = MagicMock()
     mock_runtime.native_apis.return_value = []

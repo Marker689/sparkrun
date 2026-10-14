@@ -6558,6 +6558,14 @@ class TestRegistryTrustCli:
         assert "no" in un_line
 
 
+def _host_context(host_list, cluster_mgr, cluster_def=None):
+    from sparkrun.cli._common import HostContext
+    from sparkrun.core.cluster_manager import ResolvedClusterConfig
+
+    cfg = ResolvedClusterConfig.from_definition(cluster_def) if cluster_def is not None else ResolvedClusterConfig()
+    return HostContext(host_list=list(host_list), cluster_mgr=cluster_mgr, cluster=cfg, cluster_def=cluster_def)
+
+
 class TestWithHostContext:
     """Unit tests for the @with_host_context decorator."""
 
@@ -6573,8 +6581,8 @@ class TestWithHostContext:
             captured["cluster_mgr"] = cluster_mgr
 
         monkeypatch.setattr(
-            "sparkrun.cli._common._resolve_hosts_or_exit",
-            lambda *args, **kwargs: (["10.0.0.1", "10.0.0.2"], object()),
+            "sparkrun.cli._common.resolve_host_context",
+            lambda *args, **kwargs: _host_context(["10.0.0.1", "10.0.0.2"], object()),
         )
 
         dummy(hosts="10.0.0.1,10.0.0.2", hosts_file=None, cluster_name=None)
@@ -6587,10 +6595,10 @@ class TestWithHostContext:
         from sparkrun.cli._common import with_host_context
 
         def _mock_resolve(*args, **kwargs):
-            # Simulate the exit that _resolve_hosts_or_exit does on no hosts
+            # Simulate the exit that resolve_host_context does on no hosts
             raise SystemExit(1)
 
-        monkeypatch.setattr("sparkrun.cli._common._resolve_hosts_or_exit", _mock_resolve)
+        monkeypatch.setattr("sparkrun.cli._common.resolve_host_context", _mock_resolve)
 
         @with_host_context
         def dummy(hosts=None, hosts_file=None, cluster_name=None, host_list=None, cluster_mgr=None):
@@ -6623,8 +6631,8 @@ class TestWithHostContext:
             captured["host_list"] = host_list
 
         monkeypatch.setattr(
-            "sparkrun.cli._common._resolve_hosts_or_exit",
-            lambda *args, **kwargs: (["localhost"], None),
+            "sparkrun.cli._common.resolve_host_context",
+            lambda *args, **kwargs: _host_context(["localhost"], None),
         )
 
         dummy(hosts="localhost", hosts_file=None, cluster_name=None, dry_run=True)
