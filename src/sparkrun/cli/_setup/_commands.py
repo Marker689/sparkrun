@@ -1219,8 +1219,6 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
 
       {app_command} setup cx7 --cluster mylab --topology ring
 
-      {app_command} setup cx7 --cluster mylab --subnet1 192.168.11.0/24 --subnet2 192.168.12.0/24
-
       {app_command} setup cx7 --cluster mylab --force
 
       {app_command} setup cx7 --cluster two --interfaces '*np1'   # pin a port pair

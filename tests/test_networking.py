@@ -640,8 +640,9 @@ class TestSetupCX7CLI:
         assert "--dry-run" in result.output
         assert "--force" in result.output
         assert "--mtu" in result.output
-        assert "--subnet1" in result.output
-        assert "--subnet2" in result.output
+        # Hidden overrides: accepted, never advertised (help or examples).
+        assert "--subnet1" not in result.output
+        assert "--subnet2" not in result.output
         assert "CX7" in result.output
 
     def test_no_hosts_error(self, runner, v):

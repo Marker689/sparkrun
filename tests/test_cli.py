@@ -200,7 +200,8 @@ class TestVersionAndHelp:
         result = runner.invoke(main, ["run", "--help"])
         assert result.exit_code == 0
         assert "Run an inference recipe" in result.output
-        assert "--solo" in result.output
+        assert "--solo" not in result.output  # hidden; --tp 1 is the advertised spelling
+        assert "--tp 1" in result.output
         assert "--hosts" in result.output
         assert "--dry-run" in result.output
         assert "--cluster-id" not in result.output

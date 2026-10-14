@@ -323,7 +323,7 @@ def run(
 
     Examples:
 
-      {app_command} run glm-4.7-flash-awq --solo
+      {app_command} run glm-4.7-flash-awq --tp 1
 
       {app_command} run glm-4.7-flash-awq --hosts 192.168.11.13,192.168.11.14
 
