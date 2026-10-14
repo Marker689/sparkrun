@@ -52,6 +52,12 @@ EXCLUSIONS = {
     "proxy.ui": "May issue a credential-bearing URL; use the local proxy ui command.",
     "setup.install_public_key_interactive": "Requires a terminal-owned ssh-copy-id/password conversation; use setup in a terminal.",
     "setup.rotate_ssh_host_keys": "Host-identity rotation has no wire operation; use the confirmed setup ssh-rotate-keys CLI or Python API.",
+    "setup.plan_cx7": "Experimental; reports progress and asks for a topology through Python callbacks. Use setup cx7 or the Python API.",
+    "setup.apply_cx7": "Experimental; applies a live Cx7Plan with caller-collected sudo credentials. Use setup cx7 or the Python API.",
+    "setup.save_cx7_topology": "Experimental; takes a live Cx7Plan and is applied by apply_cx7.",
+    "setup.validate_cx7_options": "Pure option check that plan_cx7 applies itself.",
+    "setup.diagnose_ssh": "Requires a terminal-owned ssh password conversation; use setup ssh --diagnose in a terminal.",
+    "setup.find_local_public_key": "Reads the caller's own ssh configuration; diagnose_ssh reports the result.",
 }
 K8S_OPERATIONS = {
     name: "plugins.k8s." + name

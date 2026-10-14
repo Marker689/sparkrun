@@ -39,12 +39,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 from sparkrun.api.setup._errors import SetupFailed
+from sparkrun.orchestration.networking import CX7Topology
 
 if TYPE_CHECKING:
     import ipaddress
 
     from sparkrun.core.cluster_manager import ClusterManager
-    from sparkrun.orchestration.networking import CX7ClusterPlan, CX7HostDetection, CX7HostPlan, CX7Topology, CX7TopologyResult
+    from sparkrun.orchestration.networking import CX7ClusterPlan, CX7HostDetection, CX7HostPlan, CX7TopologyResult
     from sparkrun.orchestration.ssh import RemoteResult
     from sparkrun.orchestration.sudo import SudoPasswords
 
@@ -95,7 +96,7 @@ class Cx7Plan:
     #: than read from the cluster, so applying the plan saves it.
     interfaces_explicit: bool = False
     requested_topology: str = "auto"
-    topology: CX7Topology | None = None
+    topology: CX7Topology = CX7Topology.SWITCH
     topology_source: str = TOPOLOGY_DEFAULT
     topology_result: CX7TopologyResult | None = None
     subnets: list[ipaddress.IPv4Network] = field(default_factory=list)
@@ -115,8 +116,6 @@ class Cx7Plan:
     @property
     def topology_ambiguous(self) -> bool:
         """Auto on two hosts cannot tell a direct cable from a switch at L2."""
-        from sparkrun.orchestration.networking import CX7Topology
-
         return self.topology == CX7Topology.SWITCH and self.requested_topology == "auto" and len(self.hosts_with_cx7) <= 2
 
     @property
@@ -348,10 +347,10 @@ def plan_cx7(
     ring_eligible = len(hosts_with_cx7) == 3 and all(
         len(net._group_interfaces_by_port(d.interfaces)) >= net.RING_MIN_PHYSICAL_PORTS for d in hosts_with_cx7.values()
     )
-    plan.topology = net.CX7Topology.SWITCH
+    plan.topology = CX7Topology.SWITCH
     saved = _cluster_attr(cluster_manager, plan.cluster_name, "topology") if use_saved_topology else None
-    if saved in {t.value for t in net.CX7Topology} - {net.CX7Topology.UNKNOWN.value}:
-        plan.topology = net.CX7Topology(saved)
+    if saved in {t.value for t in CX7Topology} - {CX7Topology.UNKNOWN.value}:
+        plan.topology = CX7Topology(saved)
         plan.topology_source = TOPOLOGY_SAVED
         emit(CX7_EVENT_SAVED_TOPOLOGY)
     elif topology == "ring":
@@ -363,15 +362,15 @@ def plan_cx7(
             err = net.ring_ports_error(h, net.filter_cx7_interfaces(det.interfaces, plan.interfaces))
             if err:
                 raise Cx7PlanError(err)
-        plan.topology = net.CX7Topology.RING
+        plan.topology = CX7Topology.RING
         plan.topology_source = TOPOLOGY_REQUESTED
     elif topology in ("direct", "switch"):
-        plan.topology = net.CX7Topology(topology)
+        plan.topology = CX7Topology(topology)
         plan.topology_source = TOPOLOGY_REQUESTED
     elif ring_eligible:
         choice = choose_topology() if choose_topology is not None else "auto"
         if choice in ("ring", "switch"):
-            plan.topology = net.CX7Topology(choice)
+            plan.topology = CX7Topology(choice)
             plan.topology_source = TOPOLOGY_CHOSEN
         else:
             emit(CX7_EVENT_DETECTING_TOPOLOGY)
@@ -382,9 +381,9 @@ def plan_cx7(
     # else: two hosts (or no second port) cannot be told apart from a switch
     # at L2 without LLDP; `topology="direct"` overrides.
 
-    if plan.topology == net.CX7Topology.RING and plan.topology_result is None:
+    if plan.topology == CX7Topology.RING and plan.topology_result is None:
         if dry_run:
-            plan.topology_result = net.CX7TopologyResult(topology=net.CX7Topology.RING)
+            plan.topology_result = net.CX7TopologyResult(topology=CX7Topology.RING)
         else:
             emit(CX7_EVENT_RING_DETECTING)
             plan.topology_result = discover()
@@ -392,7 +391,7 @@ def plan_cx7(
 
     # ── Subnets + plan ──
     try:
-        if plan.topology == net.CX7Topology.RING:
+        if plan.topology == CX7Topology.RING:
             plan.subnets = net.select_subnets_for_topology(plan.detections, plan.topology)
         else:
             plan.subnets = list(net.select_subnets(plan.detections, override1=subnet1, override2=subnet2))
@@ -400,7 +399,7 @@ def plan_cx7(
         raise Cx7PlanError(str(e)) from e
     emit(CX7_EVENT_SUBNETS)
 
-    if plan.topology == net.CX7Topology.RING:
+    if plan.topology == CX7Topology.RING:
         if plan.topology_result is None:
             raise Cx7PlanError("Ring topology requires detected link information")
         plan.cluster_plan = net.plan_ring_cx7(
@@ -426,13 +425,11 @@ def save_cx7_topology(
     for an ``unknown`` topology. Never raises; a write error is reported in
     :attr:`Cx7TopologySave.error`.
     """
-    from sparkrun.orchestration.networking import CX7Topology
-
-    topo = plan.topology.value if plan.topology is not None else None
+    topo = plan.topology.value
     result = Cx7TopologySave(cluster_name=plan.cluster_name, topology=topo, failed_hosts=failed)
     # A partial apply is not a topology: saving it would report the fabric
     # as configured to everything that reads the cluster afterwards.
-    if result.refused or dry_run or not plan.cluster_name or plan.topology in (None, CX7Topology.UNKNOWN):
+    if result.refused or dry_run or not plan.cluster_name or plan.topology == CX7Topology.UNKNOWN:
         return result
     try:
         mgr = cluster_manager if cluster_manager is not None else _default_cluster_manager()
