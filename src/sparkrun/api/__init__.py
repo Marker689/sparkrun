@@ -120,7 +120,7 @@ from sparkrun.api._models import (
 )
 from sparkrun.api._realize import RealizedRecipe, realize_recipe
 from sparkrun.api._recipes import resolve_recipe_filter, search_recipes
-from sparkrun.api._run import plan, run
+from sparkrun.api._run import plan, run, untrusted_hooks
 from sparkrun.api._schedule import schedule
 from sparkrun.api._status import status, status_report
 from sparkrun.api._stop import stop
@@ -255,6 +255,7 @@ __all__ = [
     "LiveMonitorSession",
     "list_jobs",
     "find_running_intent",
+    "untrusted_hooks",
     "search_recipes",
     "resolve_recipe_filter",
     "validate_recipe",

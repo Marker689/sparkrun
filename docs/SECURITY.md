@@ -12,7 +12,8 @@ entry (see `RegistryEntry.trusted` in `core/registry.py`).
 A recipe is **trusted** when any of the following holds (see
 `core/launcher.py:resolve_recipe_trust`):
 
-1. The user passed `--trust` on the CLI (hidden flag, default off).
+1. The user passed `--trust` on the CLI (default off), or answered yes to the
+   interactive trust prompt (see below).
 2. The recipe was loaded from a locally authored path, with no `source_registry`
    recorded and no external-source flag. This includes `./recipes/` and
    `~/.config/sparkrun/recipes/`.
@@ -78,11 +79,27 @@ registry whose name cannot be resolved against the local `registries.yaml`.
 
 ## What trust gates
 
-`api.run()` rejects untrusted recipes containing `pre_exec`, `post_exec`, or
-`post_commands` before preparation or replacement. Frontends provide explicit
-authorization with `RunOptions(trust=True)`; the CLI exposes `--trust`.
-`api.benchmark()` passes this authorization through when launching inference. These
-API paths do not prompt through Click. See the [migration guide](DISTRIBUTION_API_MIGRATION.md).
+`api.run()` rejects untrusted recipes containing `pre_exec`, `mods`, `post_exec`,
+or `post_commands` before preparation or replacement (`mods` become `pre_exec`
+entries during the launch, so they are gated with the hooks). Frontends provide
+explicit authorization with `RunOptions(trust=True)`; `api.untrusted_hooks(recipe)`
+returns what would be refused, so a frontend can ask first. A dry run is not
+refused: nothing executes, so it logs which hooks a real run would need authorized.
+These API paths do not prompt through Click. See the
+[migration guide](DISTRIBUTION_API_MIGRATION.md).
+
+The verdict is decided once per launch, in `api.run`, and threaded through
+`launch_inference` (`recipe_trusted`) to the `LaunchResult`, so `pre_exec`,
+`post_exec` and `post_commands` cannot disagree. A direct `launch_inference`
+caller that supplies no verdict has it resolved and confirmed before any side
+effect, in particular before `before_start` evicts the deployment being replaced.
+
+`run`, `proxy load` and `benchmark` ask on an interactive terminal: they list the
+hooks (first line of each command, mod names) and prompt `y/N`, default No; yes is
+`--trust` for that launch, which also honours the recipe's host-path and executor
+settings below. A non-interactive session is refused with a message naming
+`--trust`. `api.benchmark()` asks through its `recipe_trust` decision (declined
+without a callback) and passes the answer through when launching inference.
 
 For trusted recipes, `pre_exec` runs in the workload before serving, `post_exec`
 runs in the workload after readiness, and `post_commands` runs on the controller.
@@ -279,7 +296,7 @@ logs.
 
 When adding a third-party registry:
 
-1. Inspect `recipes/*.yaml` for `pre_exec`, `post_exec`, `post_commands`,
+1. Inspect `recipes/*.yaml` for `pre_exec`, `mods`, `post_exec`, `post_commands`,
    `executor_config.cap_add`, `devices`, `security_opt`.
 2. Confirm the registry URL matches one of the approved schemes
    (`https://...`, `git@...`, `ssh://...`, `file://...`).

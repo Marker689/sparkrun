@@ -92,12 +92,43 @@ class LaunchResult:
     """Exact compilation-cache mount plan used for launch, retained for hooks."""
     hook_launch_context: HookLaunchContext | None = None
     """Runtime snapshot including final volumes; older/provider launches may omit it."""
+    recipe_trusted: bool | None = None
+    """The hook trust verdict this launch ran under, reused by the post-launch
+    hooks so pre_exec and post_exec/post_commands decide once.  ``None`` when
+    the producer recorded none (the post-launch path then resolves it)."""
+
+
+#: Recipe surfaces that execute commands, in the order a launch runs them.
+#: ``mods`` become ``pre_exec`` entries during the launch, so they are gated
+#: with the hooks rather than after the fact.
+RECIPE_HOOK_KINDS = ("pre_exec", "mods", "post_exec", "post_commands")
+
+
+def recipe_hook_commands(recipe: Recipe) -> dict[str, tuple[str, ...]]:
+    """Return the recipe's hook commands by kind, omitting empty kinds.
+
+    ``pre_exec`` copy entries are rendered as ``copy SRC -> DEST`` so the
+    result is displayable as text.
+    """
+    from sparkrun.utils.text import coerce_command_list
+
+    hooks: dict[str, tuple[str, ...]] = {}
+    for kind in RECIPE_HOOK_KINDS:
+        entries = []
+        for entry in coerce_command_list(getattr(recipe, kind, None)):
+            if isinstance(entry, dict) and "copy" in entry:
+                entries.append("copy %s -> %s" % (entry.get("copy"), entry.get("dest", "<default>")))
+            else:
+                entries.append(str(entry))
+        if entries:
+            hooks[kind] = tuple(entries)
+    return hooks
 
 
 def resolve_recipe_trust(
     recipe: Recipe, trust_cli: bool, *, registry_entry: RegistryEntry | None = None, sctx: SparkrunContext | None = None
 ) -> bool:
-    """Decide whether recipe hooks (pre_exec/post_exec/post_commands) are trusted.
+    """Decide whether recipe hooks (pre_exec/mods/post_exec/post_commands) are trusted.
 
     A recipe is trusted when any of these hold:
 
@@ -1047,11 +1078,14 @@ def launch_inference(
     # uses it verbatim; when ``None``, the runtime recomputes locally
     # for back-compat with callers that haven't been threaded yet.
     placement=None,
-    # When True, suppress the interactive confirmation prompt for
-    # recipe-defined pre_exec hooks (and post_exec/post_commands run in
-    # post_launch_lifecycle).  CLI flag --trust + local/official-registry
-    # recipes set this to True via resolve_recipe_trust().
+    # Explicit authorization for recipe hooks (pre_exec / mods here,
+    # post_exec / post_commands in post_launch_lifecycle) and host-path
+    # overrides; folded into the verdict by resolve_recipe_trust().
     trust: bool = False,
+    # The caller's already-decided trust verdict (``sparkrun.api.run`` resolves
+    # it once, with its own context).  ``None`` resolves it here.  Carried on
+    # the LaunchResult so the post-launch hooks reuse the same decision.
+    recipe_trusted: bool | None = None,
     # Called once, immediately before the runtime starts containers — after
     # every step that can fail cheaply (distribution, model download, tuning)
     # has succeeded.  ``sparkrun.api.run`` uses it to evict the deployments
@@ -1216,15 +1250,29 @@ def launch_inference(
     if p:
         p.phase(1)
 
-    # Resolve the recipe-wide trust flag once so pre_exec (here) and
-    # post_exec/post_commands (post_launch_lifecycle) make the same
-    # decision for the same recipe.
-    recipe_trusted = resolve_recipe_trust(recipe, trust)
+    # One trust verdict per launch, shared by pre_exec / mods (here) and
+    # post_exec / post_commands (post_launch_lifecycle, via the LaunchResult).
+    if recipe_trusted is None:
+        recipe_trusted = resolve_recipe_trust(recipe, trust, sctx=sctx)
+    recipe_trusted = bool(recipe_trusted)
 
     # Security: host-path overrides let a recipe grant the container access to
     # arbitrary host paths.  Untrusted (registry/URL-sourced) recipes must not
     # be able to do this — fail closed before any of them is applied.
     _enforce_recipe_mount_trust(recipe, recipe_trusted)
+
+    # Untrusted hooks are decided *now*, before any side effect and above all
+    # before ``before_start`` evicts the deployment this launch replaces: a
+    # confirmation declined after eviction would leave neither running.
+    # ``api.run`` refuses before reaching here; this covers direct callers.
+    if not recipe_trusted and not dry_run:
+        untrusted_hooks = recipe_hook_commands(recipe)
+        if untrusted_hooks:
+            from sparkrun.orchestration.hooks import _confirm_hook_execution
+
+            for kind, commands in untrusted_hooks.items():
+                _confirm_hook_execution(kind, commands, False)
+            recipe_trusted = True
 
     # Internal recipe escape hatch: ``cluster_config`` launch overrides
     # (undocumented).  Applied at this single launch choke point so both the
@@ -1904,6 +1952,7 @@ def launch_inference(
             builder=builder,
             backends=backends,
             timeline=timeline,
+            recipe_trusted=recipe_trusted,
         )
 
     for host_executor in host_executors.values():
@@ -2186,6 +2235,7 @@ def launch_inference(
         timeline=timeline,
         runtime_cache=runtime_cache_mounts,
         hook_launch_context=hook_launch_contexts[0] if hook_launch_contexts else None,
+        recipe_trusted=recipe_trusted,
     )
 
 
@@ -2677,10 +2727,12 @@ def complete_post_launch(
         base_url=hook_context.get("base_url", ""),
     )
 
-    # Resolve trust once for both post_exec (inside head container) and
-    # post_commands (on control machine).  Same gate as the pre_exec
-    # decision computed in launch_inference().
-    _is_trusted = resolve_recipe_trust(recipe, trust)
+    # The verdict launch_inference() decided for pre_exec, so post_exec (in the
+    # head container) and post_commands (on this machine) cannot disagree with
+    # it.  Results that carry none (provider launches, older producers) resolve.
+    _is_trusted = trust or (
+        result.recipe_trusted if getattr(result, "recipe_trusted", None) is not None else resolve_recipe_trust(recipe, trust)
+    )
 
     try:
         # Run post_exec inside head container

@@ -103,6 +103,17 @@ def test_cli_overrides_are_baked_in(tmp_path, v, planned):
     assert realized.recipe["defaults"]["max_model_len"] == 4096
 
 
+def test_executor_overrides_are_not_baked_in_as_serve_flags(tmp_path, v, planned):
+    """``-o entrypoint=''`` configures the container; written into ``defaults``
+    it would be an unmapped serve flag in the realized recipe."""
+    import sparkrun.api as api
+
+    realized = api.realize_recipe(_options(tmp_path, overrides={"entrypoint": "", "shm_size": "8g", "max_model_len": 4096}), pin=False)
+    assert realized.recipe["defaults"]["max_model_len"] == 4096
+    assert "entrypoint" not in realized.recipe["defaults"]
+    assert "shm_size" not in realized.recipe["defaults"]
+
+
 def test_realized_recipe_loads_with_the_same_effective_config(tmp_path, v, planned):
     import sparkrun.api as api
 

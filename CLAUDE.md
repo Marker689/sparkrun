@@ -498,10 +498,19 @@ enabled. Default-off flags stay omitted, so an image predating the `--no-` spell
 never sees one.
 
 **Trust gating** (`launcher.py:resolve_recipe_trust`): each launch resolves a
-single trust verdict shared by `pre_exec` (inside `runtime.run()`) and
-`post_exec` / `post_commands` (inside `post_launch_lifecycle`). Local recipes
-and default-registry recipes are auto-trusted; third-party registry recipes
-prompt unless `--trust` is passed. See `docs/SECURITY.md`.
+single trust verdict, **in `api.run`** (with its sctx), and threads it through
+`launch_inference(recipe_trusted=)` to `LaunchResult.recipe_trusted`, which
+`complete_post_launch` / `api.post_launch` reuse — so `pre_exec` (and `mods`,
+which become pre_exec entries mid-launch) and `post_exec` / `post_commands`
+cannot disagree. Local recipes and default-registry recipes are auto-trusted.
+`api.run` *refuses* untrusted hooks (`TrustRejected`) before preparation; a
+dry run is not refused, it logs what would need authorizing. The CLI (`run`,
+`proxy load`, `benchmark` via its `recipe_trust` decision) asks first through
+`cli/_common.py:authorize_recipe_hooks` over `api.untrusted_hooks`: y/N on a
+TTY, refusal naming `--trust` otherwise. A direct `launch_inference` caller
+without a verdict is confirmed in phase 1 — **before `before_start` can evict**
+the deployment being replaced; a refusal after eviction leaves neither running.
+See `docs/SECURITY.md`.
 
 **Backend bundle**: `RuntimePlugin.run()` accepts a keyword-only
 `backends: dict[str, BackendBundle] | None` resolved by
@@ -1679,9 +1688,12 @@ auto-clearing: the probe proves clearing *works*, not that it's *harmless*.
 otherwise it would reject the very fix it recommends. One host is probed (the
 verdict is a property of the image; distribution already established it matches
 everywhere), ~0.7s for the passthrough case. Fail-open throughout; kill switch
-`SPARKRUN_NO_IMAGE_PROBE=1`. `entrypoint` is in `cli/_run.py`'s
-`_EXECUTOR_OVERRIDE_KEYS`, which is what makes `-o entrypoint=''` reach
-`ExecutorConfig` instead of the serve command.
+`SPARKRUN_NO_IMAGE_PROBE=1`. `entrypoint` is in
+`core/resolve.py:EXECUTOR_OVERRIDE_KEYS`, which `RunOptions.__post_init__` lifts
+out of `overrides` into `executor_config` — at the API boundary, so `run`,
+`benchmark`, `proxy load`, `export recipe --realize` and library callers all route
+`-o entrypoint=''` to `ExecutorConfig` instead of the serve command (it used to be
+split in `cli/_run.py` only, so every other path reported it unmapped and dropped it).
 
 ### Live monitoring (telemetry + occupancy)
 

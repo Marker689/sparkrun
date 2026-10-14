@@ -121,9 +121,11 @@ class BenchmarkDecision:
 
     Kinds: ``resume_incomplete`` (accept resumes; decline starts fresh),
     ``remeasure_complete`` (accept starts fresh; decline reuses measurements),
-    and ``integration_confirmation`` (accept continues the integration).
-    No callback means use ``default``. Recipe trust uses ``trust`` and is
-    separate from these decisions.
+    ``integration_confirmation`` (accept continues the integration), and
+    ``recipe_trust`` (asked only when ``trust`` is False and the recipe has
+    hooks from an untrusted source; ``message`` lists them; accept runs them,
+    decline fails the benchmark before launch).
+    No callback means use ``default``.
     """
 
     kind: str

@@ -25,6 +25,49 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: ``-o key=value`` keys that configure the *executor* rather than the serve
+#: command.  :func:`split_executor_overrides` lifts them out of a launch's
+#: overrides into its executor config at the API boundary (``RunOptions``), so
+#: every frontend (``run``, ``benchmark``, ``proxy load``, ``export recipe
+#: --realize``, library callers) honors them.  Left in the overrides they would
+#: be reported as unmapped serve flags and dropped.
+EXECUTOR_OVERRIDE_KEYS = frozenset(
+    {
+        "auto_remove",
+        "restart_policy",
+        "privileged",
+        "gpus",
+        "ipc",
+        "shm_size",
+        "network",
+        "user",
+        "security_opt",
+        "cap_add",
+        "ulimit",
+        "devices",
+        "memory_limit",
+        # ``-o entrypoint=''`` clears a consuming image ENTRYPOINT (one that
+        # parses sparkrun's appended ``bash -c`` as its own flags) without
+        # having to fork a third-party recipe just to add two lines of
+        # executor_config.  Empty string is the meaningful value here and
+        # survives ``coerce_value``; see ExecutorConfig.entrypoint.
+        "entrypoint",
+    }
+)
+
+
+def split_executor_overrides(overrides) -> tuple[dict, dict]:
+    """Split *overrides* into ``(serve_overrides, executor_overrides)``.
+
+    Keys in :data:`EXECUTOR_OVERRIDE_KEYS` go to the second mapping.  The input
+    is not modified.
+    """
+    serve: dict = {}
+    executor: dict = {}
+    for key, value in (overrides or {}).items():
+        (executor if key in EXECUTOR_OVERRIDE_KEYS else serve)[key] = value
+    return serve, executor
+
 
 def apply_recipe_overrides(
     options,
@@ -208,4 +251,4 @@ def load_recipe(
     return recipe, recipe_path, registry_mgr
 
 
-__all__ = ["apply_recipe_overrides", "load_recipe"]
+__all__ = ["EXECUTOR_OVERRIDE_KEYS", "apply_recipe_overrides", "load_recipe", "split_executor_overrides"]

@@ -192,3 +192,15 @@ def test_proxy_load_reports_registration_failure_after_loading(load_env, error_t
     assert "Model loaded:" in result.stdout
     assert "Error: provider unavailable" in result.stderr
     load_env.registration.assert_called_once()
+
+
+def test_proxy_load_routes_executor_overrides_to_the_executor(load_env):
+    """``-o entrypoint=''`` configures the container on ``proxy load`` too, rather
+    than reaching the serve command (and the registration) as a flag."""
+    env = load_env
+    result = CliRunner().invoke(main, ["proxy", "load", str(env.recipe), "-o", "entrypoint=", "-o", "max_model_len=4096"])
+    assert result.exit_code == 0, result.output
+    launch = env.calls[0]
+    assert launch["executor_config"]["entrypoint"] == ""
+    assert "entrypoint" not in launch["overrides"]
+    assert "entrypoint" not in env.registration.call_args.kwargs["overrides"]

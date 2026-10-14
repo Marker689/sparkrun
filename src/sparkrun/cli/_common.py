@@ -752,6 +752,57 @@ def report_launch_validation(recipe_ref: str, issues, failed: bool) -> None:
         click.echo("\nNothing above blocks the launch. Continuing.", err=True)
 
 
+def confirm_untrusted_hooks(summary: str) -> bool:
+    """Show a hook *summary* and ask y/N (default No).
+
+    The one trust prompt shared by ``run``, ``proxy load`` and ``benchmark``.
+    Returns ``False`` without asking when stdin is not a TTY; the caller
+    decides what refusing means.  *summary* comes from
+    :func:`sparkrun.utils.text.format_hook_summary`.
+    """
+    if not sys.stdin.isatty():
+        return False
+    click.echo(summary, err=True)
+    return click.confirm("Trust this recipe and run them?", default=False, err=True)
+
+
+def authorize_recipe_hooks(recipe, *, trust: bool, dry_run: bool, sctx=None) -> bool:
+    """Decide the ``trust`` a launch runs with, asking when hooks need it.
+
+    The library refuses untrusted hooks (``pre_exec``, ``mods``,
+    ``post_exec``, ``post_commands``) rather than prompting, so the CLI asks
+    first.  ``--trust`` and trusted sources pass through untouched; a dry run
+    only reports, since nothing executes.  Otherwise an interactive session is
+    asked (default No) and a non-interactive one is refused with a pointer at
+    ``--trust``.  Returns the ``trust`` value to launch with.
+    """
+    import sparkrun.api as api
+
+    if trust:
+        return True
+    hooks = api.untrusted_hooks(recipe, sctx=sctx)
+    if not hooks:
+        return False
+    label = getattr(recipe, "qualified_name", None) or getattr(recipe, "name", None) or "recipe"
+    if dry_run:
+        click.echo(
+            "Note: '%s' is not from a trusted source; a real run would ask before running its %s (or pass --trust)."
+            % (label, ", ".join(hooks)),
+            err=True,
+        )
+        return False
+    if not sys.stdin.isatty():
+        raise click.ClickException(
+            "Recipe '%s' is not from a trusted source and runs hooks (%s), and this session is not interactive. "
+            "Audit the recipe, then re-run with --trust." % (label, ", ".join(hooks))
+        )
+    from sparkrun.utils.text import format_hook_summary
+
+    if not confirm_untrusted_hooks(format_hook_summary(label, hooks)):
+        raise click.ClickException("Launch cancelled: the recipe's hooks were not authorized.")
+    return True
+
+
 def _display_vram_estimate(recipe, cli_overrides=None, auto_detect=True, cache_dir=None):
     """Display a standalone VRAM estimate (delegates to cli_formatters)."""
     from sparkrun.utils.cli_formatters import display_vram_estimate

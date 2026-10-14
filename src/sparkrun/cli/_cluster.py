@@ -1128,7 +1128,10 @@ def cluster_check_job(ctx, target, hosts, hosts_file, cluster_name, tp_override,
 
     TARGET can be a cluster ID (sparkrun_<hex>) or a recipe name.
 
-    Exit code 0 = running (and healthy if --check-health), 1 = not running or unhealthy.
+    A recipe matches whichever deployment of it is running on the cluster's
+    hosts, wherever the scheduler placed it.
+
+    Exit code 0 = running (and healthy if --check-http-models), 1 = not running or unhealthy.
 
     Examples:
 
@@ -1136,7 +1139,7 @@ def cluster_check_job(ctx, target, hosts, hosts_file, cluster_name, tp_override,
 
       {app_command} cluster check-job my-recipe --hosts 10.0.0.1,10.0.0.2
 
-      {app_command} cluster check-job my-recipe --cluster mylab --check-health
+      {app_command} cluster check-job my-recipe --cluster mylab --check-http-models
 
       {app_command} cluster check-job my-recipe --cluster mylab --json
     """
@@ -1184,49 +1187,39 @@ def cluster_check_job(ctx, target, hosts, hosts_file, cluster_name, tp_override,
         )
     else:
         # --- Recipe path ---
-        from sparkrun.cli._common import _load_recipe
-        from sparkrun.core.parallelism import extract_parallelism
-        from sparkrun.core.scheduler import SchedulingRequest
-        from sparkrun.orchestration.job_metadata import derive_cluster_id
+        # Matched on the launch *intent*, like ``run --ensure``: a cluster_id
+        # also encodes placement, and under an occupancy scheduler (random
+        # placement token) one derived here never matches the running job.
+        from sparkrun.api._resolve import resolve_cluster
+        from sparkrun.cli._common import _load_recipe, resolve_host_context
+        from sparkrun.orchestration.job_metadata import JobStatus, generate_intent_id, load_job_metadata
 
         recipe, _recipe_path, _registry_mgr = _load_recipe(config, target)
-        host_list, _ = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config, sctx=sctx)
-
-        # Derive the effective host list via the scheduler so the
-        # cluster_id matches what ``api.run`` would have produced.
-        # ``hosts_used`` IS the effective list — no separate trimming step.
-        trim_overrides: dict = {}
-        if tp_override is not None:
-            trim_overrides["tensor_parallel"] = tp_override
-        if len(host_list) > 1:
-            parallelism = extract_parallelism(recipe.build_config_chain(trim_overrides))
-            if any(getattr(parallelism, k) > 1 for k in ("tensor_parallel", "pipeline_parallel", "data_parallel")):
-                request = SchedulingRequest(
-                    parallelism=parallelism,
-                    hosts=tuple(host_list),
-                    host_hardware=None,
-                    layout=getattr(recipe, "layout", None),
-                    resources=None,
-                )
-                try:
-                    sched_result = api.schedule(request, sctx=sctx)
-                except api.SparkrunError as e:
-                    click.echo("Error: %s" % e, err=True)
-                    sys.exit(1)
-                host_list = list(sched_result.assignment.hosts_used)
-
-        # Build overrides for cluster_id generation
-        cid = derive_cluster_id(
-            recipe, host_list, overrides=build_cluster_id_overrides(port=port, served_model_name=served_model_name, tp_override=tp_override)
-        )
-        status = check_job_running(
-            cluster_id=cid,
-            hosts=host_list,
-            ssh_kwargs=ssh_kwargs,
-            cache_dir=str(config.cache_dir),
-            check_http_models=check_http_models,
-            port=port,
-        )
+        host_ctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx=sctx)
+        ssh_kwargs = build_ssh_kwargs(config)  # picks up the cluster's SSH user
+        intent_overrides = build_cluster_id_overrides(port=port, served_model_name=served_model_name, tp_override=tp_override)
+        intent_id = generate_intent_id(recipe, intent_overrides)
+        try:
+            cluster_def = resolve_cluster(host_ctx.cluster_name, host_ctx.host_list, sctx=sctx, config=config)
+        except (ValueError, api.SparkrunError) as e:
+            click.echo("Error: %s" % e, err=True)
+            sys.exit(1)
+        # The cluster's full host list: a deployment placed on any subset counts.
+        match = api.find_running_intent(intent_id, host_ctx.host_list, cluster=cluster_def, sctx=sctx)
+        if match is None:
+            status = JobStatus(running=False, cluster_id=intent_id, hosts=list(host_ctx.host_list))
+        else:
+            # Probe in launch order (head first) when the job recorded it; the
+            # match lists hosts in query order.
+            meta = load_job_metadata(match.workload_id, cache_dir=str(config.cache_dir))
+            status = check_job_running(
+                cluster_id=match.workload_id,
+                hosts=None if meta and meta.get("hosts") else list(match.hosts),
+                ssh_kwargs=ssh_kwargs,
+                cache_dir=str(config.cache_dir),
+                check_http_models=check_http_models,
+                port=port,
+            )
 
     # --- Output ---
     if output_json:

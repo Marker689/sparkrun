@@ -279,6 +279,28 @@ system, gateway registry, and execution-strategy extension points shipped in
   overrides too. A `-o` key such as `free_gpu_memory_fraction` added
   `--extra_llm_api_options` but never wrote the file when the recipe declared none of
   those keys, and was silently dropped when it did.
+- Security: `mods` from an untrusted recipe now need trust like `pre_exec` /
+  `post_exec` / `post_commands` (they become pre_exec entries during the launch, and
+  were not gated). The trust decision is made before anything runs, so a declined
+  confirmation can no longer come after the running deployment was already evicted,
+  and one verdict now covers every hook of a launch instead of being resolved three
+  times.
+- `run`, `proxy load` and `benchmark` ask before running an untrusted recipe's hooks
+  on an interactive terminal (y/N, default No, listing the hooks) and refuse with a
+  pointer at `--trust` otherwise. `run --trust` is no longer hidden and covers all
+  hooks; `proxy load` gains `--trust`. A `--dry-run` of such a recipe is no longer
+  refused; it reports which hooks would need trust. New `api.untrusted_hooks()`;
+  `BenchmarkDecision` gains the `recipe_trust` kind.
+- `cluster check-job <recipe>` matches on the launch intent, so it finds a job placed
+  by an `occupancy-*` scheduler instead of always reporting it not running. Its help
+  named a nonexistent `--check-health` flag (`--check-http-models`).
+- `proxy load` no longer crashes with `AttributeError` when the launch returns no
+  launcher handle (native run handlers); it reports the unconfirmed readiness.
+- Executor keys passed with `-o` (`entrypoint`, `shm_size`, `privileged`, …) configure
+  the executor on every path, not just `run`: `benchmark`, `proxy load`, `export
+  recipe --realize` and `RunOptions` callers treated them as serve flags (reported
+  unmapped and dropped), so the ENTRYPOINT preflight's `-o entrypoint=''` advice did
+  not work there. A realized recipe no longer bakes them into `defaults`.
 - `sparkrun stop <target> --dry-run` no longer tears the workload down. `api.stop`
   gains `dry_run` and takes `workload_id` (matching `api.logs`); the
   `cluster_id=` keyword is removed.

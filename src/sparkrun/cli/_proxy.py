@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sparkrun.core.application_profile import render_identity_text
 
+import dataclasses
 import logging
 import sys
 
@@ -15,6 +16,7 @@ from ._common import (
     _enter_offline_mode,
     _get_context,
     _load_recipe,
+    authorize_recipe_hooks,
     dry_run_option,
     host_options,
     json_option,
@@ -588,6 +590,13 @@ def alias_list(output_json):
     default=None,
     help="Launch from existing images and models only, with no internet access. --online overrides a cluster set to offline.",
 )
+@click.option(
+    "--trust",
+    is_flag=True,
+    default=False,
+    help="Run the recipe's hooks (pre_exec, mods, post_exec, post_commands) and host-path overrides without "
+    "confirmation, even when the recipe comes from an untrusted registry or URL",
+)
 @dry_run_option
 @with_host_context
 def load_cmd(
@@ -605,6 +614,7 @@ def load_cmd(
     solo,
     port,
     offline,
+    trust,
     dry_run,
     *,
     host_list: list[str],
@@ -696,28 +706,40 @@ def load_cmd(
         dry_run=dry_run,
         detached=True,
         follow=False,
+        trust=bool(trust),
         offline=offline,
     )
     try:
         run_plan = api.plan(run_options, sctx=sctx)
         for note in run_plan.notes:
             click.echo(note)
+        trust = authorize_recipe_hooks(run_plan.recipe, trust=bool(trust), dry_run=dry_run, sctx=sctx)
+        run_options = dataclasses.replace(run_options, trust=trust)
         run_result = api.run(run_options, sctx=sctx, plan=run_plan)
     except api.SparkrunError as exc:
         click.echo("Error: %s" % exc, err=True)
         sys.exit(1)
+    # A run handler may return only the public result, without the launcher's
+    # handle; readiness and post hooks need that handle (as in ``run``).
     result = run_result.launch_result
 
-    if result.rc != 0:
-        click.echo("Error: failed to load model (exit code %d)." % result.rc, err=True)
+    if run_result.rc != 0:
+        click.echo("Error: failed to load model (exit code %d)." % run_result.rc, err=True)
         sys.exit(1)
 
-    click.echo("Model loaded: %s (port %d)" % (recipe_name, result.serve_port))
+    click.echo("Model loaded: %s (port %d)" % (recipe_name, run_result.serve_port))
+
+    needs_handle = bool(recipe.post_exec or recipe.post_commands) or not dry_run
+    if result is None and needs_handle:
+        click.echo(
+            "Error: launch returned no supported readiness handle; readiness is unconfirmed and the model was not registered.", err=True
+        )
+        sys.exit(1)
 
     if recipe.post_exec or recipe.post_commands:
         from sparkrun.core.launcher import post_launch_lifecycle
 
-        post_launch_lifecycle(result, remote_cache_dir=result.effective_cache_dir, dry_run=dry_run, progress=sctx.progress)
+        post_launch_lifecycle(result, remote_cache_dir=result.effective_cache_dir, trust=trust, dry_run=dry_run, progress=sctx.progress)
 
     if not dry_run:
         # Try to register with a running proxy.

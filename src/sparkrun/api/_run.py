@@ -533,7 +533,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
         :class:`~sparkrun.api.TrustRejected`: Recipe hooks rejected.
         :class:`SparkrunError`: For other launch failures.
     """
-    from sparkrun.core.launcher import launch_inference
+    from sparkrun.core.launcher import launch_inference, recipe_hook_commands, resolve_recipe_trust
 
     sctx = resolve_sctx(sctx)
     from sparkrun.core.installed_plugins import RequiredIntegrationError, require_integrations
@@ -594,16 +594,30 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
             logger.info("ensure: intent %s already running as %s; skipping launch", intent_id, match.workload_id)
             return _already_running_result(match, plan=plan, options=options, started_at=started_at, sctx=sctx)
 
-    # Library execution must not fall through to the legacy TTY hook prompts.
-    # Keep the same local/registry trust policy and reject before preparation or
-    # replacement. Frontends supply explicit authorization via options.trust.
-    from sparkrun.core.launcher import resolve_recipe_trust
-
-    if any(getattr(recipe, name, None) for name in ("pre_exec", "post_exec", "post_commands")):
-        if not resolve_recipe_trust(recipe, options.trust, sctx=sctx):
+    # The launch's one trust verdict, decided before preparation and long
+    # before replacement, then handed to launch_inference (and through its
+    # LaunchResult to the post-launch hooks) so nothing re-resolves it.
+    # Library execution must not fall through to the legacy TTY hook prompts:
+    # untrusted hooks — ``mods`` included, which the launcher turns into
+    # pre_exec entries — are refused here. Frontends supply explicit
+    # authorization via options.trust (the CLI asks first, see
+    # ``untrusted_hooks``). A dry run executes nothing, so it proceeds and
+    # reports what a real run would need authorized.
+    recipe_trusted = resolve_recipe_trust(recipe, options.trust, sctx=sctx)
+    if not recipe_trusted:
+        pending = recipe_hook_commands(recipe)
+        if pending and options.dry_run:
+            logger.warning(
+                "Dry run: this recipe is not from a trusted source; its %s would require authorization (--trust) to run.",
+                ", ".join(pending),
+            )
+        elif pending:
             from sparkrun.api._errors import TrustRejected
 
-            raise TrustRejected("Recipe hooks require explicit authorization: pass RunOptions(trust=True) (CLI: --trust).")
+            raise TrustRejected(
+                "Recipe hooks (%s) from an untrusted source require explicit authorization: pass RunOptions(trust=True) (CLI: --trust)."
+                % ", ".join(pending)
+            )
 
     # Recipe-owned execution strategies are selected only from top-level items
     # present in this recipe.  Preparation happens before the shared launcher
@@ -774,6 +788,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
         "cluster": cluster_def,
         "placement": placement,
         "trust": options.trust,
+        "recipe_trusted": recipe_trusted,
         "sync_tuning": options.sync_tuning,
         "topology": options.topology,
         "cluster_id_override": cluster_id_for_launch,
@@ -924,6 +939,24 @@ def _prune_stale_job_metadata(config, *, observed_running: "RunningSnapshot | No
 #: Module-level alias so :func:`run` can call :func:`plan` despite its own
 #: ``plan`` parameter shadowing the name inside that function's scope.
 _build_plan = plan
+
+
+def untrusted_hooks(recipe, *, trust: bool = False, sctx: "SparkrunContext | None" = None) -> dict[str, tuple[str, ...]]:
+    """Return the hooks :func:`run` would refuse without ``RunOptions(trust=True)``.
+
+    Keys are hook kinds in execution order (``pre_exec``, ``mods``,
+    ``post_exec``, ``post_commands``), values their commands (mod names for
+    ``mods``).  Empty when the recipe has no hooks or its source is trusted —
+    the same verdict ``run`` reaches, so a frontend can ask its user *before*
+    launching instead of catching :class:`~sparkrun.api.TrustRejected` and
+    planning again.  Pass the plan's recipe (``RunPlan.recipe``) when one exists.
+    """
+    from sparkrun.core.launcher import recipe_hook_commands, resolve_recipe_trust
+
+    hooks = recipe_hook_commands(recipe)
+    if not hooks or resolve_recipe_trust(recipe, trust, sctx=sctx):
+        return {}
+    return hooks
 
 
 def _already_running_result(match, *, plan: RunPlan, options: RunOptions, started_at: float, sctx) -> RunResult:
@@ -1124,4 +1157,4 @@ def _executor_name_from_result(result) -> str:
     return getattr(executor, "executor_name", "docker")
 
 
-__all__ = ["run"]
+__all__ = ["run", "untrusted_hooks"]

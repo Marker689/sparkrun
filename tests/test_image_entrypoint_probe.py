@@ -434,9 +434,13 @@ def test_preflight_skips_without_image_or_hosts(monkeypatch):
 
 def test_entrypoint_is_an_executor_override_key():
     """``-o entrypoint=''`` must configure the executor, not the serve command."""
-    from sparkrun.cli._run import _EXECUTOR_OVERRIDE_KEYS
+    from sparkrun.api import RunOptions
+    from sparkrun.core.resolve import EXECUTOR_OVERRIDE_KEYS
 
-    assert "entrypoint" in _EXECUTOR_OVERRIDE_KEYS
+    assert "entrypoint" in EXECUTOR_OVERRIDE_KEYS
+    options = RunOptions(recipe="r", overrides={"entrypoint": "", "max_model_len": 8192})
+    assert options.overrides == {"max_model_len": 8192}
+    assert options.executor_config == {"entrypoint": ""}
 
 
 def test_empty_entrypoint_survives_option_coercion():

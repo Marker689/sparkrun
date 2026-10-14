@@ -102,12 +102,14 @@ handlers. Returning from a progress callback does not make a decision.
 | `resume_incomplete` | Resume prior tasks | Discard prior state and start fresh | True |
 | `remeasure_complete` | Discard completed measurements and start fresh | Reuse measurements | False |
 | `integration_confirmation` | Continue the integration | Decline | The integration's explicit default |
+| `recipe_trust` | Run the recipe's hooks (pre_exec, mods, post_exec, post_commands) | Fail before launch | False |
 
 The first two apply only to `ResumeMode.AUTO`; other resume modes express the
 choice directly. `decision_callback` is the single decision interface in 0.4.0;
 `on_prompt_required` and `on_complete_state` have been removed. It receives a
-frozen value, never mutable benchmark state. Recipe trust remains a separate
-`trust` option.
+frozen value, never mutable benchmark state. `recipe_trust` is asked only when
+`trust` is False and the recipe has hooks from an untrusted source (its
+`message` lists them); `trust=True` authorizes them without asking.
 
 ```python
 def decide(request):

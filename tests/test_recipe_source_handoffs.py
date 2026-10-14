@@ -107,8 +107,11 @@ def test_public_run_rejects_import_before_preparation_and_launch(context, monkey
     forbidden = Mock(side_effect=AssertionError("untrusted recipe reached preparation/launch"))
     monkeypatch.setattr("sparkrun.core.execution.resolve_recipe_execution", forbidden)
     monkeypatch.setattr("sparkrun.core.launcher.launch_inference", forbidden)
-    with pytest.raises(api.SparkrunError, match="Recipe hooks require explicit authorization"):
-        api.run(api.RunOptions(recipe=details["source_path"], hosts=("localhost",), solo=True, dry_run=True), sctx=context)
+    # Not a dry run: a dry run executes nothing and reports instead of refusing
+    # (tests/test_recipe_hook_trust.py).  A real plan probes its hosts.
+    monkeypatch.setattr("sparkrun.core.hardware_probe.probe_hosts", lambda hosts, **kwargs: {})
+    with pytest.raises(api.TrustRejected, match=r"Recipe hooks \(pre_exec\) from an untrusted source require explicit authorization"):
+        api.run(api.RunOptions(recipe=details["source_path"], hosts=("localhost",), solo=True), sctx=context)
     forbidden.assert_not_called()
 
 

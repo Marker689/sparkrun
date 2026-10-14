@@ -6241,6 +6241,48 @@ class TestCheckJobCommand:
         assert result.exit_code == 1
         assert "Healthy: no" in result.output
 
+    def test_check_job_by_recipe_matches_an_occupancy_placed_job(self, runner, reset_bootstrap):
+        """A recipe matches on the launch intent, like ``run --ensure``.
+
+        The old path derived a cluster_id from a statusless default-scheduler
+        placement, which never equals the random placement token an
+        ``occupancy-*`` scheduler assigns, so a running job read as "not running".
+        """
+        from sparkrun.orchestration.job_metadata import JobStatus
+
+        seen = {}
+
+        def _check(**kwargs):
+            seen.update(kwargs)
+            return JobStatus(running=True, cluster_id=kwargs["cluster_id"], healthy=True, hosts=["10.0.0.9"])
+
+        with (
+            TestRunEnsureFlag._running_intent_patch(hosts=("10.0.0.9",), placement_token="0123456789ab"),
+            mock.patch("sparkrun.orchestration.job_metadata.check_job_running", side_effect=_check),
+        ):
+            result = runner.invoke(
+                main,
+                ["cluster", "check-job", _TEST_RECIPE_NAME, "--hosts", "10.0.0.8,10.0.0.9", "--check-http-models"],
+            )
+        assert result.exit_code == 0, result.output
+        assert seen["cluster_id"].endswith("_0123456789ab")
+        assert seen["hosts"] == ["10.0.0.9"]
+        assert seen["check_http_models"] is True
+        assert "Job running" in result.output
+
+    def test_check_job_by_recipe_not_running(self, runner, reset_bootstrap):
+        """The autouse status stub reports an idle cluster: nothing to probe."""
+        with mock.patch("sparkrun.orchestration.job_metadata.check_job_running") as check:
+            result = runner.invoke(main, ["cluster", "check-job", _TEST_RECIPE_NAME, "--hosts", "10.0.0.8"])
+        assert result.exit_code == 1
+        assert "not running" in result.output
+        check.assert_not_called()
+
+    def test_check_job_help_names_the_real_flag(self, runner):
+        result = runner.invoke(main, ["cluster", "check-job", "--help"])
+        assert "--check-http-models" in result.output
+        assert "--check-health" not in result.output
+
 
 class TestRunEnsureFlag:
     """``--ensure`` — skip the launch when this workload is already serving.

@@ -67,7 +67,11 @@ class _ProgressEmitter:
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
         """Request an integration decision, using its explicit default if absent."""
-        request = BenchmarkDecision("integration_confirmation", message, default)
+        return self.decide("integration_confirmation", message, default=default)
+
+    def decide(self, kind: str, message: str, *, default: bool = False) -> bool:
+        """Request a decision of *kind*, using its explicit default if absent."""
+        request = BenchmarkDecision(kind, message, default)
         return bool(self._decision_callback(request)) if self._decision_callback else default
 
     @contextlib.contextmanager
@@ -694,6 +698,24 @@ def _execute_benchmark(
                 run_plan = dataclasses.replace(run_plan, hardware_reported=True)
         except Exception:
             logger.debug("emitter.on_run_planned failed", exc_info=True)
+
+        # Untrusted hooks are decided before benchmark state or launch work:
+        # ``api.run`` refuses them, so ask the frontend now (a
+        # ``recipe_trust`` decision, default decline).  A dry run executes
+        # nothing and only reports, inside ``api.run``.
+        if not run_options.trust and not dry_run:
+            pending = api.untrusted_hooks(recipe, sctx=sctx)
+            if pending:
+                from sparkrun.utils.text import format_hook_summary
+
+                label = getattr(recipe, "qualified_name", None) or recipe_name
+                if not emitter.decide("recipe_trust", format_hook_summary(label, pending), default=False):
+                    raise BenchmarkFailed(
+                        "Recipe hooks (%s) from an untrusted source were not authorized: "
+                        "pass BenchmarkOptions(trust=True) (CLI: --trust)." % ", ".join(pending),
+                        exit_code=1,
+                    )
+                run_options = dataclasses.replace(run_options, trust=True)
 
     if skip_run:
         config_chain = recipe.build_config_chain(overrides)

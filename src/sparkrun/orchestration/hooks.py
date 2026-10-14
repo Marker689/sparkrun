@@ -320,12 +320,14 @@ def render_hook_commands(
     return rendered
 
 
-def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, str]], trust: bool) -> None:
+def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, str]], trust: bool, *, dry_run: bool = False) -> None:
     """Shared trust-gating prompt for hook commands.
 
     When *trust* is True, returns immediately (no prompt).
     When *trust* is False:
     - Logs the commands as a warning,
+    - Under *dry_run* returns there: nothing executes, so nothing needs
+      authorizing — the log says what a real run would ask about,
     - Refuses to proceed if stdin is not a TTY (raises RuntimeError),
     - Otherwise asks the user to confirm via click.confirm.
 
@@ -334,14 +336,21 @@ def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, 
         commands: Hook command list (string entries are logged; dict
             entries are summarized).
         trust: When True, bypass confirmation entirely.
+        dry_run: Report instead of prompting.
 
     Raises:
-        RuntimeError: If *trust* is False and either stdin is not a TTY
-            or the user declines.
+        RuntimeError: If *trust* is False, this is not a dry run, and either
+            stdin is not a TTY or the user declines.
     """
     import sys
 
     if trust:
+        return
+
+    if dry_run:
+        logger.warning("Recipe %s would require authorization (--trust) to run:", hook_label)
+        for i, cmd in enumerate(commands, 1):
+            logger.warning("  [%d] %s", i, cmd)
         return
 
     logger.warning("Recipe %s will execute inside containers:", hook_label)
@@ -412,7 +421,7 @@ def run_pre_exec(
 
     commands = coerce_command_list(commands)
 
-    _confirm_hook_execution("pre_exec", commands, trust)
+    _confirm_hook_execution("pre_exec", commands, trust, dry_run=dry_run)
 
     # Build context from config chain for rendering
     ctx: dict[str, str] = {}
@@ -480,7 +489,7 @@ def run_post_exec(
 
     commands = coerce_command_list(commands)
 
-    _confirm_hook_execution("post_exec", commands, trust)
+    _confirm_hook_execution("post_exec", commands, trust, dry_run=dry_run)
 
     rendered = render_hook_commands(commands, context)
     launch_context = launch_context or _post_launch_context(context, head_host)
@@ -533,7 +542,9 @@ def run_post_commands(
 
     commands = coerce_command_list(commands)
 
-    if not trust:
+    if not trust and dry_run:
+        _confirm_hook_execution("post_commands", commands, trust, dry_run=True)
+    elif not trust:
         logger.warning("Recipe post_commands will execute on this machine:")
         for i, cmd in enumerate(commands, 1):
             if isinstance(cmd, str):

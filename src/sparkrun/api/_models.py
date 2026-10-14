@@ -52,7 +52,11 @@ class RunOptions:
     """Named cluster (resolved via ClusterManager) or pre-loaded definition."""
 
     overrides: dict[str, Any] = field(default_factory=dict)
-    """Recipe / runtime overrides (tensor_parallel, port, gpu_memory_utilization, …)."""
+    """Recipe / runtime overrides (tensor_parallel, port, gpu_memory_utilization, …).
+
+    Executor keys (:data:`sparkrun.core.resolve.EXECUTOR_OVERRIDE_KEYS`, e.g.
+    ``entrypoint``, ``shm_size``) are moved into :attr:`executor_config` on
+    construction."""
 
     strategy_options: dict[str, Any] = field(default_factory=dict)
     """Run-scoped inputs for the recipe-selected execution strategy.
@@ -175,6 +179,20 @@ class RunOptions:
     from the cluster's ``distribution.model.skip_fan_out``; explicit bool wins."""
     recipe_ref: str | None = None
     """Simplified recipe reference for display (e.g. ``@spark-arena/UUID``)."""
+
+    def __post_init__(self) -> None:
+        # Executor settings given as overrides (``-o entrypoint=''``) configure
+        # the container, not the serve command.  Lifted here so every caller —
+        # run, benchmark, proxy load, realize, library code — sees them in
+        # ``executor_config`` and none renders them as (unmapped) serve flags.
+        # An override wins over an executor_config value of the same key, the
+        # precedence ``-o`` has always had over the CLI's executor flags.
+        from sparkrun.core.resolve import split_executor_overrides
+
+        serve, executor = split_executor_overrides(self.overrides)
+        if executor:
+            object.__setattr__(self, "overrides", serve)
+            object.__setattr__(self, "executor_config", {**(self.executor_config or {}), **executor})
 
     def executor_overrides(self) -> dict[str, Any]:
         """Return caller settings for the shared executor resolution chain.

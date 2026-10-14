@@ -34,6 +34,7 @@ from ._common import (
     _enter_offline_mode,
     _load_recipe,
     _simplify_recipe_ref,
+    authorize_recipe_hooks,
     dry_run_option,
     host_options,
     _render_capacity_diagnostics,
@@ -47,34 +48,6 @@ from ._common import (
 from ._run_presentation import describe_host_source, echo_run_identity, planning_output, render_run_plan
 
 logger = logging.getLogger(__name__)
-
-#: ``-o key=value`` keys that configure the *executor* rather than the serve
-#: command.  They are lifted out of ``overrides`` into ``executor_config``
-#: before placement, so the intent id the CLI derives matches the one
-#: ``api.run`` derives from the same (already-stripped) override dict.
-_EXECUTOR_OVERRIDE_KEYS = frozenset(
-    {
-        "auto_remove",
-        "restart_policy",
-        "privileged",
-        "gpus",
-        "ipc",
-        "shm_size",
-        "network",
-        "user",
-        "security_opt",
-        "cap_add",
-        "ulimit",
-        "devices",
-        "memory_limit",
-        # ``-o entrypoint=''`` clears a consuming image ENTRYPOINT (one that
-        # parses sparkrun's appended ``bash -c`` as its own flags) without
-        # having to fork a third-party recipe just to add two lines of
-        # executor_config.  Empty string is the meaningful value here and
-        # survives ``coerce_value``; see ExecutorConfig.entrypoint.
-        "entrypoint",
-    }
-)
 
 
 def _timing_tree_depth(ctx: click.Context) -> int | None:
@@ -229,7 +202,11 @@ def _report_readiness_outcome(readiness) -> None:
     help="Print a per-stage timing breakdown when the run finishes (on by default; --no-timings suppresses it)",
 )
 @click.option(
-    "--trust", is_flag=True, default=False, hidden=True, help="Trust post_commands from third-party registries without confirmation"
+    "--trust",
+    is_flag=True,
+    default=False,
+    help="Run the recipe's hooks (pre_exec, mods, post_exec, post_commands) and host-path overrides without "
+    "confirmation, even when the recipe comes from an untrusted registry or URL",
 )
 @click.option(
     "--runtime-cache/--no-runtime-cache",
@@ -478,15 +455,6 @@ def run(
         hosts=hosts, hosts_file=hosts_file, cluster_name=cluster_name, cluster_mgr=cluster_mgr, config=config
     )
 
-    # Extract executor-specific keys from -o/--option overrides.  Done before
-    # the RunOptions build below so ``overrides`` and ``executor_config`` are
-    # already separated when the plan is computed — the plan's intent id and
-    # config chain must be the ones the launch uses.
-    option_executor_opts: dict[str, Any] = {}
-    for key in list(overrides.keys()):
-        if key in _EXECUTOR_OVERRIDE_KEYS:
-            option_executor_opts[key] = overrides.pop(key)
-
     # Resolve cache dir, transfer mode, and transfer interface from cluster
     # config.  Independent of placement, so it can precede the plan.
     cluster_cfg = resolve_cluster_config(cluster_name, hosts, hosts_file, cluster_mgr)
@@ -494,8 +462,9 @@ def run(
         config, transfer_mode_override=transfer_mode
     )
 
-    # Build executor config from CLI flags, then layer the -o/--option-sourced
-    # keys on top — preserving the precedence where -o wins over the flag.
+    # Build executor config from CLI flags.  Executor keys given with -o
+    # (``-o entrypoint=''``) are lifted out of ``overrides`` by RunOptions and
+    # layered on top of these, so -o still wins over the flag.
     cli_executor_opts: dict[str, Any] = {}
     if no_rm:
         cli_executor_opts["auto_remove"] = False
@@ -505,7 +474,6 @@ def run(
         cli_executor_opts["restart_policy"] = restart_policy
     if labels_override:
         cli_executor_opts["labels"] = list(labels_override)
-    cli_executor_opts.update(option_executor_opts)
 
     # Build the typed RunOptions for the library API.  The CLI already
     # resolved the recipe, host list, cluster_def, and overrides above (so the
@@ -546,6 +514,8 @@ def run(
         recipe_ref=recipe_ref,
         offline=offline,
     )
+    # The serve overrides, with executor keys already lifted out.
+    overrides = dict(run_options.overrides)
 
     has_post_hooks = bool(recipe.post_exec or recipe.post_commands)
     if no_ready_wait and has_post_hooks:
@@ -643,6 +613,11 @@ def run(
     host_list = list(run_plan.host_list)
     if render_run_plan(run_plan, run_options, host_source=host_source, verbose=(ctx.find_root().obj or {}).get("verbose", 0) >= 1):
         run_plan = dataclasses.replace(run_plan, hardware_reported=True)
+
+    # Decide hook trust here, after the summary and before anything runs:
+    # ``api.run`` refuses untrusted hooks rather than prompting.
+    trust = authorize_recipe_hooks(run_plan.recipe, trust=bool(trust), dry_run=dry_run, sctx=sctx)
+    run_options = dataclasses.replace(run_options, trust=trust)
 
     # Own the timeline here rather than letting ``launch_inference`` create one
     # internally: on a failed launch there is no LaunchResult to read it off,

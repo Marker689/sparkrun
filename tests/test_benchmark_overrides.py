@@ -194,3 +194,35 @@ def test_malformed_dash_o_is_rejected(runner, bench_env):
 
     assert result.exit_code != 0
     assert "--option must be key=value" in result.output
+
+
+def test_dash_o_executor_keys_configure_the_executor(runner, bench_env):
+    """``-o entrypoint=''`` is what the ENTRYPOINT preflight tells users to
+    pass; on the benchmark path it used to land in the serve overrides, be
+    reported unmapped and dropped."""
+    result, captured = _invoke(runner, ["-o", "entrypoint=", "-o", "shm_size=8g", "-o", "max_model_len=4096"])
+
+    assert result.exit_code == 0, result.output
+    options = captured["options"]
+    assert options.overrides.get("max_model_len") == 4096
+    assert "entrypoint" not in options.overrides and "shm_size" not in options.overrides
+    assert options.executor_overrides()["entrypoint"] == ""
+    assert options.executor_overrides()["shm_size"] == "8g"
+
+
+def test_untrusted_hooks_are_decided_before_the_benchmark_launches(runner, bench_env):
+    """Non-interactive: the ``recipe_trust`` decision declines, and the
+    benchmark fails naming ``--trust`` before ``api.run`` is reached."""
+    import sparkrun.api as api
+
+    run = mock.Mock(side_effect=AssertionError("launched"))
+    with (
+        mock.patch.object(api, "untrusted_hooks", return_value={"mods": ("patch-a",)}),
+        mock.patch.object(api, "run", run),
+        # A real (non-dry) plan probes its hosts; keep it off the network.
+        mock.patch("sparkrun.core.hardware_probe.probe_hosts", return_value={}),
+    ):
+        result = runner.invoke(main, ["benchmark", _RECIPE_NAME, "--cluster", "wopr"])
+    assert result.exit_code == 1
+    assert "--trust" in result.output and "mods" in result.output
+    run.assert_not_called()

@@ -47,6 +47,7 @@ EXCLUSIONS = {
     "default_sctx": "Python application binding; daemon creates an operation-local context.",
     "resolve_catalog_recipe": "Returns a live Recipe; catalog.recipe exposes a bounded preview and run resolves it server-side.",
     "resolve_recipe_filter": "Python filter helper; catalog.recipes and catalog.search accept the same filter inputs.",
+    "untrusted_hooks": "Takes a live Recipe; workloads.run applies the same gate server-side and catalog.recipe reports trust.",
     "proxy.admin_token": "Credential issuance is interactive/local; secrets are not persisted in job results.",
     "proxy.ui": "May issue a credential-bearing URL; use the local proxy ui command.",
     "setup.install_public_key_interactive": "Requires a terminal-owned ssh-copy-id/password conversation; use setup in a terminal.",

@@ -33,7 +33,11 @@ def post_launch(result, *, trust=False, readiness=None, sctx=None):
     launch = getattr(result, "launch_result", result)
     if launch is None:
         raise ValueError("Post-launch requires a launch result from this operation")
-    if not resolve_recipe_trust(launch.recipe, trust, sctx=sctx):
+    # Reuse the verdict ``run`` decided for pre_exec rather than re-resolving.
+    recorded = getattr(launch, "recipe_trusted", None)
+    trusted = trust or (recorded if recorded is not None else resolve_recipe_trust(launch.recipe, trust, sctx=sctx))
+    dry_run = bool(getattr(result, "dry_run", False))
+    if not trusted and not dry_run:
         raise TrustRejected("Post-launch hooks require explicit trust")
     with operation_scope(sctx) as operation:
         try:
@@ -41,8 +45,8 @@ def post_launch(result, *, trust=False, readiness=None, sctx=None):
                 "stopped": complete_post_launch(
                     launch,
                     launch.effective_cache_dir,
-                    trust=trust,
-                    dry_run=getattr(result, "dry_run", False),
+                    trust=trusted,
+                    dry_run=dry_run,
                     progress=sctx.progress,
                     readiness=readiness,
                     report=lambda message, **kwargs: operation.emit("progress", message=message),

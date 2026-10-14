@@ -129,8 +129,9 @@ interactive prompt. False retains automatic trust for local recipes and trusted
 registries; `True` explicitly authorizes hooks and other trust-gated execution.
 Frontends must complete any prompt before calling the API. API execution now
 rejects untrusted hooks before preparation/launch even with a TTY attached, instead
-of reaching legacy interactive prompts. The CLI uses `--trust` for this explicit
-authorization.
+of reaching legacy interactive prompts (`mods` included). `api.untrusted_hooks(recipe)`
+reports what would be rejected so a frontend can ask before launching; the CLI asks
+on a TTY and otherwise requires `--trust`. A dry run is not rejected.
 
 Preloaded registry recipes must carry the source URL recorded by their loader
 for automatic trust. A missing URL or a mismatch with the currently configured
@@ -215,10 +216,10 @@ Preloaded `Recipe` and `ClusterDefinition` objects retain their in-memory edits;
 recipe resolution may mutate the supplied recipe. Use a separate instance when
 you need to preserve a template. Benchmark run/resume are silent unless a
 callback is supplied. `BenchmarkDecision` distinguishes `resume_incomplete`,
-`remeasure_complete`, and `integration_confirmation`; callbacks see a frozen
+`remeasure_complete`, `integration_confirmation` and `recipe_trust`; callbacks see a frozen
 value, not mutable persistence state. Missing callbacks use each decision's
-default. Arena quality confirmation defaults to declining in headless use. Recipe
-trust remains a separate option.
+default. Arena quality confirmation defaults to declining in headless use, as does
+`recipe_trust` (untrusted hooks) unless `trust=True`.
 
 `resume_benchmark(id, export_files=False)` suppresses optional file exports after
 resumed measurement; `output_file=...` selects their base path. Complete result

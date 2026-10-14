@@ -289,3 +289,27 @@ def format_duration(seconds: float) -> str:
         return "%dm %ds" % (m, s)
     h, m = divmod(m, 60)
     return "%dh %dm %ds" % (h, m, s)
+
+
+def format_hook_summary(recipe_label: str, hooks, *, limit: int = 100) -> str:
+    """Describe untrusted recipe hooks in a few lines, for a trust prompt.
+
+    *hooks* maps hook kind to commands (``sparkrun.api.untrusted_hooks``).
+    Each command shows its first line, cut at *limit* characters; ``mods``
+    are listed by name on one line.
+    """
+    lines = ["Recipe '%s' is not from a trusted source and runs these hooks:" % recipe_label]
+    for kind, commands in hooks.items():
+        if kind == "mods":
+            lines.append("  mods: %s" % ", ".join(commands))
+            continue
+        lines.append("  %s:" % kind)
+        for command in commands:
+            command_lines = str(command).strip().splitlines() or [""]
+            text = command_lines[0]
+            if len(text) > limit:
+                text = text[: limit - 3] + "..."
+            elif len(command_lines) > 1:
+                text += " ..."
+            lines.append("    - %s" % text)
+    return "\n".join(lines)

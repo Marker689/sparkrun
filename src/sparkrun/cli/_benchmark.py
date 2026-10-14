@@ -110,6 +110,12 @@ class _CliEmitter(_ProgressEmitter):
 
 def _cli_decision(request: "BenchmarkDecision") -> bool:
     """CLI-only prompting policy; the API supplies the decision and its context."""
+    if request.kind == "recipe_trust":
+        # Same prompt as ``run``; a non-interactive session declines and the
+        # benchmark fails naming --trust.
+        from ._common import confirm_untrusted_hooks
+
+        return confirm_untrusted_hooks(request.message)
     if not sys.stdin.isatty():
         if request.kind == "integration_confirmation":
             click.echo("Not running interactively — continuing without confirmation.")
@@ -244,7 +250,8 @@ def _shared_run_options(f):
             is_flag=True,
             default=False,
             hidden=HIDE_ADVANCED_OPTIONS,
-            help="Trust recipe hooks (pre_exec/post_exec/post_commands) from third-party registries without confirmation",
+            help="Run the recipe's hooks (pre_exec, mods, post_exec, post_commands) and host-path overrides without "
+            "confirmation, even when the recipe comes from an untrusted registry or URL",
         ),
         click.option(
             "--timeout",

@@ -91,25 +91,44 @@ def test_ensure_matches_the_requested_port_only(run_env, monkeypatch, running_po
         assert result.launch_result is None and result.placement is None
 
 
-@pytest.mark.parametrize("hook", ["pre_exec", "post_exec", "post_commands"])
+@pytest.mark.parametrize("hook", ["pre_exec", "mods", "post_exec", "post_commands"])
 @pytest.mark.parametrize("tty", [False, True])
 def test_untrusted_hooks_fail_before_preparation_without_prompting(run_env, monkeypatch, capsys, hook, tty):
     env = run_env
     env.recipe.is_url_sourced = True
     setattr(env.recipe, hook, ["echo reviewed-hook"])
     options = api.RunOptions(recipe=env.recipe, hosts=("localhost",), solo=True, dry_run=True)
+    # Planned dry (no host probe); the launch itself is real, since a dry run
+    # executes nothing and is reported rather than refused (test below).
     planned = plan(options, sctx=env.sctx)
+    options = replace(options, dry_run=False)
     prompt, preparation, launch = Mock(), Mock(), Mock()
     monkeypatch.setattr("sys.stdin.isatty", lambda: tty)
     monkeypatch.setattr("click.confirm", prompt)
     monkeypatch.setattr("sparkrun.core.execution.resolve_recipe_execution", preparation)
     monkeypatch.setattr("sparkrun.core.launcher.launch_inference", launch)
     capsys.readouterr()
-    with pytest.raises(api.SparkrunError, match="explicit authorization"):
+    with pytest.raises(api.TrustRejected, match="explicit authorization"):
         run(options, sctx=env.sctx, plan=planned)
     for call in (prompt, preparation, launch):
         call.assert_not_called()
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("hook", ["pre_exec", "mods", "post_exec", "post_commands"])
+def test_untrusted_hooks_in_a_dry_run_are_reported_not_refused(run_env, monkeypatch, capsys, caplog, hook):
+    env = run_env
+    env.recipe.is_url_sourced = True
+    setattr(env.recipe, hook, ["echo reviewed-hook"])
+    options = api.RunOptions(recipe=env.recipe, hosts=("localhost",), solo=True, dry_run=True)
+    prompt, launch = Mock(), Mock(return_value=env.launch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("click.confirm", prompt)
+    monkeypatch.setattr("sparkrun.core.launcher.launch_inference", launch)
+    assert run(options, sctx=env.sctx).rc == 0
+    prompt.assert_not_called()
+    assert launch.call_args.kwargs["recipe_trusted"] is False
+    assert "%s would require authorization (--trust)" % hook in caplog.text
 
 
 @pytest.mark.parametrize("local,trust", [(True, False), (False, True)])
