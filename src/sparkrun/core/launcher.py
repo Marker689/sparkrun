@@ -646,6 +646,77 @@ def resolve_effective_runtime_cache_dir(
     return str(config.cache_dir)
 
 
+def resolve_launch_runtime_cache(
+    *,
+    runtime: RuntimePlugin,
+    recipe: Recipe,
+    overrides: dict | None,
+    config: SparkrunConfig,
+    cluster: ClusterDefinition | None,
+    host_list: list[str],
+    ssh_kwargs: dict,
+    image: str,
+    cli_override: dict | None = None,
+    probe_image: bool = True,
+    dry_run: bool = False,
+) -> RuntimeCacheMounts | None:
+    """Resolve the runtime (compilation / autotune) cache mounts for a launch.
+
+    Shared by the launch and ``api.materialize`` so both report the same
+    ``/cache/runtime`` mount and env. ``dry_run=True`` makes it read-only: no
+    cache-dir probe and no image-identity probe (both fall back as documented
+    on :func:`resolve_effective_runtime_cache_dir` and
+    :func:`~sparkrun.core.runtime_cache.probe_image_identity`).
+
+    Wholly best-effort: any failure degrades to ``None`` ("no cache") rather
+    than failing a launch that would otherwise work.
+    """
+    try:
+        from sparkrun.core.runtime_cache import (
+            build_runtime_cache_mounts,
+            probe_image_identity,
+            resolve_runtime_cache_root,
+            resolve_runtime_cache_settings,
+            runtime_cache_disabled_by_env,
+        )
+        from sparkrun.orchestration.job_metadata import derive_recipe_fingerprint
+
+        settings = resolve_runtime_cache_settings(
+            runtime=runtime,
+            config=config,
+            cluster=cluster,
+            recipe=recipe,
+            cli_override=cli_override,
+            env_disabled=runtime_cache_disabled_by_env(),
+        )
+        if not settings.enabled:
+            return None
+        root = resolve_runtime_cache_root(
+            settings,
+            resolve_effective_runtime_cache_dir(host_list, ssh_kwargs, config, dry_run=dry_run, cluster=cluster),
+        )
+        # Derived *after* the platform runtime flags are folded in, deliberately.
+        # The fingerprint then reflects the platform flags this hardware
+        # actually gets — which is what a per-configuration autotuner cache
+        # wants, since those tactics are hardware-specific anyway.  It is
+        # stable across relaunches on the same cluster, so hits still land.
+        return build_runtime_cache_mounts(
+            runtime=runtime,
+            recipe=recipe,
+            settings=settings,
+            root=root,
+            image=image,
+            # Only probed when the key needs it — see probe_image_identity.
+            image_identity=(
+                probe_image_identity(image, host_list, ssh_kwargs, dry_run=dry_run) if settings.key_by_image and probe_image else None
+            ),
+            fingerprint=derive_recipe_fingerprint(recipe, overrides),
+        )
+    except Exception:
+        logger.debug("runtime_cache: resolution failed; launching without it", exc_info=True)
+        return None
+
+
 def resolve_effective_cache_dir(
     cache_dir: str | None,
     host_list: list[str],
@@ -683,32 +754,6 @@ def resolve_effective_cache_dir(
         return probe_remote_hf_cache(head, dry_run=dry_run, **ssh_kwargs)
 
     return str(config.hf_cache_dir)
-
-
-def apply_platform_runtime_flag_defaults(recipe: Recipe, runtime_name: str, host_hardware) -> dict[str, object]:
-    """Fold platform/runtime/accelerator flag defaults into ``recipe.defaults``.
-
-    Resolves the hardware platform for *host_hardware* and applies its
-    :meth:`~sparkrun.platforms.base.HardwarePlatformPlugin.default_runtime_flags`
-    for *runtime_name* at the **recipe-default tier** (``setdefault``).  This
-    means a platform default (e.g. ``mmap: False`` for llama.cpp on GB10) only
-    takes effect when the recipe — and therefore any CLI override layered above
-    it — is silent on that key; an explicit recipe ``mmap: true`` is preserved.
-
-    Returns the subset of defaults that were actually applied (for logging /
-    testing); an empty dict means nothing was added.
-    """
-    from sparkrun.platforms import accelerator_defaults
-
-    if host_hardware is None:
-        return {}
-    applied = accelerator_defaults(
-        host_hardware,
-        lambda p, a: p.default_runtime_flags(runtime_name, a),
-        overrides=recipe.defaults,
-    )
-    recipe.defaults.update(applied)
-    return applied
 
 
 def resolve_platform_runtime_flags(runtime_name, host_hardware, overrides) -> dict[str, object]:
@@ -992,30 +1037,38 @@ def selector_only_config_keys(recipe: Recipe, runtime: RuntimePlugin) -> set[str
     return {k for k in recipe.override_config_keys() if k not in consumed and not _is_internal_config_key(k)}
 
 
-def resolve_platform_env_defaults(runtime: RuntimePlugin, host_hardware) -> dict[str, str]:
-    """Return the platform's container-env defaults for *runtime*.
+def resolve_platform_env_by_host(
+    runtime: RuntimePlugin,
+    hardware_by_host: Mapping[str, HostHardware | None],
+    declared_env: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, str]]:
+    """Return each host's platform container-env defaults for *runtime*.
 
-    The env peer of :func:`apply_platform_runtime_flag_defaults`: resolves the
-    hardware platform for *host_hardware* and asks it for
+    Resolves the platform of every assigned device and asks it for
     :meth:`~sparkrun.platforms.base.HardwarePlatformPlugin.default_env`, passing
     both the runtime's name and its family (``get_family()``) so a platform can
     target one variant or a whole family (``"vllm"``).
 
-    Unlike the flag defaults this returns rather than mutates: env is merged as
-    a *tier* by the caller (below the cluster's env and the recipe's ``env``),
-    so a user can override a platform default with any value, including an
-    empty one — a ``setdefault`` into ``recipe.env`` could not express that.
-
-    Policy hook errors and conflicting device defaults are surfaced.
+    Keys present in *declared_env* (cluster ``env`` plus recipe ``env``) are
+    omitted: a user can override a platform default with any value, including
+    an empty one. The result is the lowest tier of
+    :func:`~sparkrun.core.launch_env.compose_launch_env`. Shared by the launch
+    and ``api.materialize``. Policy hook errors and conflicting device defaults
+    are surfaced.
     """
     from sparkrun.platforms import accelerator_defaults
 
-    if host_hardware is None:
-        return {}
-    env = accelerator_defaults(
-        host_hardware, lambda p, a: p.default_env(runtime.runtime_name, a, runtime_family=getattr(runtime, "get_family", lambda: None)())
-    )
-    return {str(k): str(value) for k, value in env.items()}
+    family = getattr(runtime, "get_family", lambda: None)()
+
+    def _env(hw) -> dict[str, str]:
+        if hw is None:
+            return {}
+        env = accelerator_defaults(
+            hw, lambda p, a: p.default_env(runtime.runtime_name, a, runtime_family=family), overrides=declared_env or {}
+        )
+        return {str(k): str(value) for k, value in env.items()}
+
+    return {host: _env(hw) for host, hw in hardware_by_host.items()}
 
 
 def resolve_per_host_backends(
@@ -1123,7 +1176,7 @@ def launch_inference(
     timeline: "Timeline | None" = None,
     # Provenance persisted into job metadata.  ``recipe_fingerprint`` must be
     # derived *before* this call when the caller needs to match on it later:
-    # apply_platform_runtime_flag_defaults() below mutates recipe.defaults, so
+    # folding resolve_platform_runtime_flags() into recipe.defaults below, so
     # a digest taken after that point is host-dependent and no caller can
     # reproduce it.  ``owner`` tags the component that created the job.
     recipe_fingerprint: str | None = None,
@@ -2007,58 +2060,19 @@ def launch_inference(
     #
     # Wholly best-effort: any failure here degrades to "no cache" rather than
     # failing a launch that would otherwise work.
-    runtime_cache_mounts = None
-    try:
-        from sparkrun.core.runtime_cache import (
-            build_runtime_cache_mounts,
-            probe_image_identity,
-            resolve_runtime_cache_root,
-            resolve_runtime_cache_settings,
-            runtime_cache_disabled_by_env,
-        )
-        from sparkrun.orchestration.job_metadata import derive_recipe_fingerprint
-
-        _rc_settings = resolve_runtime_cache_settings(
-            runtime=runtime,
-            config=config,
-            cluster=cluster,
-            recipe=recipe,
-            cli_override=runtime_cache_override,
-            env_disabled=runtime_cache_disabled_by_env(),
-        )
-        if _rc_settings.enabled:
-            _rc_root = resolve_runtime_cache_root(
-                _rc_settings,
-                resolve_effective_runtime_cache_dir(
-                    host_list,
-                    ssh_kwargs,
-                    config,
-                    dry_run=dry_run,
-                    cluster=cluster,
-                ),
-            )
-            # Derived *after* apply_platform_runtime_flag_defaults, deliberately.
-            # The fingerprint then reflects the platform flags this hardware
-            # actually gets — which is what a per-configuration autotuner cache
-            # wants, since those tactics are hardware-specific anyway.  It is
-            # stable across relaunches on the same cluster, so hits still land.
-            runtime_cache_mounts = build_runtime_cache_mounts(
-                runtime=runtime,
-                recipe=recipe,
-                settings=_rc_settings,
-                root=_rc_root,
-                image=container_image,
-                # Only probed when the key needs it — see probe_image_identity.
-                image_identity=(
-                    probe_image_identity(container_image, host_list, ssh_kwargs, dry_run=dry_run)
-                    if _rc_settings.key_by_image and executor.needs_image
-                    else None
-                ),
-                fingerprint=derive_recipe_fingerprint(recipe, overrides),
-            )
-    except Exception:
-        logger.debug("runtime_cache: resolution failed; launching without it", exc_info=True)
-        runtime_cache_mounts = None
+    runtime_cache_mounts = resolve_launch_runtime_cache(
+        runtime=runtime,
+        recipe=recipe,
+        overrides=overrides,
+        config=config,
+        cluster=cluster,
+        host_list=host_list,
+        ssh_kwargs=ssh_kwargs,
+        image=container_image,
+        cli_override=runtime_cache_override,
+        probe_image=executor.needs_image,
+        dry_run=dry_run,
+    )
 
     if runtime_cache_mounts is not None:
         logger.debug("runtime cache: %s -> /cache/runtime", runtime_cache_mounts.leaf)
@@ -2072,28 +2086,14 @@ def launch_inference(
             except Exception:
                 logger.debug("runtime_cache: host preparation failed; continuing", exc_info=True)
 
-    # Container env tiers, lowest first:
-    #   platform (hardware tuning, e.g. PYTORCH_CUDA_ALLOC_CONF on GB10)
-    #   < cluster env_file (e.g. CONTAINER_* imported from a legacy
-    #     spark-vllm-docker .env)
-    #   < recipe env (which already carries any -e CLI override).
-    # Single chokepoint — covers solo and cluster mode, all runtimes and
-    # executors. Each host receives its assigned-device platform defaults.
+    # Declared container env: cluster env / env_file (e.g. CONTAINER_*
+    # imported from a legacy spark-vllm-docker .env) under recipe env (which
+    # already carries any -e CLI override). The runtime composes it with the
+    # platform, runtime-cache and runtime tiers through
+    # ``core.launch_env.compose_launch_env``, which documents the full order.
     cluster_env = cluster.resolve_env() if (cluster is not None and getattr(cluster, "env", None)) else {}
     effective_env = {**cluster_env, **(recipe.env or {})}
-    from sparkrun.platforms import accelerator_defaults
-
-    platform_env_by_host = {
-        host: {
-            str(k): str(value)
-            for k, value in accelerator_defaults(
-                hw,
-                lambda p, a: p.default_env(runtime.runtime_name, a, runtime_family=getattr(runtime, "get_family", lambda: None)()),
-                overrides=effective_env,
-            ).items()
-        }
-        for host, hw in launch_hardware.items()
-    }
+    platform_env_by_host = resolve_platform_env_by_host(runtime, launch_hardware, effective_env)
 
     # Resolve requested model fields after distribution; validate env before
     # replacing a running workload. Rendering is reused at final runtime mounts.

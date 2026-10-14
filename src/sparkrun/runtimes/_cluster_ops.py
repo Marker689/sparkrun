@@ -159,7 +159,6 @@ class ClusterContext:
         callers that haven't been threaded yet.
         """
         from sparkrun.orchestration.primitives import build_ssh_kwargs, build_volumes, resolved_model_volume
-        from sparkrun.utils import merge_env
 
         num_nodes = len(hosts)
         ssh_kwargs = build_ssh_kwargs(config)
@@ -171,27 +170,32 @@ class ClusterContext:
                 **resolved_model_volume(recipe),
             },
         )
-        runtime_env = runtime.get_cluster_env(head_ip="<pending>", num_nodes=num_nodes)
-        extra_env = runtime.get_extra_env()
-        all_env = merge_env(
-            # Lowest tier — see the matching comment in ``RuntimePlugin._run_solo``.
-            runtime_cache.env if runtime_cache else {},
-            runtime.get_common_env(),
-            runtime_env,
-            env,
-            extra_env,
+        from sparkrun.core.env_templates import render_launch_env
+        from sparkrun.core.launch_env import compose_launch_env
+
+        env_tiers = dict(
+            runtime_cache=runtime_cache.env if runtime_cache else None,
+            runtime_common=runtime.get_common_env(),
+            runtime_mode=runtime.get_cluster_env(head_ip="<pending>", num_nodes=num_nodes),
+            recipe=env,
+            runtime_extra=runtime.get_extra_env(),
         )
-
+        # Host-agnostic fallback for a host outside *hosts*; every launch host
+        # gets its own composition below (platform env and templates are per host).
+        all_env = compose_launch_env(**env_tiers)
+        templated = bool(getattr(recipe, "env_templates", None))
         env_by_host = {
-            host: merge_env(all_env, platform_env, env, extra_env) for host, platform_env in (platform_env_by_host or {}).items()
+            host: compose_launch_env(
+                **env_tiers,
+                platform=(platform_env_by_host or {}).get(host),
+                templates=(
+                    render_launch_env(recipe, host, volumes, runtime_cache, runtime._resolve_executor().for_host(host))
+                    if templated
+                    else None
+                ),
+            )
+            for host in hosts
         }
-        if getattr(recipe, "env_templates", None):
-            from sparkrun.core.env_templates import render_launch_env
-
-            for host in hosts:
-                template_env = render_launch_env(recipe, host, volumes, runtime_cache, runtime._resolve_executor().for_host(host))
-                env_by_host[host] = merge_env(env_by_host.get(host, all_env), template_env, extra_env)
-            all_env = env_by_host[hosts[0]]
 
         if placement is None and cluster is not None and recipe is not None:
             # Legacy back-compat: ``api.run`` now always threads ``placement``,

@@ -121,12 +121,31 @@ def materialize(
     )
 
     cache_dir = options.cache_dir or getattr(plan.cluster, "cache_dir", None) or str(sctx.config.hf_cache_dir)
+    from sparkrun.core.launch_env import compose_launch_env
     from sparkrun.orchestration.primitives import build_volumes, resolved_model_volume
 
+    from sparkrun.core.launcher import resolve_launch_runtime_cache, resolve_platform_env_by_host, resolve_platform_runtime_flags
+
+    platform_flags = resolve_platform_runtime_flags(runtime.runtime_name, selected_hardware, config_chain)
+    overrides = {**platform_flags, **overrides}
+    # Read-only (dry_run): no cache-dir or image-identity probe, the same
+    # unprobed fallback the HF cache_dir above uses.
+    runtime_cache = resolve_launch_runtime_cache(
+        runtime=runtime,
+        recipe=recipe,
+        overrides=overrides,
+        config=sctx.config,
+        cluster=plan.cluster,
+        host_list=hosts,
+        ssh_kwargs={},
+        image=image_plan.image_for_node(0),
+        cli_override=None if options.runtime_cache is None else {"enabled": options.runtime_cache},
+        dry_run=True,
+    )
     model_volumes = resolved_model_volume(recipe)
     volumes = build_volumes(
         cache_dir,
-        extra={**runtime.get_extra_volumes(), **model_volumes},
+        extra={**(runtime_cache.volumes if runtime_cache else {}), **runtime.get_extra_volumes(), **model_volumes},
     )
     # An execution strategy may keep a privileged controller inside the
     # workload container. The pinned model inputs are prepared before that
@@ -148,26 +167,16 @@ def materialize(
             host_mounts[mount.target] = mount
         mounts_by_host[host] = tuple(host_mounts[target] for target in sorted(host_mounts))
 
-    from sparkrun.core.launcher import resolve_platform_runtime_flags
-    from sparkrun.platforms import accelerator_defaults
-    from sparkrun.utils import merge_env
-
-    platform_flags = resolve_platform_runtime_flags(runtime.runtime_name, selected_hardware, config_chain)
-    overrides = {**platform_flags, **overrides}
     cluster_env = plan.cluster.resolve_env() if getattr(plan.cluster, "env", None) else {}
     declared_env = {**cluster_env, **(recipe.env or {})}
-    platform_env_by_host = {
-        host: accelerator_defaults(
-            hw, lambda p, a: p.default_env(runtime.runtime_name, a, runtime_family=runtime.get_family()), overrides=declared_env
-        )
-        for host, hw in selected_hardware.items()
-    }
+    platform_env_by_host = resolve_platform_env_by_host(runtime, selected_hardware, declared_env)
     runtime_env = runtime.get_solo_env() if plan.is_solo else runtime.get_cluster_env(head_ip=hosts[0], num_nodes=len(hosts))
-    environment = merge_env(
-        runtime.get_common_env(),
-        runtime_env,
-        declared_env,
-        runtime.get_extra_env(),
+    env_tiers = dict(
+        runtime_cache=runtime_cache.env if runtime_cache else None,
+        runtime_common=runtime.get_common_env(),
+        runtime_mode=runtime_env,
+        recipe=declared_env,
+        runtime_extra=runtime.get_extra_env(),
     )
 
     assignments: list[tuple[int, str, int, int]] = []
@@ -262,20 +271,22 @@ def materialize(
                 )
         if not isinstance(command_text, str) or not command_text.strip():
             raise ValueError("%s must produce a nonempty command for launch unit %s" % (runtime.runtime_name, unit_id))
-        unit_declared_env = declared_env
+        unit_templates = None
         if templates:
             assert env_template_resolver is not None
-            resolved = dict(env_template_resolver(unit_id, host, mounts_by_host[host]))
-            if resolved.keys() != templates.keys():
+            unit_templates = dict(env_template_resolver(unit_id, host, mounts_by_host[host]))
+            if unit_templates.keys() != templates.keys():
                 raise ValueError("environment resolver must return exactly the recipe env template keys")
-            if any(not isinstance(value, str) or "\x00" in value for value in resolved.values()):
+            if any(not isinstance(value, str) or "\x00" in value for value in unit_templates.values()):
                 raise ValueError("environment resolver values must be strings without NUL")
-            unit_declared_env = {**declared_env, **resolved}
-        unit_environment = merge_env(environment, platform_env_by_host[host], unit_declared_env, runtime.get_extra_env())
-        if comm_env:
-            host_environment = comm_env.get_env(host)
-            host_environment = runtime.finalize_host_comm_env(host_environment)
-            unit_environment.update(host_environment)
+        # The executor layers the comm env beneath the container env, so it is
+        # the lowest tier here too.
+        unit_environment = compose_launch_env(
+            **env_tiers,
+            comm=runtime.finalize_host_comm_env(comm_env.get_env(host)) if comm_env else None,
+            platform=platform_env_by_host[host],
+            templates=unit_templates,
+        )
         units.append(
             ResolvedLaunchUnit(
                 id=unit_id,

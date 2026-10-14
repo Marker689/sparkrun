@@ -1575,7 +1575,6 @@ class RuntimePlugin(Plugin, ABC):
             run_script_on_host,
             should_run_locally,
         )
-        from sparkrun.utils import merge_env
 
         ssh_kwargs = build_ssh_kwargs(config)
         is_local = should_run_locally(host, ssh_kwargs.get("ssh_user"))
@@ -1591,19 +1590,16 @@ class RuntimePlugin(Plugin, ABC):
         from sparkrun.core.env_templates import render_launch_env
 
         template_env = render_launch_env(recipe, host, volumes, runtime_cache, self._resolve_executor().for_host(host))
-        all_env = merge_env(
-            # The runtime cache sits at the *bottom*: `recipe.env` (and the
-            # `-e` overrides folded into it) must be able to repoint any of
-            # these, and `get_extra_env` carries HF_HOME/HF_HUB_CACHE, which
-            # have to beat the XDG_CACHE_HOME catch-all or the model cache
-            # would silently relocate off its own mount.
-            runtime_cache.env if runtime_cache else {},
-            self.get_common_env(),  # base env
-            self.get_solo_env(),  # solo-specific
-            platform_env or {},
-            env,  # recipe (literal CLI overrides already suppress templates)
-            template_env,
-            self.get_extra_env(),  # tuning/other overrides
+        from sparkrun.core.launch_env import compose_launch_env
+
+        all_env = compose_launch_env(
+            platform=platform_env,
+            runtime_cache=runtime_cache.env if runtime_cache else None,
+            runtime_common=self.get_common_env(),
+            runtime_mode=self.get_solo_env(),
+            recipe=env,  # literal CLI overrides already suppress templates
+            templates=template_env,
+            runtime_extra=self.get_extra_env(),
         )
 
         combined_docker_opts = (self.get_extra_docker_opts() or []) + (extra_docker_opts or [])

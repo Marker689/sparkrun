@@ -138,7 +138,7 @@ def test_unknown_edge_capacity_remains_unknown(edge_platform, capsys):
 
 def test_mixed_device_host_resolves_each_assigned_device(edge_platform):
     from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
-    from sparkrun.core.launcher import resolve_platform_env_defaults
+    from sparkrun.core.launcher import resolve_platform_env_by_host
 
     hw = hardware("jetson-orin", 61.3)
     hw.accelerators.insert(0, AcceleratorSpec("nvidia", "rtx-3090", memory_gb=24))
@@ -148,7 +148,7 @@ def test_mixed_device_host_resolves_each_assigned_device(edge_platform):
     assert [a.max_gpu_memory_utilization for a in planned.accelerators] == [1.0, 0.8]
     target = resolve_host_hardware(cluster.hosts, cluster, placement)["edge"]
     assert [a.model for a in target.accelerators] == ["jetson-orin"]
-    assert resolve_platform_env_defaults(VllmDistributedRuntime(), target) == {"EDGE_PLATFORM": "jetson-orin"}
+    assert resolve_platform_env_by_host(VllmDistributedRuntime(), {"edge": target}) == {"edge": {"EDGE_PLATFORM": "jetson-orin"}}
     assert VllmDistributedRuntime().default_image_for(target) is None
     discrete = hw.selected([0])
     assert VllmDistributedRuntime().default_image_for(discrete) == "vllm/vllm-openai:latest"

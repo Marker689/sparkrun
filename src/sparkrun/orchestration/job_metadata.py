@@ -578,7 +578,7 @@ def save_job_metadata(
             match a value they computed themselves must pass it**: by the time
             the launcher saves metadata it has already folded platform
             runtime-flag defaults into ``recipe.defaults``
-            (:func:`sparkrun.core.launcher.apply_platform_runtime_flag_defaults`),
+            (:func:`sparkrun.core.launcher.resolve_platform_runtime_flags`),
             so deriving here would digest a *host-dependent* recipe that no
             caller can reproduce without probing the same hardware.
         owner: Opaque tag naming the component that created this job (e.g. an

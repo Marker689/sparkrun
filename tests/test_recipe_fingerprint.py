@@ -229,9 +229,9 @@ def test_explicit_model_revision_override_still_changes_fingerprint():
 def test_platform_flag_defaults_move_the_fingerprint():
     """The reason ``api.plan`` derives it rather than ``save_job_metadata``.
 
-    ``launch_inference`` calls ``apply_platform_runtime_flag_defaults``, which
-    ``setdefault``s platform flags into ``recipe.defaults`` keyed off the *head
-    host's* hardware — before it persists job metadata.  So a digest taken
+    ``launch_inference`` folds ``resolve_platform_runtime_flags`` into
+    ``recipe.defaults`` (keys absent from the config chain only), keyed off the
+    *placed hosts'* hardware — before it persists job metadata.  So a digest taken
     inside the launcher depends on where the job landed, and no caller can
     reproduce the value its own job was stored under without probing the same
     hardware.  Matching a job by fingerprint after the fact then silently never
@@ -240,14 +240,15 @@ def test_platform_flag_defaults_move_the_fingerprint():
     import pytest
 
     from sparkrun.core.hardware import default_dgx_spark_hardware
-    from sparkrun.core.launcher import apply_platform_runtime_flag_defaults
+    from sparkrun.core.launcher import resolve_platform_runtime_flags
 
     # llama-cpp on GB10 is the case that exists today (``mmap: False``); the
     # rule is about the mechanism, not this particular flag.
     r = _recipe(runtime="llama-cpp")
     declared = derive_recipe_fingerprint(r)
 
-    applied = apply_platform_runtime_flag_defaults(r, "llama-cpp", default_dgx_spark_hardware())
+    applied = resolve_platform_runtime_flags("llama-cpp", {"h": default_dgx_spark_hardware()}, r.build_config_chain())
+    r.defaults.update(applied)
     if not applied:
         pytest.skip("this platform contributes no runtime-flag defaults for llama-cpp")
 

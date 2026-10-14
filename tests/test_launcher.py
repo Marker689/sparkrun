@@ -8,9 +8,9 @@ from sparkrun.core.backend_select import BackendBundle
 from sparkrun.core.cluster_manager import ClusterDefinition
 from sparkrun.core.hardware import AcceleratorSpec, HostHardware
 from sparkrun.core.launcher import (
-    apply_platform_runtime_flag_defaults,
     resolve_per_host_backends,
-    resolve_platform_env_defaults,
+    resolve_platform_env_by_host,
+    resolve_platform_runtime_flags,
 )
 from sparkrun.core.recipe import Recipe, DistributionConfig
 from sparkrun.orchestration.collectives import NcclBackend
@@ -64,9 +64,21 @@ def _llama_recipe(defaults=None):
     )
 
 
+def _fold_platform_flags(recipe, runtime_name, host_hardware):
+    """Fold platform serve-flag defaults into *recipe* the way ``launch_inference`` does."""
+    applied = resolve_platform_runtime_flags(runtime_name, {"h": host_hardware}, recipe.build_config_chain())
+    recipe.defaults.update(applied)
+    return applied
+
+
+def _platform_env(runtime, host_hardware):
+    """One host's platform env tier, as the launch and ``api.materialize`` resolve it."""
+    return resolve_platform_env_by_host(runtime, {"h": host_hardware})["h"]
+
+
 def test_platform_flag_defaults_applies_mmap_off_for_gb10_llama_cpp():
     recipe = _llama_recipe()
-    applied = apply_platform_runtime_flag_defaults(recipe, "llama-cpp", _nvidia_hw())
+    applied = _fold_platform_flags(recipe, "llama-cpp", _nvidia_hw())
     assert applied == {"mmap": False}
     assert recipe.defaults["mmap"] is False
 
@@ -74,31 +86,31 @@ def test_platform_flag_defaults_applies_mmap_off_for_gb10_llama_cpp():
 def test_platform_flag_defaults_respects_explicit_recipe_value():
     """An explicit recipe mmap:true is preserved (setdefault semantics)."""
     recipe = _llama_recipe({"mmap": True})
-    applied = apply_platform_runtime_flag_defaults(recipe, "llama-cpp", _nvidia_hw())
+    applied = _fold_platform_flags(recipe, "llama-cpp", _nvidia_hw())
     assert applied == {}
     assert recipe.defaults["mmap"] is True
 
 
 def test_platform_flag_defaults_non_llama_runtime_gets_no_mmap():
     recipe = _llama_recipe()
-    applied = apply_platform_runtime_flag_defaults(recipe, "vllm-distributed", _nvidia_hw())
+    applied = _fold_platform_flags(recipe, "vllm-distributed", _nvidia_hw())
     assert "mmap" not in applied
     assert "mmap" not in recipe.defaults
 
 
 def test_platform_serve_memory_default_fills_only_a_gap():
     recipe = _llama_recipe()
-    assert apply_platform_runtime_flag_defaults(recipe, "vllm-distributed", _nvidia_hw()) == {"gpu_memory_utilization": 0.8}
+    assert _fold_platform_flags(recipe, "vllm-distributed", _nvidia_hw()) == {"gpu_memory_utilization": 0.8}
     assert recipe.defaults["gpu_memory_utilization"] == 0.8
 
     explicit = _llama_recipe({"gpu_memory_utilization": 0.94})
-    assert apply_platform_runtime_flag_defaults(explicit, "vllm-distributed", _nvidia_hw()) == {}
+    assert _fold_platform_flags(explicit, "vllm-distributed", _nvidia_hw()) == {}
     assert explicit.defaults["gpu_memory_utilization"] == 0.94
 
 
 def test_platform_flag_defaults_non_gb10_noop():
     recipe = _llama_recipe()
-    applied = apply_platform_runtime_flag_defaults(recipe, "llama-cpp", _amd_hw())
+    applied = _fold_platform_flags(recipe, "llama-cpp", _amd_hw())
     assert applied == {}
     assert "mmap" not in recipe.defaults
 
@@ -130,29 +142,29 @@ _EXPANDABLE = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "CUTE_DSL_
     ],
 )
 def test_platform_env_defaults_for_torch_runtimes_on_gb10(runtime_name, family):
-    got = resolve_platform_env_defaults(_StubRuntimeForEnv(runtime_name, family), _nvidia_hw())
+    got = _platform_env(_StubRuntimeForEnv(runtime_name, family), _nvidia_hw())
     assert got == _EXPANDABLE
 
 
 @pytest.mark.parametrize("runtime_name", ["llama-cpp", "trtllm", "modular-max"])
 def test_platform_env_defaults_skips_non_torch_runtimes(runtime_name):
     """Runtimes that manage their own memory get no allocator env."""
-    assert resolve_platform_env_defaults(_StubRuntimeForEnv(runtime_name), _nvidia_hw()) == {}
+    assert _platform_env(_StubRuntimeForEnv(runtime_name), _nvidia_hw()) == {}
 
 
 def test_platform_env_defaults_non_gb10_gets_generic_tier_only():
     """A non-GB10 NVIDIA host is served by the generic platform: no GB10 allocator env, only its CuTe target."""
     h100 = HostHardware(accelerators=[AcceleratorSpec(vendor="nvidia", model="h100")])
-    assert resolve_platform_env_defaults(_StubRuntimeForEnv("vllm-ray", "vllm"), h100) == {"CUTE_DSL_ARCH": "sm_90a"}
+    assert _platform_env(_StubRuntimeForEnv("vllm-ray", "vllm"), h100) == {"CUTE_DSL_ARCH": "sm_90a"}
 
 
 def test_platform_env_defaults_unclaimed_hardware_noop():
-    assert resolve_platform_env_defaults(_StubRuntimeForEnv("vllm-ray", "vllm"), _amd_hw()) == {}
+    assert _platform_env(_StubRuntimeForEnv("vllm-ray", "vllm"), _amd_hw()) == {}
 
 
 def test_platform_env_defaults_no_hardware_noop():
-    assert resolve_platform_env_defaults(_StubRuntimeForEnv("vllm-ray", "vllm"), None) == {}
-    assert resolve_platform_env_defaults(_StubRuntimeForEnv("vllm-ray", "vllm"), HostHardware()) == {}
+    assert _platform_env(_StubRuntimeForEnv("vllm-ray", "vllm"), None) == {}
+    assert _platform_env(_StubRuntimeForEnv("vllm-ray", "vllm"), HostHardware()) == {}
 
 
 def test_platform_env_defaults_platform_error_is_visible(monkeypatch):
@@ -164,15 +176,15 @@ def test_platform_env_defaults_platform_error_is_visible(monkeypatch):
 
     monkeypatch.setattr(DgxSparkPlatform, "default_env", _raise)
     with pytest.raises(ValueError, match="boom"):
-        resolve_platform_env_defaults(_StubRuntimeForEnv("vllm-ray", "vllm"), _nvidia_hw())
+        _platform_env(_StubRuntimeForEnv("vllm-ray", "vllm"), _nvidia_hw())
 
 
 def test_platform_env_defaults_returns_a_copy():
     """Callers must not be able to mutate the platform's table via the result."""
     runtime = _StubRuntimeForEnv("sglang", "sglang")
-    got = resolve_platform_env_defaults(runtime, _nvidia_hw())
+    got = _platform_env(runtime, _nvidia_hw())
     got["PYTORCH_CUDA_ALLOC_CONF"] = "mutated"
-    assert resolve_platform_env_defaults(runtime, _nvidia_hw()) == _EXPANDABLE
+    assert _platform_env(runtime, _nvidia_hw()) == _EXPANDABLE
 
 
 def test_platform_flag_defaults_then_command_emits_no_mmap():
@@ -180,7 +192,7 @@ def test_platform_flag_defaults_then_command_emits_no_mmap():
     from sparkrun.runtimes.llama_cpp import LlamaCppRuntime
 
     recipe = _llama_recipe({"port": 8001})
-    apply_platform_runtime_flag_defaults(recipe, "llama-cpp", _nvidia_hw())
+    _fold_platform_flags(recipe, "llama-cpp", _nvidia_hw())
     cmd = LlamaCppRuntime().generate_command(recipe, {}, is_cluster=False)
     assert "--no-mmap" in cmd
 
@@ -189,7 +201,7 @@ def test_platform_flag_defaults_explicit_true_suppresses_no_mmap():
     from sparkrun.runtimes.llama_cpp import LlamaCppRuntime
 
     recipe = _llama_recipe({"port": 8001, "mmap": True})
-    apply_platform_runtime_flag_defaults(recipe, "llama-cpp", _nvidia_hw())
+    _fold_platform_flags(recipe, "llama-cpp", _nvidia_hw())
     cmd = LlamaCppRuntime().generate_command(recipe, {}, is_cluster=False)
     assert "--no-mmap" not in cmd
 
@@ -1587,19 +1599,22 @@ def test_builder_phase_aborts_on_an_unknown_builder(monkeypatch, tmp_path):
     there is no engine default to fall through to, so silence has no safe
     reading.  Peer of the gated case below.
     """
-    from sparkrun.core import launcher
+    from sparkrun.core import image_preparation
 
     launch = _builder_phase_harness(monkeypatch, tmp_path)
 
     def _unknown(name, v=None):
         raise ValueError("Unknown builder: %r" % name)
 
+    real_prepare_images = image_preparation.prepare_images
+
     def _sentinel(*a, **kw):
+        real_prepare_images(*a, **kw)
         raise _PastPhase2()
 
     monkeypatch.setattr("sparkrun.core.bootstrap.get_builder", _unknown)
-    # Would fire if phase 2 fell through; reaching it at all is the failure.
-    monkeypatch.setattr(launcher, "apply_platform_runtime_flag_defaults", _sentinel)
+    # Fires if phase 2 (image preparation) returned; reaching it at all is the failure.
+    monkeypatch.setattr(image_preparation, "prepare_images", _sentinel)
 
     with pytest.raises(ValueError, match="Unknown builder"):
         launch()
