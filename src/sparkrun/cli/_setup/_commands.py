@@ -407,9 +407,12 @@ def _setup_features_visible_at_import() -> bool:
         return False
 
 
-@setup.group("features", hidden=not _setup_features_visible_at_import())
-def setup_features():
+@setup.group("features", invoke_without_command=True, hidden=not _setup_features_visible_at_import())
+@click.pass_context
+def setup_features(ctx):
     """View and toggle advanced feature flags.
+
+    With no subcommand, list feature flags and their effective state.
 
     Feature flags gate experimental capabilities (e.g. the ``local`` and
     ``k8s`` executors). Each flag has a per-channel default; explicit
@@ -418,6 +421,8 @@ def setup_features():
     Always functional; hidden from ``setup --help`` unless the
     ``cli.setup.features`` flag resolves on (default: on for beta/alpha).
     """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(setup_features_list)
 
 
 def _feature_state(config, flag):
