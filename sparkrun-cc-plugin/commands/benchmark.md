@@ -1,86 +1,38 @@
+---
+description: Run performance or tool-evaluation benchmarks; optionally publish to Arena
+argument-hint: "[perf|tools] <recipe> [options]"
+---
+
 # /sparkrun:benchmark
 
-Run benchmarks against an inference workload.
-
-## Usage
-
-```
-/sparkrun:benchmark <recipe> [options]
-```
-
-## Examples
-
-```
-/sparkrun:benchmark qwen3-1.7b-sglang --tp 1
-/sparkrun:benchmark qwen3-1.7b-sglang --tp 2 --profile @official/spark-arena-v2
-/sparkrun:benchmark qwen3-1.7b-sglang --skip-run --tp 1
-/sparkrun:benchmark qwen3-1.7b-sglang --no-stop --cluster mylab
-/sparkrun:benchmark qwen3-1.7b-sglang -b depth=0,2048,4096 -b tg=32,128
-```
-
-## Behavior
-
-When this command is invoked:
-
-1. If no recipe is specified, run `sparkrun list` to show available recipes and ask the user to pick one.
-2. Determine the target hosts (same as `/sparkrun:run`).
-3. Run the full benchmark flow:
+Use the workloads skill. Preserve the requested category; default to performance only
+when none is specified. Resolve a recipe and target hosts as for run.
 
 ```bash
-# Full flow: launch inference -> benchmark -> stop
-sparkrun benchmark perf <recipe> [options]
+sparkrun benchmark perf <recipe> --cluster <name>
+sparkrun benchmark tools <recipe> --skip-run
+sparkrun benchmark perf <recipe> --profile @official/spark-arena-v2
+sparkrun benchmark tools <recipe> -b parallel=2 -b max_turns=8
+sparkrun benchmark <recipe> --arena
+sparkrun benchmark <recipe> --arena --local-test
+sparkrun benchmark resume <benchmark_id>
 ```
 
-The benchmark command launches or reuses inference, waits for readiness, then
-runs measurement. It stops inference it launched unless `--no-stop` is set;
-`--skip-run` benchmarks an existing instance without taking ownership of it.
+Use main `benchmark --arena` for requested publication, not the hidden
+`arena benchmark` alias. Choosing an Arena profile alone does not upload.
+`--local-test` requires `--arena` and skips authentication/upload. Login requires
+an interactive user terminal.
 
-4. Results are exported in the formats supported by the framework. Scheduled
-   frameworks save task progress for resume; failed invocations can retain a
-   checkpoint without producing a final report.
-5. Use `--resume` to reuse matching state, `--fresh` to replace it, or
-   `sparkrun benchmark resume <benchmark-id>` to resume saved work. Completed
-   states can retry pending publication without launching inference again.
+Performance typically uses llama-benchy; tools uses tool-eval-bench. Discover
+profiles via `registry list-benchmark-profiles` rather than pinning obsolete
+names/versions. `-b` changes framework args; `-o` changes recipe defaults.
+`--skip-run` measures an existing workload without owning cleanup. Otherwise
+benchmark stops workloads it launches unless `--no-stop` is set.
 
-See [benchmark API and state contracts](../../docs/BENCHMARK_API.md).
+`--resume` reuses matching progress, `--fresh` replaces it, and `benchmark resume`
+resumes saved work or retries pending publication. Set both tool timeout and
+`--timeout` appropriately; long runs need background execution. Report actual
+artifact paths, framework summary, partial/failing cases, and any benchmark ID.
+Do not add `--collect-diagnostics`: that CLI option belongs to `run`.
 
-## Common Options
-
-| Option | Description |
-|--------|-------------|
-| `--hosts, -H` | Comma-separated host list |
-| `--cluster` | Use a saved cluster |
-| `--tp N` | Tensor-parallel ranks (one per DGX Spark GPU) |
-| `--pp N` | Pipeline parallelism |
-| `--port N` | Override serve port |
-| `--gpu-mem F` | GPU memory utilization (0.0-1.0) |
-| `--max-model-len N` | Override max context length |
-| `--image` | Override container image |
-| `--profile` | Benchmark profile name or file path |
-| `--framework` | Select measurement framework (performance defaults to llama-benchy) |
-| `-o KEY=VALUE` | Override recipe default (repeatable) |
-| `-b KEY=VALUE` | Override benchmark arg (repeatable) |
-| `--no-stop` | Keep inference running after benchmarking |
-| `--skip-run` | Skip launching inference (benchmark existing instance) |
-| `--sync-tuning` | Sync tuning configs from registries before benchmarking |
-| `--timeout` | Benchmark timeout in seconds (default: 14400) |
-| `--output` | Output file for results YAML |
-| `--dry-run` | Show what would be done |
-
-## Benchmark Profiles
-
-Browse available profiles from registries:
-
-```bash
-sparkrun registry list-benchmark-profiles
-sparkrun registry show-benchmark-profile <name>
-```
-
-## Notes
-
-- The benchmark command auto-detects available ports to avoid collisions with running instances
-- Use `--skip-run` to benchmark an already-running inference server
-- Use `--no-stop` to keep the inference server running after the benchmark completes
-- Use `-b key=value` for benchmark-specific args; use `-o key=value` for recipe overrides
-- Results are saved as YAML, JSON, and CSV when available
-- Profiles support `@registry/name` syntax for explicit registry selection
+User request: $ARGUMENTS

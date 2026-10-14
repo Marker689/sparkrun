@@ -1,59 +1,24 @@
+---
+description: Inspect current workload placement and health
+argument-hint: "[--cluster name] [options]"
+---
+
 # /sparkrun:status
 
-Check the status of running sparkrun inference workloads.
-
-## Usage
-
-```
-/sparkrun:status [options]
-```
-
-## Examples
-
-```
-/sparkrun:status
-/sparkrun:status --cluster mylab
-/sparkrun:status --hosts 192.168.11.13,192.168.11.14
-```
-
-## Behavior
-
-When this command is invoked:
-
-1. Assume `sparkrun` is in PATH and run `sparkrun cluster status` directly:
+Use the workloads skill. `status` aliases `cluster status`; run only one with the
+requested host/cluster scope:
 
 ```bash
-# Preferred -- uses default cluster
-sparkrun cluster status
-
-# With explicit targets
-sparkrun cluster status --cluster <name>
-sparkrun cluster status --hosts <ip1>,<ip2>,...
+sparkrun status --cluster <name>
+sparkrun cluster check-job <workload_id> --json
+sparkrun cluster check-job <workload_id> --check-http-models --json
 ```
 
-If sparkrun is not found, suggest installation via the setup skill.
+Report actual placement, workload IDs, runtime/container state, pending operations,
+and idle hosts as available. Reuse the exact log/stop commands printed by status.
+A workload ID may still be labeled `cluster_id`; it is not a saved host cluster.
+Do not guess IDs or container naming. `check-job` returns 0 for running and 1 for
+not running; distinguish configuration/transport errors from an absent workload.
+Container presence and `/v1/models` are narrower than inference readiness.
 
-2. Report the output to the user. The status command shows:
-   - Grouped containers by job (with recipe name if cached)
-   - Container role, host, status, and image
-   - Ready-to-use `sparkrun logs` and `sparkrun stop` commands for each job
-   - **Pending operations**: any in-progress model downloads or container image distributions
-   - **Idle hosts**: hosts with no sparkrun containers
-
-3. If the user wants to act on a specific job (view logs, stop it), use the commands shown in the status output.
-
-4. For checking if a specific job is running (with optional health check), use:
-
-```bash
-sparkrun cluster check-job <recipe_or_cluster_id> --cluster <name>
-sparkrun cluster check-job <recipe_or_cluster_id> --check-http-models  # also verify /v1/models
-sparkrun cluster check-job <recipe_or_cluster_id> --json               # JSON output
-```
-
-## Notes
-
-- Uses the default cluster if no `--hosts` or `--cluster` is specified
-- `sparkrun status` is a top-level alias for `sparkrun cluster status` — they are identical. Only run one.
-- Container names follow the pattern `sparkrun_{hash}_{role}`
-- Pending operations (model downloads, image distributions) are tracked via lock files and shown in status output
-- `check-job` exits with code 0 if running, 1 if not — useful for scripting
+User request: $ARGUMENTS

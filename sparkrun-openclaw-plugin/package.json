@@ -1,6 +1,6 @@
 {
   "name": "@sparkarena/sparkrun-openclaw",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "AI-assisted inference on NVIDIA DGX Spark - run, manage, and stop LLM workloads with OpenClaw",
   "type": "module",
   "main": "index.ts",
@@ -39,6 +39,7 @@
   },
   "files": [
     "index.ts",
+    "tool.mjs",
     "openclaw.plugin.json",
     "skills/**/*.md",
     "README.md",
@@ -46,5 +47,8 @@
   ],
   "devDependencies": {
     "@types/node": "^25.6.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
   }
 }

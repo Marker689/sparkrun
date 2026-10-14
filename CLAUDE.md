@@ -3154,7 +3154,7 @@ embedded scripts, SSH execution, kernel tuning, and VRAM estimation.
 
 ### Companion Packages
 
-- **`sparkrun-cc-plugin/`** — Claude Code plugin providing slash commands (`/sparkrun:run`, `/sparkrun:stop`, `/sparkrun:status`, `/sparkrun:list`, `/sparkrun:setup`) and skills for AI-assisted inference management (`run`, `setup`, `registry`).
+- **`sparkrun-cc-plugin/`** — Claude Code commands for run/stop/status/list, benchmark, monitor, proxy, and setup; shared CLI reference skills are `workloads`, `configuration`, and `registry`. Run `python3 scripts/sync-assistant-skills.py` after editing skills to regenerate the OpenClaw references with their tool-specific guidance. `tests/test_assistant_plugin_contracts.py` checks parity and parses examples without dispatching operations.
 - **`website/`** — Documentation site built with Astro (Starlight theme), deployed to Cloudflare Pages.
 
 ## Key Dependencies
