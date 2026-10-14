@@ -38,8 +38,6 @@ or a `recipe` plus a host source (`hosts`, `cluster`, or configured defaults).
 The identifier is the value currently returned as `RunResult.cluster_id`; this
 logging API calls it `workload_id` to distinguish a workload from its host cluster.
 The Python keyword, `LogTarget` field, and daemon query all use `workload_id`.
-The unreleased `cluster_id` spelling is no longer accepted on these log surfaces;
-saved metadata and other lifecycle APIs retain their existing names.
 
 `hosts` describes the **full workload topology**. To inspect one worker, use
 `host=` or `container=` instead of shortening `hosts`; rank and solo/cluster
