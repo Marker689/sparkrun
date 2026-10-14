@@ -10,6 +10,8 @@ _NOISY_LOGGERS = (
     "httpx",
     "httpcore.http11",
     "httpcore.connection",
+    "httpcore2.http11",
+    "httpcore2.connection",
     "urllib3.connectionpool",
 )
 
