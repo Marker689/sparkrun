@@ -43,8 +43,8 @@ API_OPERATIONS.update(
 EXCLUSIONS = {
     "capture_diagnostics": "Python context manager; workloads.run and benchmarks.run/resume accept collect_diagnostics.",
     "open_log_target": "Python reader handle; /v1/streams/logs resolves each request and accepts the same host/container filters.",
-    "discover_endpoints": "List-only Python API; use discovery.snapshot for scoped endpoints and observation coverage.",
     "default_sctx": "Python application binding; daemon creates an operation-local context.",
+    "resolve_sctx": "Python application binding; daemon creates an operation-local context.",
     "resolve_catalog_recipe": "Returns a live Recipe; catalog.recipe exposes a bounded preview and run resolves it server-side.",
     "resolve_recipe_filter": "Python filter helper; catalog.recipes and catalog.search accept the same filter inputs.",
     "untrusted_hooks": "Takes a live Recipe; workloads.run applies the same gate server-side and catalog.recipe reports trust.",
@@ -52,9 +52,6 @@ EXCLUSIONS = {
     "proxy.ui": "May issue a credential-bearing URL; use the local proxy ui command.",
     "setup.install_public_key_interactive": "Requires a terminal-owned ssh-copy-id/password conversation; use setup in a terminal.",
     "setup.rotate_ssh_host_keys": "Host-identity rotation has no wire operation; use the confirmed setup ssh-rotate-keys CLI or Python API.",
-    "setup.build_authorized_key_script": "Script generation helper; setup runner owns execution.",
-    "setup.build_collect_key_script": "Script generation helper; mesh operation owns execution.",
-    "setup.build_install_keys_script": "Script generation helper; mesh operation owns execution.",
 }
 K8S_OPERATIONS = {
     name: "plugins.k8s." + name

@@ -7,7 +7,20 @@ conventions: dataclass returns, typed
 stdout/stderr.
 
 Includes SSH bootstrap/mesh, RDMA diagnostics, and the shared host setup runner.
-Low-level setup checks/actions remain available for custom planning interfaces.
+
+Stable: the SSH bootstrap (``probe_ssh_access``, ``ensure_local_key``,
+``install_public_key_interactive``, ``mesh_ssh_keys_native``), ``rdma_test``,
+``check_ssh_host_identities`` / ``rotate_ssh_host_keys`` and the
+``run_setup_steps`` / ``run_setup_undo`` runner with their result types.
+
+.. warning::
+   **Experimental:** the planning internals re-exported for custom planning
+   interfaces (``ManifestManager``, ``SetupManifest``, ``PhaseRecord``,
+   ``SetupPlan``, ``PlannedStep``, ``SetupStep``, ``CheckContext``,
+   ``CheckItem``, ``HostState``, ``SetupActionContext``, ``SetupActionResult``,
+   ``probe_setup_hosts``, ``resolve_setup_context``, ``build_setup_plan``,
+   ``evaluate_host``, ``apply_setup_step``) are core types aliased here and
+   may change in a minor release.
 """
 
 from __future__ import annotations
@@ -25,12 +38,7 @@ from sparkrun.core.setup_probe import probe_setup_hosts, resolve_setup_context
 from sparkrun.core.setup_steps import PlannedStep, SetupStep, build_setup_plan, apply_setup_step, evaluate_host
 
 from ._errors import SetupFailed, OpenSshUnavailable, RdmaTestError, SshAccessError, SshKeyError
-from ._mesh import (
-    MeshResult,
-    build_collect_key_script,
-    build_install_keys_script,
-    mesh_ssh_keys_native,
-)
+from ._mesh import MeshResult, mesh_ssh_keys_native
 from ._rdma_plan import CoverageIssue
 from ._rdma import (
     DEFAULT_RDMA_TEST_IMAGE,
@@ -53,7 +61,6 @@ from ._ssh_access import (
     SPARKRUN_KEY_NAME,
     LocalSshKey,
     SshProbe,
-    build_authorized_key_script,
     ensure_local_key,
     install_public_key_interactive,
     probe_ssh_access,
@@ -102,11 +109,6 @@ __all__ = [
     "install_public_key_interactive",
     "mesh_ssh_keys_native",
     "rdma_test",
-    # Script builders (exposed for testing and for callers that pipe them
-    # through their own transport)
-    "build_authorized_key_script",
-    "build_collect_key_script",
-    "build_install_keys_script",
     # Data models
     "SshProbe",
     "LocalSshKey",

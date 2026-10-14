@@ -2194,12 +2194,12 @@ def _build_result(execution: BenchmarkExecution) -> BenchmarkResult:
     )
 
 
+# Public surface only. The in-tree CLI still imports ``_ProgressEmitter`` /
+# ``_execute_benchmark`` / ``_resume_benchmark`` directly: its terminal emitter
+# (banners, schedule progress, step lines) is richer than the public
+# ``progress_callback`` / ``decision_callback`` pair, and those names stay
+# private so that interface can change without a deprecation cycle.
 __all__ = [
     "benchmark",
     "resume_benchmark",
-    "_ProgressEmitter",
-    "_NullProgressEmitter",
-    "_CallbackProgressEmitter",
-    "_execute_benchmark",
-    "_build_result",
 ]

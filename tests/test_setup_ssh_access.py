@@ -18,14 +18,13 @@ from sparkrun.api.setup import (
     SPARKRUN_KEY_NAME,
     OpenSshUnavailable,
     SshKeyError,
-    build_authorized_key_script,
-    build_collect_key_script,
-    build_install_keys_script,
     ensure_local_key,
     install_public_key_interactive,
     mesh_ssh_keys_native,
     probe_ssh_access,
 )
+from sparkrun.api.setup._mesh import build_collect_key_script, build_install_keys_script
+from sparkrun.api.setup._ssh_access import build_authorized_key_script
 from sparkrun.orchestration.ssh import RemoteResult
 
 

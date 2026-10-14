@@ -324,3 +324,24 @@ def test_invalid_benchmark_numeric_config_fails_before_launch(scheduled_env, val
     with pytest.raises(BenchmarkFailed, match="tensor_parallel.*numeric"):
         benchmark(replace(env.options, overrides={"tensor_parallel": value}), sctx=env.sctx)
     env.run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "raised,expected",
+    [(RuntimeError("disk full"), "benchmark resume failed: disk full"), (BenchmarkFailed("typed", exit_code=2), "typed")],
+)
+def test_resume_benchmark_wraps_only_untyped_failures(v, monkeypatch, raised, expected):
+    from sparkrun.api import SparkrunError, default_sctx
+
+    monkeypatch.setattr("sparkrun.api._benchmark._resume_benchmark", Mock(side_effect=raised))
+    with pytest.raises(SparkrunError, match=expected) as error:
+        resume_benchmark("bench-id", sctx=default_sctx())
+    assert type(error.value) is (SparkrunError if isinstance(raised, RuntimeError) else BenchmarkFailed)
+    if isinstance(raised, RuntimeError):
+        assert error.value.__cause__ is raised
+
+
+def test_benchmark_module_exports_only_public_names():
+    from sparkrun.api import _benchmark
+
+    assert _benchmark.__all__ == ["benchmark", "resume_benchmark"]

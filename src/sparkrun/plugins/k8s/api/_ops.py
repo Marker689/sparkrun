@@ -20,7 +20,7 @@ from sparkrun.core.application_profile import resource_name
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sparkrun.api._context import resolve_sctx
+from sparkrun.api import resolve_sctx
 from sparkrun.plugins.k8s.orchestration import (
     KubectlClient,
     configure_service_account as _configure_sa,

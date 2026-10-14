@@ -1,5 +1,10 @@
 """Reusable workload activation, recovery and exact-identity lifecycle control.
 
+.. warning::
+   **Experimental.** The functions, receipts and result dictionaries in this
+   module may change in a minor release while the gateway integrations that
+   drive them settle. Pin a sparkrun version if you depend on them.
+
 Domain receipts survive daemon job retention. There is no queue or detached
 worker here: every action runs in the supplied operation context. Integrations
 supply a fixed owner policy; remote adapters must never accept an arbitrary
@@ -287,7 +292,12 @@ def _await_existing(binding, recipe, revision, placement, deadline, sctx, operat
 
 
 def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, sctx=None):
-    """Adopt or recover before launch; one operation owns placement through readiness."""
+    """Adopt or recover before launch; one operation owns placement through readiness.
+
+    Launches always run with ``trust=False``: a recipe whose hooks need explicit
+    authorization fails with ``WorkloadError("trust_required")`` before any
+    placement receipt is written.
+    """
     from sparkrun import api
     from dataclasses import replace
 
@@ -338,6 +348,14 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
                 plan = api.plan(options, sctx=sctx)
             except api.InsufficientCapacity:
                 continue
+            # ``run`` below is called with trust=False, so untrusted hooks would
+            # raise TrustRejected only after the receipt was saved, leaving a
+            # ``launch_started`` placement every later call has to re-observe.
+            if api.untrusted_hooks(plan.recipe, trust=False, sctx=sctx):
+                raise WorkloadError(
+                    "trust_required",
+                    "Recipe hooks come from an untrusted source; trust its registry or launch it with explicit trust first",
+                )
             placement = {
                 "workload_id": plan.workload_id,
                 "hosts": list(plan.host_list),

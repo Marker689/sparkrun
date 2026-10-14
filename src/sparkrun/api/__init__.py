@@ -23,6 +23,16 @@ party automation, the CLI itself) depend on.  Surfaces:
   ``resume_benchmark``.
 - **Diagnostics** — ``collect_diagnostics`` for standalone bundles and
   ``capture_diagnostics`` for opt-in capture around shared API operations.
+- **Returned types** — :class:`ClusterStatus` (with :class:`HostOccupancy`,
+  :class:`RunningWorkload`, :class:`GpuOccupancy`) from ``status``,
+  :class:`ClusterDefinition` (``RunPlan.cluster``, ``cluster=`` arguments),
+  and :class:`SchedulingRequest` / :class:`SchedulingResult` for ``schedule``.
+  Imported lazily, so ``import sparkrun.api`` stays cheap.
+- **Experimental** (may change in a minor release) — :mod:`sparkrun.api.workloads`,
+  the lifecycle helpers ``wait_ready`` / ``post_launch`` / ``discovery_snapshot``
+  (:class:`PostLaunchResult`), :mod:`sparkrun.api.model_cache`, and the
+  ``sparkrun.api.setup`` planning internals. See
+  ``docs/DISTRIBUTION_API_MIGRATION.md``.
 
 The API never writes to ``stdout`` / ``stderr`` and never calls
 ``sys.exit``. Operational failures generally use :class:`SparkrunError` subclasses;
@@ -40,6 +50,8 @@ field additions are non-breaking, field removals are breaking.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from sparkrun.api import proxy
 from sparkrun.api import setup
@@ -72,7 +84,7 @@ from sparkrun.api._catalog_models import (
     CatalogRegistryResult,
     ResolvedCatalogRecipe,
 )
-from sparkrun.api._context import default_sctx
+from sparkrun.api._context import default_sctx, resolve_sctx
 from sparkrun.api._diagnostics import DiagnosticsCapture, DiagnosticsResult, capture_diagnostics, collect_diagnostics
 from sparkrun.api._errors import (
     AmbiguousCategoryError,
@@ -178,6 +190,7 @@ __all__ = [
     # Session context
     "SparkrunContext",
     "default_sctx",
+    "resolve_sctx",
     "collect_diagnostics",
     "capture_diagnostics",
     "DiagnosticsCapture",
@@ -265,14 +278,14 @@ __all__ = [
 ]
 
 from sparkrun.api import model_cache
-from sparkrun.api._lifecycle import wait_ready, post_launch, discover_endpoints, discovery_snapshot
+from sparkrun.api._lifecycle import PostLaunchResult, wait_ready, post_launch, discover_endpoints, discovery_snapshot  # noqa: F401
 from sparkrun.api._clusters import create_cluster, update_cluster, delete_cluster, set_default_cluster
 
 __all__ += [
     "model_cache",
     "wait_ready",
     "post_launch",
-    "discover_endpoints",
+    "PostLaunchResult",
     "discovery_snapshot",
     "create_cluster",
     "update_cluster",
@@ -285,3 +298,43 @@ __all__ += ["workloads"]
 from . import plugins, features  # noqa: E402
 
 __all__ += ["plugins", "features"]
+
+# Types public functions return (or take), re-exported lazily: importing their
+# core modules eagerly would cost every ``import sparkrun.api`` (and so every
+# shell completion) for callers that never touch them.
+_LAZY_TYPES = {
+    "ClusterStatus": "sparkrun.core.cluster_status",
+    "HostOccupancy": "sparkrun.core.cluster_status",
+    "RunningWorkload": "sparkrun.core.cluster_status",
+    "GpuOccupancy": "sparkrun.core.cluster_status",
+    "ClusterDefinition": "sparkrun.core.cluster_manager",
+    "SchedulingRequest": "sparkrun.core.scheduler",
+    "SchedulingResult": "sparkrun.core.scheduler",
+}
+
+if TYPE_CHECKING:
+    from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.cluster_status import ClusterStatus, GpuOccupancy, HostOccupancy, RunningWorkload
+    from sparkrun.core.scheduler import SchedulingRequest, SchedulingResult
+
+
+def __getattr__(name: str):
+    module = _LAZY_TYPES.get(name)
+    if module is None:
+        raise AttributeError("module %r has no attribute %r" % (__name__, name))
+    import importlib
+
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+__all__ += [
+    "ClusterStatus",
+    "HostOccupancy",
+    "RunningWorkload",
+    "GpuOccupancy",
+    "ClusterDefinition",
+    "SchedulingRequest",
+    "SchedulingResult",
+]

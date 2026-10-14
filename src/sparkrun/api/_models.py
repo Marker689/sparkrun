@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from sparkrun.core.hardware import HostHardware
     from sparkrun.core.recipe import Recipe
     from sparkrun.core.scheduler import RankAssignment
+    from sparkrun.runtimes.base import RuntimePlugin
 
 
 # --------------------------------------------------------------------------
@@ -246,7 +247,7 @@ class RunPlan:
 
     recipe: "Recipe"
     """Resolved recipe (runtime selection finalized, overrides applied)."""
-    runtime: Any
+    runtime: "RuntimePlugin"
     """Resolved :class:`~sparkrun.runtimes.base.RuntimePlugin`."""
     cluster: "ClusterDefinition"
     """Resolved cluster, after transport preparation.  For provider-backed
@@ -497,9 +498,13 @@ class RunResult:
 
     ``None`` only when the intent was already running (nothing launched)."""
     launch_result: Any = None
-    """Opaque handle to the underlying :class:`LaunchResult` for callers
-    that need the raw orchestration object (CLI ``post_launch_lifecycle``,
-    crash diagnostics).  External callers should treat this as private."""
+    """**Opaque, unstable handle** to the launch's internal orchestration
+    object.  Pass it back to sparkrun — :func:`sparkrun.api.wait_ready` and
+    :func:`sparkrun.api.post_launch` accept the whole :class:`RunResult` and
+    read it for you — and test it only for ``None`` (no launch happened: dry
+    run, ``ensure`` hit, or a plugin handler without one).  Its type and
+    attributes are internal and may change in any release; do not read or
+    construct it."""
     intent_id: str = ""
     """Deterministic hex prefix of :attr:`workload_id`.  Same value
     across every run of the same recipe + parallelism + port — useful

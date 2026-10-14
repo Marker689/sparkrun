@@ -23,7 +23,8 @@ def workflow(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "_ready", lambda *a, **kw: None)
     monkeypatch.setattr(api, "plan", Mock(return_value=NS(workload_id="work", host_list=["one"], cluster=NS(name="lab"), recipe=recipe)))
     monkeypatch.setattr(api, "wait_ready", Mock(return_value=NS(ready=True)))
-    monkeypatch.setattr(api, "post_launch", Mock(return_value={"stopped": False}))
+    monkeypatch.setattr(api, "post_launch", Mock(return_value=api.PostLaunchResult(stopped=False)))
+    monkeypatch.setattr(api, "untrusted_hooks", lambda *a, **kw: {})
     return ctx, recipe, binding, job
 
 
@@ -67,6 +68,26 @@ def test_placement_record_precedes_launch_and_survives_interruption(workflow, mo
     with pytest.raises(InterruptedError):
         w.ensure_ready(binding, owner="gateway", sctx=ctx)
     assert w.Receipts(ctx).placements("revision", "gateway")[0]["phase"] == "launch_started"
+
+
+def test_untrusted_hooks_fail_before_any_placement_receipt(workflow, monkeypatch):
+    ctx, recipe, binding, _ = workflow
+    recipe.post_exec = ["effect"]
+    trust_checks = []
+
+    def untrusted(rec, **kwargs):
+        trust_checks.append((rec, kwargs.get("trust")))
+        return {"post_exec": ("effect",)}
+
+    monkeypatch.setattr(api, "untrusted_hooks", untrusted)
+    run = Mock()
+    monkeypatch.setattr(api, "run", run)
+    with pytest.raises(w.WorkloadError) as error:
+        w.ensure_ready(binding, owner="gateway", sctx=ctx)
+    assert error.value.code == "trust_required" and not error.value.retryable
+    assert trust_checks == [(recipe, False)]
+    run.assert_not_called()
+    assert w.Receipts(ctx).placements("revision", "gateway") == []
 
 
 def test_readiness_and_hooks_share_launch_context_and_actual_timestamp(workflow, monkeypatch):

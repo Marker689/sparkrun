@@ -3,6 +3,11 @@
 Inspection is read-only and offline. Resolution contacts the model origin;
 repair is the only operation here that downloads model payloads. These helpers
 never start/evict workloads and do not change api.materialize's contract.
+
+.. warning::
+   **Experimental.** Function signatures and the request/report types
+   (``ModelArtifactRequest``, ``ModelArtifactManifest``, ``CacheValidationReport``,
+   ``CacheReport``) are core types that may change in a minor release.
 """
 
 from __future__ import annotations

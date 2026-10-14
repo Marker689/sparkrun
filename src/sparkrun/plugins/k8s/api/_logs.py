@@ -6,7 +6,7 @@ from collections.abc import Generator
 import threading
 from typing import TYPE_CHECKING, Literal
 
-from sparkrun.api._context import resolve_sctx
+from sparkrun.api import resolve_sctx
 from sparkrun.api._logs import _filter_sources, _nonnegative_int
 from sparkrun.core.log_source import LogLine, SCOPE_ALL, SCOPE_HEAD
 from sparkrun.orchestration.logs import read_log_sources
