@@ -12,6 +12,16 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- `sparkrun.plugins` is the single documented import surface for plugin authors; other
+  module paths are internal. `register_daemon_op`, `register_daemon_route` and
+  `registered_daemon_ops` are no longer exported there (use `register_plugin_daemon_op` /
+  `register_plugin_daemon_route`). `RecipeFormat` / `register_recipe_format` are documented.
+- Every in-process plugin registry follows one rule: re-registering an equal value is a
+  no-op; anything else, including the same owner with a changed definition, raises
+  `PluginConflictError` (feature-flag, recipe-item, workload-lifecycle and daemon conflicts
+  were `ValueError`, declared-registry conflicts `RegistryError`). Recipe-format and
+  registry-declaration revisions and KV-strategy replacement now raise.
+
 - `RunOptions` and `BuildOptions` share their target fields (one internal base); only
   `recipe` may be passed positionally. `BuildOptions.offline` and `sparkrun build
   --offline/--online` are new, and `build -o entrypoint=''` now configures the executor.
@@ -289,6 +299,15 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- One plugin identity conflict or a malformed `integrations:` no longer fails
+  initialization for every command; the offending plugins are skipped and recorded, and
+  launches that need them are refused.
+- Security: a separately installed package in the `sparkrun.plugins` namespace could
+  declare a trusted recipe registry; only release-bundled plugins get the in-tree tier.
+- Directory plugins were evaluated outside the `core.external_plugins` policy gate.
+- `registry add --trust` validates the whole manifest first, adding nothing if any entry
+  is invalid, and applies trust in the same write.
+- Writing `registries.yaml` briefly set the process umask to 0 (a race in threaded hosts).
 - `benchmark --offline`, `export recipe --realize --offline` and library recipe loads by
   name no longer fetch URLs or refresh registries.
 - A recipe revived from job metadata or the registry cache no longer injects its `mods` a

@@ -264,10 +264,12 @@ One consequence worth knowing: `PluggableGroup` attaches plugin commands once
 per process, so the gate is effectively read once per CLI invocation (the test
 suite resets `_cli_ext_loaded`).
 
-**What a cross-cutting plugin gets.** `sparkrun.plugins` re-exports the two
-registration entry points — `register_recipe_item` (own a top-level recipe key,
-optionally with an execution strategy and preparation steps) and
-`register_cli_command`. Together with `Transport.open_host_session`,
+**What a cross-cutting plugin gets.** `sparkrun.plugins` is the single documented
+import surface for plugin authors (one sorted `__all__`, guarded by
+`tests/test_plugin_import_surface.py`); every other module path is internal even
+where it still imports. The two cross-cutting entry points are
+`register_recipe_item` (own a top-level recipe key, optionally with an execution
+strategy and preparation steps) and `register_cli_command`. Together with `Transport.open_host_session`,
 `api.materialize` and `SparkrunConfig.plugin_settings`, those are the seams that
 let an integration participate in a launch without forking it. See
 `docs/PLUGINS.md` for the author-facing version, and the Plugin-Owned Recipe
@@ -329,6 +331,16 @@ and owns attachment), and a plugin registers a **loader** that *builds* its
 command with `import click` inside the function. Registering lazily is not
 enough on its own. `test_api_sctx_threading.py::test_sctx_layer_does_not_import_click`
 guards this.
+
+**One registration rule.** Every in-process registry (recipe items and formats,
+gateways, CLI commands, feature flags, default registries, run handlers,
+benchmark integrations, workload lifecycles, platforms, KV strategies, daemon
+ops) goes through `core.registration.claim_registration`: an equal
+re-registration is a no-op and anything else, including the same owner revising
+its definition, raises `PluginConflictError`, which is recorded at the raise site
+and makes `require_integrations` refuse launches that need the plugin. Contested
+plugin identities are skipped (and recorded) by every loader rather than failing
+bootstrap; `plugin_policy.PluginSource` is the one spelling of a plugin's source.
 
 ### External Plugins (`core/external_plugins.py`)
 
@@ -1253,9 +1265,9 @@ injection, and the drift would only surface on gated or quant-selected models.
 a **top-level recipe key** exclusively, without `Recipe` learning its schema and
 without hiding the settings in `metadata` (untyped, unvalidated, invisible to
 the fingerprint). The core owns lifecycle only; the handler owns
-`parse` / `validate` / `export`. Registration is idempotent for the same owner
-and handler; a second owner raises, so nothing can silently reinterpret an
-existing recipe surface.
+`parse` / `validate` / `export`. Re-registering an equal handler is a no-op;
+anything else raises `PluginConflictError`, so nothing can silently reinterpret
+an existing recipe surface.
 
 Four properties are load-bearing:
 
@@ -1960,8 +1972,8 @@ Three mechanisms, deliberately separate:
   reason `platforms` and `models/kv` stayed in-process. Registration carries a
   **loader**, not the class, so `proxy.engine` can import this module without a
   cycle and registering costs nothing at import time. Repeated registration of
-  the same provider is idempotent; a different provider claiming that name
-  raises `PluginConflictError`. Distinct providers need distinct names.
+  an equal provider is a no-op; anything else claiming that name raises
+  `PluginConflictError`. Distinct providers need distinct names.
   litellm registers in core, not from a plugin: `proxy` must resolve to
   *something* with every plugin absent.
 - **Availability** — `gateway.<name>` feature flag. `gateway.litellm` defaults
@@ -2686,7 +2698,7 @@ another launcher's manifests registers a `RecipeFormat`: `iter_files(root)`,
 an optional `claims(path, data)` for direct paths. What comes out is an ordinary
 recipe, so nothing downstream knows the format existed. In-process like
 `register_kv_strategy`, and enlisted with `enlist_registry_state` so a failed plugin
-load rolls it back. A second owner raises `PluginConflictError`.
+load rolls it back. Anything but an equal re-registration raises `PluginConflictError`.
 
 Three rules, each silently wrong if broken:
 
@@ -2796,6 +2808,8 @@ Six properties are load-bearing:
   hook-execution rights over whatever it contains next month". `load_plugin_module(…, tier=…)` sets a **contextvar**
   around the load rather than taking an argument, because the *plugin* makes the registration call; the default is
   `OUT_OF_TREE` (least privilege), so a declaration made outside any loader cannot acquire in-tree trust.
+  Only a release-bundled plugin at its shipped path is in-tree (`plugin_metadata.is_bundled_plugin`); a package
+  separately installed into the `sparkrun.plugins` namespace (e.g. a managed ColdSnap) loads at the out-of-tree tier.
 - **Collisions are refused and warned, not ranked.** A declaration colliding with a shipped default is rejected with a
   warning naming the owner — checked **before** the file-entry rule, since a shipped default is normally present in the
   file and the reverse order would silently ignore a plugin trying to redefine `official`. Ranking would permit a
