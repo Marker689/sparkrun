@@ -188,7 +188,16 @@ def _isolate_config(monkeypatch, tmp_path):
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_DIR", tmp_path / "config")
 
 
-def _run(monkeypatch, tmp_path, args, *, stored=None, new_json='{"version": "9.9.9", "channel": "x", "commit": "deadbeefcafe"}'):
+def _run(
+    monkeypatch,
+    tmp_path,
+    args,
+    *,
+    stored=None,
+    new_json='{"version": "9.9.9", "channel": "x", "commit": "deadbeefcafe"}',
+    core_rc=0,
+    uv_tool=True,
+):
     _isolate_config(monkeypatch, tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
@@ -201,7 +210,9 @@ def _run(monkeypatch, tmp_path, args, *, stored=None, new_json='{"version": "9.9
         if cmd[1:3] == ["tool", "list"]:
             import sys
 
-            return mock.Mock(returncode=0, stdout="sparkrun v1 (%s)\n" % sys.prefix, stderr="")
+            return mock.Mock(returncode=0, stdout="sparkrun v1 (%s)\n" % (sys.prefix if uv_tool else "/elsewhere"), stderr="")
+        if cmd[1:3] in (["tool", "upgrade"], ["tool", "install"]):
+            return mock.Mock(returncode=core_rc, stdout="", stderr="resolver exploded" if core_rc else "")
         if "sparkrun.core.plugin_update" in cmd:
             return mock.Mock(returncode=0, stdout='{"protocol":1,"host":{"core_version":"0.4.0"},"plugins":[]}', stderr="")
         if cmd == __import__("sparkrun.cli._self_update", fromlist=["identity_probe_argv"]).identity_probe_argv():
@@ -386,3 +397,45 @@ def test_unverified_core_update_audits_without_repairs(monkeypatch, tmp_path, ro
     assert result.exit_code == 0, result.output
     helper = next(c for c in calls if "sparkrun.core.plugin_update" in c)
     assert "--no-update-plugins" in helper
+
+
+BOTH_ROUTES = [["update"], ["setup", "update"]]
+
+
+@pytest.mark.parametrize("route", BOTH_ROUTES)
+def test_failed_core_upgrade_exits_nonzero_on_both_routes(monkeypatch, tmp_path, route):
+    """A failed upgrade is a failure: audit plugins, refresh registries, then exit 1."""
+    result, calls = _run(monkeypatch, tmp_path, route, core_rc=1)
+    assert result.exit_code == 1, result.output
+    assert "upgrade failed: resolver exploded" in result.output
+    helper = next(c for c in calls if "sparkrun.core.plugin_update" in c)
+    assert "--no-update-plugins" in helper
+    assert [owning_executable(), "registry", "update"] in calls
+    assert _stored_channel(tmp_path) == "stable"
+
+
+@pytest.mark.parametrize("route", BOTH_ROUTES)
+def test_non_uv_install_skips_the_core_on_both_routes(monkeypatch, tmp_path, route):
+    """pip / pipx / editable installs skip the self-upgrade; plugins and registries still update."""
+    result, calls = _run(monkeypatch, tmp_path, route, uv_tool=False)
+    assert result.exit_code == 0, result.output
+    assert "skipping self-upgrade" in result.output
+    assert not [c for c in calls if c[1:3] in (["tool", "upgrade"], ["tool", "install"])]
+    helper = next(c for c in calls if "sparkrun.core.plugin_update" in c)
+    assert "--no-update-plugins" not in helper
+    assert [owning_executable(), "registry", "update"] in calls
+
+
+@pytest.mark.parametrize("route", BOTH_ROUTES)
+def test_both_routes_accept_no_update_registries(monkeypatch, tmp_path, route):
+    result, calls = _run(monkeypatch, tmp_path, [*route, "--no-update-registries"])
+    assert result.exit_code == 0, result.output
+    assert [owning_executable(), "registry", "update"] not in calls
+
+
+@pytest.mark.parametrize("route", BOTH_ROUTES)
+def test_both_routes_report_update_telemetry_under_their_own_name(monkeypatch, tmp_path, route):
+    changed = '{"version": "99.9.9", "channel": "stable", "commit": null}'
+    _, _, event = _captured_update_event(monkeypatch, tmp_path, route, new_json=changed)
+    assert event["command"] == "sparkrun " + " ".join(route)
+    assert event["upgraded"] is True and event["self_upgrade_attempted"] is True

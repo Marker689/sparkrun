@@ -198,115 +198,28 @@ def setup_install(ctx, shell, no_update_registries, stable, beta, alpha, yolo):
 @click.option("--yolo", is_flag=True, help="Alias for --alpha")
 @click.pass_context
 def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo, no_update_plugins=False):
-    """Update {app_command} and compatible managed plugins.
+    """Update {app_command}, managed plugins, and recipe registries (same as 'update').
 
-    Requires {app_command} to have been installed via ``uv tool install``. With no
-    channel flag, updates the currently configured channel; a channel flag
-    switches channels. After upgrading, recipe registries are also updated.
+    With no channel flag, updates the currently configured channel; a channel
+    flag switches channels. A non-uv install skips the self-upgrade; a failed
+    upgrade exits non-zero.
 
     \b
       {app_command} setup update
       {app_command} setup update --beta
     """
-    import subprocess
-
-    from sparkrun.cli._self_update import (
-        update_registries_after_core,
-        reconcile_plugin_updates,
-        capture_old_identity,
-        channel_from_flags,
-        describe_change,
-        identity_changed,
-        install_argv,
-        is_uv_tool_install,
-        new_binary_identity,
-        resolve_uv,
-        update_argv,
-        warn_if_downgrade,
-    )
-
-    # Import telemetry NOW, before a possible cross-version downgrade overwrites
-    # the on-disk package mid-run and makes the module unavailable.
-    try:
-        from sparkrun.telemetry import emit_update_event
-    except Exception:
-        emit_update_event = None
-
     from sparkrun.cli._plugins import management_config
+    from sparkrun.cli._self_update import channel_from_flags, run_update
 
     config = management_config(ctx)
-    current = config.self_update_channel
-    requested = channel_from_flags(stable, beta, alpha, yolo)
-    channel = requested if requested is not None else current
-    switching = requested is not None and requested != current
-
-    uv = resolve_uv()
-    if not uv:
-        reconcile_plugin_updates(config.config_path, update=False)
-        click.echo("Error: uv not found. Install uv first: https://docs.astral.sh/uv/", err=True)
-        sys.exit(1)
-
-    if not is_uv_tool_install(uv):
-        reconcile_plugin_updates(config.config_path, update=False)
-        click.echo(
-            f"Error: {get_application_profile().command} was not installed via 'uv tool install'.\n"
-            "Cannot safely upgrade — manage updates through your package manager instead.",
-            err=True,
-        )
-        sys.exit(1)
-
-    if switching:
-        warn_if_downgrade(current, channel)
-        click.echo("Switching to the %s channel..." % channel)
-
-    old_identity = capture_old_identity()
-    old_version = old_identity[0]
-    click.echo("Checking for updates (current: %s)..." % old_version)
-    from sparkrun.core.runtime_lease import guarded_update
-
-    try:
-        result = guarded_update(
-            config,
-            subprocess.run,
-            install_argv(uv, channel) if switching else update_argv(uv, channel),
-            capture_output=True,
-            text=True,
-        )
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
-    if result.returncode != 0:
-        reconcile_plugin_updates(config.config_path, update=False)
-        click.echo(f"Error updating {get_application_profile().command}: %s" % result.stderr.strip(), err=True)
-        sys.exit(1)
-
-    config.set_self_update_channel(channel)
-    # The running process still has the old module cached, so ask the newly
-    # installed binary for its identity (version for stable, commit for git).
-    new_identity = new_binary_identity()
-    new_version = new_identity[0]
-    click.echo(describe_change(channel, old_identity, new_identity))
-
-    reconcile_plugin_updates(config.config_path, update=not no_update_plugins and bool(new_identity[0]))
-
-    if not no_update_registries:
-        update_registries_after_core(config.config_path)
-
-    if emit_update_event is not None:
-        try:
-            emit_update_event(
-                config,
-                command=f"{get_application_profile().command} setup update",
-                old_version=old_version,
-                new_version=new_version,
-                # uv exits 0 whether or not anything was installed, so the identity
-                # comparison is the only evidence an upgrade actually happened.
-                upgraded=identity_changed(channel, old_identity, new_identity),
-                self_upgrade_attempted=True,
-                channel=channel,
-                requested_channel=requested,
-            )
-        except Exception:
-            pass  # best-effort: telemetry must never break `setup update`
+    status = run_update(
+        config,
+        command=f"{get_application_profile().command} setup update",
+        requested=channel_from_flags(stable, beta, alpha, yolo),
+        update_plugins=not no_update_plugins,
+        update_registries=not no_update_registries,
+    )
+    ctx.exit(status)
 
 
 @setup.command("version", hidden=True)

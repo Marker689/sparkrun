@@ -80,6 +80,10 @@ sparkrun update --no-update-plugins   # local plugin audit only; no plugin fetch
 sparkrun setup update --no-update-plugins --no-update-registries
 ```
 
+`setup update` is the same command as `update`. Both skip the self-upgrade (but
+still update plugins and registries) when Sparkrun was not installed as a uv
+tool, and both exit non-zero when the core upgrade fails.
+
 A fresh process checks the resulting core, Python, plugin/profile APIs, and
 installed dependency constraints. Incompatible or unknown candidates and failed
 load tests leave the active plugin intact. Other plugin updates continue after a

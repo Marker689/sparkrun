@@ -165,120 +165,33 @@ def status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json):
 
 @main.command("update")
 @click.option("--no-update-plugins", is_flag=True, help="Audit compatibility without fetching or updating plugins")
+@click.option("--no-update-registries", is_flag=True, help="Skip updating recipe registries")
 @click.option("--stable", is_flag=True, help="Switch to and update the stable channel from its configured source")
 @click.option("--beta", is_flag=True, help="Switch to and update the beta channel from its configured source")
 @click.option("--alpha", is_flag=True, help="Switch to and update the alpha channel from its configured source")
 @click.option("--yolo", is_flag=True, help="Alias for --alpha")
 @click.pass_context
-def update(ctx, stable, beta, alpha, yolo, no_update_plugins=False):
+def update(ctx, stable, beta, alpha, yolo, no_update_plugins=False, no_update_registries=False):
     """Update {app_command}, managed plugins, and recipe registries.
 
     Attempts to upgrade {app_command} via uv if it was installed that way, then
-    always updates recipe registries from git. With no channel flag, updates
-    the currently configured channel; a channel flag switches channels.
+    updates compatible managed plugins and recipe registries. With no channel
+    flag, updates the currently configured channel; a channel flag switches
+    channels. A failed upgrade exits non-zero.
 
     If {app_command} was not installed via uv (e.g. pip, pipx, editable
     install), the self-upgrade step is skipped; compatible managed plugins
     and registries are still updated.
     """
-    import subprocess
-
-    from sparkrun.cli._self_update import (
-        update_registries_after_core,
-        reconcile_plugin_updates,
-        capture_old_identity,
-        channel_from_flags,
-        describe_change,
-        identity_changed,
-        install_argv,
-        is_uv_tool_install,
-        new_binary_identity,
-        resolve_uv,
-        update_argv,
-        warn_if_downgrade,
-    )
-
-    # Import telemetry NOW, before a possible cross-version downgrade (e.g. a
-    # 0.3.x -> 0.2.x switch) overwrites the on-disk package mid-run and makes
-    # the module unavailable. Keeping it resident lets the send still succeed.
-    try:
-        from sparkrun.telemetry.emit import emit_update_event
-    except Exception:
-        emit_update_event = None
-
     from sparkrun.cli._plugins import management_config
+    from sparkrun.cli._self_update import channel_from_flags, run_update
 
     config = management_config(ctx)
-    current = config.self_update_channel
-    requested = channel_from_flags(stable, beta, alpha, yolo)
-    channel = requested if requested is not None else current
-    switching = requested is not None and requested != current
-
-    old_identity = capture_old_identity()
-    old_version = old_identity[0]
-    new_version: str | None = old_version
-    self_upgrade_attempted = False
-    core_identity_verified = True
-    core_update_failed = False
-
-    # --- Step 1: Try self-upgrade via uv (best-effort) ---
-    uv = resolve_uv()
-    upgraded = False
-    if uv and is_uv_tool_install(uv):
-        self_upgrade_attempted = True
-        if switching:
-            warn_if_downgrade(current, channel)
-            click.echo("Switching to the %s channel..." % channel)
-        click.echo(f"Checking for {get_application_profile().command} updates (current: %s)..." % old_version)
-        from sparkrun.core.runtime_lease import guarded_update
-
-        try:
-            result = guarded_update(
-                config,
-                subprocess.run,
-                install_argv(uv, channel) if switching else update_argv(uv, channel),
-                capture_output=True,
-                text=True,
-            )
-        except RuntimeError as exc:
-            raise click.ClickException(str(exc)) from exc
-        if result.returncode == 0:
-            config.set_self_update_channel(channel)
-            new_identity = new_binary_identity()
-            core_identity_verified = bool(new_identity[0])
-            new_version = new_identity[0] or new_version
-            click.echo(describe_change(channel, old_identity, new_identity))
-            # A zero exit only says uv ran: `uv tool upgrade` exits 0 on "Nothing to
-            # upgrade", and git channels reinstall with --force every time. Keying
-            # `upgraded` off the exit code therefore reported every no-op update as a
-            # successful self-upgrade. Compare identities for reporting/telemetry.
-            upgraded = identity_changed(channel, old_identity, new_identity)
-        else:
-            core_update_failed = True
-            click.echo(f"Warning: {get_application_profile().command} upgrade failed: %s" % result.stderr.strip(), err=True)
-            click.echo("Continuing with registry update...", err=True)
-    elif uv:
-        click.echo(f"{get_application_profile().command} not installed via uv tool — skipping self-upgrade.")
-    else:
-        click.echo("uv not found — skipping self-upgrade.")
-
-    reconcile_plugin_updates(config.config_path, update=not no_update_plugins and not core_update_failed and core_identity_verified)
-
-    # Registry refresh also needs the resulting environment and may load plugins.
-    # Keep that execution out of the recovery command, including no-op updates.
-    update_registries_after_core(config.config_path)
-
-    if emit_update_event is not None:
-        try:
-            emit_update_event(
-                config,
-                command=f"{get_application_profile().command} update",
-                old_version=old_version,
-                new_version=new_version,
-                upgraded=upgraded,
-                self_upgrade_attempted=self_upgrade_attempted,
-                channel=channel,
-                requested_channel=requested,
-            )
-        except Exception:
-            pass  # best-effort: telemetry must never break `update`
+    status = run_update(
+        config,
+        command=f"{get_application_profile().command} update",
+        requested=channel_from_flags(stable, beta, alpha, yolo),
+        update_plugins=not no_update_plugins,
+        update_registries=not no_update_registries,
+    )
+    ctx.exit(status)

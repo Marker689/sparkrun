@@ -300,3 +300,101 @@ def update_registries_after_core(config_path, *, executable=None) -> None:
             click.echo("Warning: registry update failed (non-fatal).", err=True)
     except (OSError, subprocess.TimeoutExpired) as exc:
         click.echo("Warning: registry update failed or timed out (non-fatal): %s" % exc, err=True)
+
+
+def run_update(config, *, command: str, requested: str | None, update_plugins: bool = True, update_registries: bool = True) -> int:
+    """Shared body of ``update`` and ``setup update``; returns the exit status.
+
+    Three steps, each in the resulting environment rather than this process:
+    the core self-upgrade (uv tool installs only; any other install method is
+    skipped, not refused, so plugins and registries still refresh), the plugin
+    reconciliation, and the registry refresh. Plugins are repaired only when
+    the core is known: no upgrade attempted, or the new binary's identity
+    verified. A failed core upgrade still audits plugins and refreshes
+    registries, then exits 1.
+    """
+    # Import telemetry NOW, before a possible cross-version downgrade (e.g. a
+    # 0.3.x -> 0.2.x switch) overwrites the on-disk package mid-run and makes
+    # the module unavailable. Keeping it resident lets the send still succeed.
+    try:
+        from sparkrun.telemetry.emit import emit_update_event
+    except Exception:
+        emit_update_event = None
+
+    app = get_application_profile().command
+    current = config.self_update_channel
+    channel = requested if requested is not None else current
+    switching = requested is not None and requested != current
+
+    old_identity = capture_old_identity()
+    old_version = old_identity[0]
+    new_version: str | None = old_version
+    self_upgrade_attempted = False
+    core_identity_verified = True
+    core_update_failed = False
+    upgraded = False
+
+    uv = resolve_uv()
+    if uv and is_uv_tool_install(uv):
+        self_upgrade_attempted = True
+        if switching:
+            warn_if_downgrade(current, channel)
+            click.echo("Switching to the %s channel..." % channel)
+        click.echo("Checking for %s updates (current: %s)..." % (app, old_version))
+        from sparkrun.core.runtime_lease import guarded_update
+
+        try:
+            result = guarded_update(
+                config,
+                subprocess.run,
+                install_argv(uv, channel) if switching else update_argv(uv, channel),
+                capture_output=True,
+                text=True,
+            )
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if result.returncode == 0:
+            config.set_self_update_channel(channel)
+            # The running process still has the old module cached, so ask the
+            # newly installed binary for its identity (version for stable,
+            # commit for git channels).
+            new_identity = new_binary_identity()
+            core_identity_verified = bool(new_identity[0])
+            new_version = new_identity[0] or new_version
+            click.echo(describe_change(channel, old_identity, new_identity))
+            # A zero exit only says uv ran: `uv tool upgrade` exits 0 on "Nothing to
+            # upgrade", and git channels reinstall with --force every time. Compare
+            # identities for reporting/telemetry.
+            upgraded = identity_changed(channel, old_identity, new_identity)
+        else:
+            core_update_failed = True
+            click.echo("Error: %s upgrade failed: %s" % (app, result.stderr.strip()), err=True)
+    elif uv:
+        click.echo("%s not installed via uv tool — skipping self-upgrade." % app)
+    else:
+        click.echo("uv not found — skipping self-upgrade.")
+
+    reconcile_plugin_updates(config.config_path, update=update_plugins and not core_update_failed and core_identity_verified)
+
+    # Registry refresh also needs the resulting environment and may load plugins.
+    # Keep that execution out of the recovery command, including no-op updates.
+    if update_registries:
+        update_registries_after_core(config.config_path)
+
+    if emit_update_event is not None:
+        try:
+            emit_update_event(
+                config,
+                command=command,
+                old_version=old_version,
+                new_version=new_version,
+                upgraded=upgraded,
+                self_upgrade_attempted=self_upgrade_attempted,
+                channel=channel,
+                requested_channel=requested,
+            )
+        except Exception:  # best-effort: telemetry must never break an update
+            import logging
+
+            logging.getLogger(__name__).debug("Update telemetry was not sent", exc_info=True)
+    return 1 if core_update_failed else 0
