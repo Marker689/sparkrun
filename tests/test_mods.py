@@ -472,6 +472,33 @@ def test_recipe_getstate_setstate_roundtrips_mods():
     assert restored.mods == ["foo", "mods/bar"]
 
 
+def test_revived_recipe_does_not_inject_mods_twice(tmp_path: Path):
+    """A recipe revived from saved state (job metadata, registry cache) injects its mods once."""
+    recipe_path = tmp_path / "my.yaml"
+    recipe_path.write_text("name: x\n")
+    _write_mod(tmp_path / "mods", "foo")
+    mgr = _make_registry_manager(tmp_path, [])
+
+    recipe = Recipe.from_dict(
+        {
+            "name": "test",
+            "model": "m",
+            "runtime": "vllm-distributed",
+            "container": "img:tag",
+            "mods": ["foo"],
+            "pre_exec": ["echo hello"],
+        }
+    )
+    recipe.source_path = str(recipe_path)
+    resolve_and_inject_mods(recipe, mgr)
+    assert len(recipe.pre_exec) == 3
+
+    revived = Recipe._deserialize(recipe.__getstate__())
+    assert revived.pre_exec == ["echo hello"]
+    resolve_and_inject_mods(revived, mgr)
+    assert revived.pre_exec == recipe.pre_exec
+
+
 # ---------------------------------------------------------------------------
 # Delegated existence verification & 4-stage fall-through
 # ---------------------------------------------------------------------------

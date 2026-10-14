@@ -2248,11 +2248,19 @@ class Recipe:
             self.runtime_config.pop(key, None)
         self.capabilities = list(state.get("capabilities") or [])
         self.unsupported_capabilities = list(state.get("unsupported_capabilities") or [])
-        self.pre_exec = coerce_command_list(state.get("pre_exec") or [])
         self.post_exec = coerce_command_list(state.get("post_exec") or [])
         self.post_commands = coerce_command_list(state.get("post_commands") or [])
         self.stop_after_post = bool(state.get("stop_after_post", False))
         self.mods = list(state.get("mods") or [])
+        # Saved ``pre_exec`` carries the entries mods injected for *that*
+        # launch (control-machine or head cache paths). A revived recipe is
+        # unresolved again: take the declared hooks, so a relaunch injects
+        # its mods afresh rather than a second time.
+        self._mods_resolved = False
+        pre_exec = state.get("pre_exec") or []
+        if self.mods and "_raw" in state:
+            pre_exec = self._raw.get("pre_exec") or []
+        self.pre_exec = coerce_command_list(pre_exec)
         self.builder = state.get("builder", "")
         self.builder_config = dict(state.get("builder_config") or {})
         self.executor = str(state.get("executor", "") or "")
