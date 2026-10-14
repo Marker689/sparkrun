@@ -289,13 +289,12 @@ def _endpoint_from_job(
     if meta.get("recipe_state"):
         try:
             from sparkrun.core.recipe import Recipe
-            from sparkrun.api._resolve import resolve_runtime
 
-            recipe = Recipe._deserialize(meta["recipe_state"])
+            recipe = Recipe.from_state(meta["recipe_state"])
             plugin_items = recipe.export_plugin_items()
-            runtime = resolve_runtime(recipe)
-            protocols = runtime.native_protocols(recipe)
-            capabilities = sorted(set(recipe.capabilities or []) | set(runtime.native_capabilities(recipe)))
+            serving = api.recipe_protocols(recipe)
+            protocols = list(serving.protocols)
+            capabilities = sorted(set(recipe.capabilities or []) | set(serving.capabilities))
         except Exception:
             logger.debug("Cannot resolve serving APIs from saved recipe for %s", job.workload_id, exc_info=True)
 

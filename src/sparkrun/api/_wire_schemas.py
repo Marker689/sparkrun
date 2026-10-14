@@ -3,6 +3,8 @@
 These are explicit wire contracts, separate from runtime Python object graphs.
 """
 
+from copy import deepcopy
+
 from sparkrun.api._wire import object_schema
 from sparkrun.models._cache_contract import CACHE_REASONS
 
@@ -3157,6 +3159,10 @@ RESULT_SCHEMAS["discovery.snapshot"] = {
     },
     "required": ["sweep_id", "observed_at", "mode", "complete", "hosts", "covered_hosts", "errors", "endpoints"],
 }
+# Workload results reuse the credential-free endpoint projection as it stood;
+# only ``discovery.snapshot`` adds the recorded recipe reference.
+_workload_endpoint = deepcopy(RESULT_SCHEMAS["discovery.snapshot"]["properties"]["endpoints"]["items"])
+RESULT_SCHEMAS["discovery.snapshot"]["properties"]["endpoints"]["items"]["properties"]["recipe_name"] = {"type": "string"}
 RESULT_SCHEMAS["proxy.status"]["properties"]["discovery_status"] = {"type": "object"}
 RESULT_SCHEMAS["proxy.start"]["properties"]["discovery_backend"] = {"type": "string", "enum": ["process", "daemon"]}
 
@@ -3174,7 +3180,6 @@ for _name in ("catalog.recipe", "catalog.import"):
 _workload_string = {"type": "string"}
 _workload_nullable = {"type": ["string", "null"]}
 _workload_strings = {"type": "array", "items": _workload_string}
-_workload_endpoint = RESULT_SCHEMAS["discovery.snapshot"]["properties"]["endpoints"]["items"]
 _workload_row = object_schema(
     {
         "workload_id": _workload_string,

@@ -1131,6 +1131,83 @@ def _evict_superseded_deployments(
     return evicted, status.observation
 
 
+def replace_intent_deployments(
+    plan: RunPlan,
+    *,
+    strict: bool = True,
+    include_current: bool = True,
+    sctx: "SparkrunContext | None" = None,
+) -> tuple[str, ...]:
+    """Tear down running deployments of ``plan.intent_id`` that overlap the plan (experimental).
+
+    The replacement :func:`run` performs at its ``before_start`` barrier, for
+    callers that start workload processes **outside** :func:`run` and so never
+    reach that barrier — an earlier deployment left serving would hold the
+    port and the accelerators the new processes are about to bind. Call it
+    once everything slow and interruptible is done, immediately before the
+    processes start, for the same reason :func:`run` defers it.
+
+    Same rules as the launch: only deployments of this intent, only those
+    occupying a host in ``plan.host_list``, and each torn down across every
+    host in ``plan.candidate_hosts`` it occupies. Foreign workloads and
+    non-overlapping deployments of the same intent are never touched.
+
+    Args:
+        plan: The :func:`plan` result the processes are being started for.
+        strict: Raise :class:`SparkrunError` when the status sweep is
+            incomplete or a teardown is not confirmed, rather than logging
+            and continuing. The default, because a caller starting its own
+            processes has no later step that would surface the collision.
+        include_current: Also replace a deployment already running under
+            ``plan.workload_id``. :func:`run`'s runtime removes those by name
+            itself; a caller that does not must leave this on.
+        sctx: Optional shared context.
+
+    Returns:
+        The workload ids torn down, in discovery order (empty when none).
+    """
+    sctx = resolve_sctx(sctx)
+    cluster_def = plan.cluster
+    if plan._destination is not None and plan._destination.user_scoped:
+        cluster_def = replace(cluster_def, user=plan._destination.ssh_user)
+    sctx = sctx.for_cluster(cluster_def)
+    try:
+        evicted, _ = _evict_superseded_deployments(
+            intent_id=plan.intent_id,
+            cluster_id_for_launch=plan.workload_id,
+            candidate_hosts=list(plan.candidate_hosts),
+            target_hosts=list(plan.host_list),
+            cluster_def=cluster_def,
+            config=sctx.config,
+            sctx=sctx,
+            strict=strict,
+            include_current=include_current,
+        )
+    except RuntimeError as error:
+        raise SparkrunError(str(error)) from error
+    return tuple(evicted)
+
+
+def fresh_workload_id(plan: RunPlan) -> RunPlan:
+    """Return *plan* under a new random placement token (experimental).
+
+    The copy keeps the intent and placement and carries a matching
+    ``placement_token`` and canonical ``workload_id``
+    (``sparkrun_<intent_id>_<token>``), whatever the scheduler would have
+    derived. For a temporary workload that must never share an id with the
+    real deployment of the same recipe: under a deterministic scheduler both
+    would otherwise get the same id, and stopping one would stop the other.
+    Pass the copy to :func:`run` (``run(options, plan=fresh)``).
+
+    Raises:
+        ValueError: ``plan.intent_id`` is not a canonical intent id.
+    """
+    from sparkrun.orchestration.job_metadata import generate_cluster_id, generate_placement_token
+
+    token = generate_placement_token()
+    return replace(plan, placement_token=token, workload_id=generate_cluster_id(plan.intent_id, token))
+
+
 def _resolve_scheduler_name(effective_scheduler, sctx):
     """Return the registered ``scheduler_name`` for *effective_scheduler*.
 
@@ -1162,4 +1239,4 @@ def _executor_name_from_result(result) -> str:
     return getattr(executor, "executor_name", "docker")
 
 
-__all__ = ["run", "untrusted_hooks"]
+__all__ = ["run", "untrusted_hooks", "replace_intent_deployments", "fresh_workload_id"]

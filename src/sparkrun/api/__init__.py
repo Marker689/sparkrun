@@ -30,7 +30,8 @@ party automation, the CLI itself) depend on.  Surfaces:
   Imported lazily, so ``import sparkrun.api`` stays cheap.
 - **Experimental** (may change in a minor release) — :mod:`sparkrun.api.workloads`,
   the lifecycle helpers ``wait_ready`` / ``post_launch`` / ``discovery_snapshot``
-  (:class:`PostLaunchResult`), :mod:`sparkrun.api.model_cache`,
+  (:class:`PostLaunchResult`), the out-of-launch helpers
+  ``replace_intent_deployments`` / ``fresh_workload_id``, :mod:`sparkrun.api.model_cache`,
   :mod:`sparkrun.api.systemd_export` (imported on demand), and the
   ``sparkrun.api.setup`` planning internals. See
   ``docs/DISTRIBUTION_API_MIGRATION.md``.
@@ -116,6 +117,7 @@ from sparkrun.api._models import (
     JobInfo,
     LogLine,
     LogSource,
+    RecipeProtocols,
     RecipeSummary,
     ResolvedAdapterTopology,
     ResolvedExecutionGraph,
@@ -131,9 +133,10 @@ from sparkrun.api._models import (
     StopAllResult,
     StopResult,
 )
+from sparkrun.api._protocols import recipe_protocols
 from sparkrun.api._realize import RealizedRecipe, realize_recipe
 from sparkrun.api._recipes import resolve_recipe_filter, search_recipes
-from sparkrun.api._run import plan, run, untrusted_hooks
+from sparkrun.api._run import fresh_workload_id, plan, replace_intent_deployments, run, untrusted_hooks
 from sparkrun.api._schedule import schedule
 from sparkrun.api._status import status, status_report
 from sparkrun.api._stop import stop
@@ -288,6 +291,10 @@ __all__ += [
     "post_launch",
     "PostLaunchResult",
     "discovery_snapshot",
+    "recipe_protocols",
+    "RecipeProtocols",
+    "replace_intent_deployments",
+    "fresh_workload_id",
     "create_cluster",
     "update_cluster",
     "delete_cluster",

@@ -152,6 +152,25 @@ they may move between releases without notice. The operational APIs a plugin
 `sparkrun.api` (including `sparkrun.api.setup`) and `sparkrun.application`; see
 the [0.4 migration guide](DISTRIBUTION_API_MIGRATION.md).
 
+Several of those calls exist specifically so an integration need not reach
+internals; prefer them over the internal they replace:
+
+| Need | Call |
+| --- | --- |
+| Wait on a workload launched by an earlier process | `api.wait_ready(workload_id=...)` |
+| Which dialects a recipe's runtime serves | `api.recipe_protocols(recipe)` → `RecipeProtocols` |
+| Endpoints of every recorded job, without a cluster sweep | `api.discovery_snapshot(metadata_only=True, workload_ids=...)` |
+| The recipe a job was launched with | `Recipe.from_state(job.metadata["recipe_state"])` |
+| Environment binding a child process to this application | `sparkrun.application.child_environment()` |
+| Replace this intent's deployments before starting your own processes | `api.replace_intent_deployments(plan)` (experimental) |
+| A plan with an id no other deployment can share | `api.fresh_workload_id(plan)` (experimental) |
+
+`replace_intent_deployments` is for a strategy or command that starts workload
+processes **outside** `api.run`, and so never reaches its `before_start`
+replacement barrier. Call it once preparation is done, immediately before the
+processes start: eviction tears down a serving deployment, so anything slow or
+interruptible left after it risks leaving neither deployment running.
+
 Besides registration entry points, the surface carries the contracts a plugin
 cannot avoid touching: the execution-strategy types (`ExecutionContext`,
 `PreparationStep`, `PreparedExecution`, `ActivationContext`, `ActivationResult`,

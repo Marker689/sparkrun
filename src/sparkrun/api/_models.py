@@ -342,6 +342,25 @@ class RunPlan:
 
 
 @dataclass(frozen=True)
+class RecipeProtocols:
+    """Serving dialects a recipe's runtime answers natively (:func:`sparkrun.api.recipe_protocols`).
+
+    Describes what a deployment *can* serve, not what it *is*: neither field
+    takes part in the recipe fingerprint or the intent id.
+    """
+
+    protocols: tuple[str, ...]
+    """API dialects served natively, most preferred first (``RuntimePlugin.native_protocols``).
+    Never empty: a runtime that reports none is read as ``("openai",)``, the
+    dialect every sparkrun runtime serves."""
+    capabilities: tuple[str, ...]
+    """Operations the runtime declares natively within those dialects
+    (``RuntimePlugin.native_capabilities``, e.g. ``"responses"``). The
+    recipe's own declared ``capabilities:`` are on the recipe and are not
+    folded in here."""
+
+
+@dataclass(frozen=True)
 class ResolvedMount:
     """One host-to-container mount in a materialized launch."""
 

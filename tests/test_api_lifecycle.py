@@ -100,7 +100,7 @@ def test_wait_ready_rejects_negative_timeout(readiness):
 @pytest.fixture
 def discovery(monkeypatch):
     seen = NS(snapshot=[], prepared=[])
-    snapshot = Mock(to_dict=Mock(return_value={"endpoints": []}))
+    snapshot = Mock(endpoints=[], to_dict=Mock(return_value={"endpoints": []}))
     monkeypatch.setattr("sparkrun.proxy.discovery.discover_snapshot", lambda **kw: seen.snapshot.append(kw) or snapshot)
     monkeypatch.setattr("sparkrun.api._resolve.prepare_transport", lambda cluster, **kw: seen.prepared.append(cluster))
     return seen

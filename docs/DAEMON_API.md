@@ -221,7 +221,7 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `discovery.snapshot` | `/v1/discovery/snapshot` | job / read | auto | `hosts: string[]`, `cluster: string`, `workload_ids: string[]` |
+| `discovery.snapshot` | `/v1/discovery/snapshot` | job / read | auto | `hosts: string[]`, `cluster: string`, `workload_ids: string[]`, `metadata_only: boolean` |
 
 ### model_cache
 

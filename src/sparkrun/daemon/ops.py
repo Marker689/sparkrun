@@ -45,7 +45,7 @@ SPECS = [
     ("catalog.search", "search_recipes", "query", "read", "query registry runtime include_hidden include_local unique_names", ""),
     ("workloads.stop_matching", "stop", "job", "operate", "workload_id recipe hosts cluster overrides", ""),
     ("workloads.stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", "hosts|cluster"),
-    ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster workload_ids", ""),
+    ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster workload_ids metadata_only", ""),
     (
         "benchmarks.resume",
         "resume_benchmark",

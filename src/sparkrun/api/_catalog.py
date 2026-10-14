@@ -307,6 +307,7 @@ def get_recipe_details(
     reference: str, overrides: dict[str, Any] | None = None, *, expected_revision: str | None = None, sctx: SparkrunContext | None = None
 ) -> CatalogRecipeDetails:
     """Resolve a selection into a safe model-configuration preview, without launching."""
+    from sparkrun.api._protocols import runtime_protocols
     from sparkrun.api._resolve import resolve_runtime
     from sparkrun.core.launcher import resolve_recipe_trust
     from sparkrun.core.recipe_items import registered_recipe_items
@@ -319,6 +320,7 @@ def get_recipe_details(
         path, registry, imported, overrides, config=sctx.config, registry_manager=sctx.registry_manager
     )
     runtime = resolve_runtime(recipe, sctx=sctx)
+    serving = runtime_protocols(runtime, recipe)
     trusted = resolve_recipe_trust(recipe, False, sctx=sctx, registry_entry=registry)
     issues: list[CatalogIssue] = [
         cast(CatalogIssue, issue.to_dict())
@@ -400,8 +402,8 @@ def get_recipe_details(
         "recipe_revision": revision,
         "plugin_items": recipe.export_plugin_items(),
         "native_api_options": runtime.native_api_options(),
-        "native_protocols": list(runtime.native_protocols(recipe) or ("openai",)),
-        "capabilities": sorted(set(getattr(recipe, "capabilities", []) or []) | set(runtime.native_capabilities(recipe))),
+        "native_protocols": list(serving.protocols),
+        "capabilities": sorted(set(getattr(recipe, "capabilities", []) or []) | set(serving.capabilities)),
         "required_plugins": plugins,
         "available_plugins": sorted({item.owner for item in registered_recipe_items()}),
         "trusted": trusted,

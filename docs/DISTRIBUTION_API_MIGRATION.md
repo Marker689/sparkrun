@@ -9,7 +9,7 @@ shared unless noted below. The tables also cover pre-release plugin contracts.
 
 | Consumer | Supported surface |
 | --- | --- |
-| Application authors | `sparkrun.application`: `initialize`, `run_cli`, `ApplicationProfile`, `UpdateSource`, `APPLICATION_PROFILE_API_VERSION`, and application/controller identity helpers. |
+| Application authors | `sparkrun.application`: `initialize`, `run_cli`, `ApplicationProfile`, `UpdateSource`, `APPLICATION_PROFILE_API_VERSION`, `child_environment`, and application/controller identity helpers. |
 | Workload and benchmark callers | `sparkrun.api`: operation functions, options, results, decisions/events, operational errors, `resolve_sctx` / `default_sctx`, and the returned types listed under [stability tiers](#stability-tiers-and-returned-types). |
 | Catalog/front-end callers | `sparkrun.api`: catalog functions and `Catalog*` dictionary types; see the [headless catalog guide](CATALOG_API.md#browse-preview-and-retain). |
 | Setup callers | `sparkrun.api.setup`: SSH bootstrap/mesh, `rdma_test`, host-identity check/rotation, the `run_setup_steps` / `run_setup_undo` runners and their results, statuses, and `SetupFailed`. The planning internals it re-exports are **experimental** (see below). |
@@ -56,6 +56,9 @@ pin a sparkrun version if you depend on them:
   result dictionaries).
 - The lifecycle helpers `api.wait_ready`, `api.post_launch` (returns
   `api.PostLaunchResult`) and `api.discovery_snapshot`.
+- The out-of-launch helpers `api.replace_intent_deployments` and
+  `api.fresh_workload_id`, for integrations that start workload processes
+  themselves.
 - `sparkrun.api.model_cache`.
 - `sparkrun.api.systemd_export` (the steps behind `export systemd`: `plan`,
   `locate_host` / `bootstrap_host`, `render`, `install_files` / `install_unit` /
@@ -75,6 +78,13 @@ pin a sparkrun version if you depend on them:
 | `api.post_launch(...)` returning `{"stopped": bool}` | `api.PostLaunchResult(stopped=...)`. Trust is required only when the recipe has `post_exec` / `post_commands`, and the verdict `run` recorded is reused. |
 | `api.wait_ready(result, timeout=0)` raising `ValueError` | `0` (like `None`) adds no caller budget, matching the readiness config's "`0` = unbounded"; the readiness policy and operation cancellation still apply. Negative values raise. |
 | `api.discovery_snapshot(cluster="unknown")` raising `ValueError`; no default cluster | Resolves like other `api` calls (explicit hosts/cluster, else the default cluster, else `default_hosts`), prepares the cluster's transport and uses its SSH identity. An unknown cluster raises `SparkrunError`. With no host source the snapshot stays metadata-only. |
+| `api.wait_ready(result)` only; recovering an earlier launch through `core.launcher.wait_for_endpoint_ready` + `api._resolve.resolve_runtime` + `build_ssh_kwargs` | `api.wait_ready(workload_id=...)` (exactly one of `result` / `workload_id`). Hosts, port and runtime come from the job metadata, the connection from the job's recorded cluster (as `stop` / `logs` resolve it), the policy from `readiness.*` plus the recorded recipe. Same `timeout` and cancellation semantics. Unknown workload: `JobNotFound`. |
+| `api._resolve.resolve_runtime(recipe).native_protocols(recipe)` / `.native_capabilities(recipe)` | `api.recipe_protocols(recipe, sctx=...)` → `api.RecipeProtocols(protocols, capabilities)`: tuples; `protocols` is never empty (`("openai",)` when the runtime claims nothing); `capabilities` are the runtime's native ones, not the recipe's declared `capabilities:`. Resolves the runtime only (no planning, no SSH); an unknown runtime raises `SparkrunError`. |
+| `sparkrun.proxy.discovery.discover_endpoints(check_health=True, cluster_ids=...)` over all recorded jobs | `api.discovery_snapshot(metadata_only=True, workload_ids=...)`: every recorded job is a candidate, no status sweep or SSH, endpoints still HTTP-probed (healthy only, `mode="metadata"`). Combining it with `hosts` / `cluster` raises `ValueError`. Endpoints in both modes now carry `recipe_name`; the `workloads.*` endpoint projection is unchanged. Daemon: `discovery.snapshot` accepts `metadata_only`. |
+| `Recipe._deserialize(job.metadata["recipe_state"])` | `Recipe.from_state(state)` (also exported as `sparkrun.plugins.Recipe`): the recipe as recorded at launch, nothing re-resolved. A non-mapping raises `TypeError`. |
+| `sparkrun.core.application_profile.child_environment` | `sparkrun.application.child_environment` (same function). |
+| Reimplementing pre-start eviction with `api.status` + `api.find_running_intent` + `api.stop` | `api.replace_intent_deployments(plan, *, strict=True, include_current=True, sctx=None) -> tuple[str, ...]` (**experimental**): the replacement `run` performs at its `before_start` barrier, for processes started outside `run`. Same intent only, deployments overlapping `plan.host_list`, each torn down on every `plan.candidate_hosts` host it occupies. `strict` raises `SparkrunError` on an incomplete status sweep or unconfirmed teardown. |
+| `generate_placement_token()` + `generate_cluster_id()` + `dataclasses.replace(plan, ...)` | `api.fresh_workload_id(plan) -> RunPlan` (**experimental**): a copy with a random `placement_token` and its canonical `workload_id`, whatever the scheduler would derive. A non-canonical `intent_id` raises `ValueError`. |
 | `api.discover_endpoints` in `api.__all__` | Removed from the public list (still importable for now). Use `api.discovery_snapshot`, or `sparkrun.proxy.discovery.discover_endpoints` from gateway code. |
 | `api.setup.build_authorized_key_script` / `build_collect_key_script` / `build_install_keys_script` | Removed from `api.setup`; they remain in `api.setup._ssh_access` / `api.setup._mesh` for tests. The SSH operations own script generation. |
 | `api._benchmark.__all__` listing `_ProgressEmitter`, `_execute_benchmark`, `_build_result` | Lists only `benchmark` and `resume_benchmark`. The private emitter is a CLI adapter; use `progress_callback` / `decision_callback`. |

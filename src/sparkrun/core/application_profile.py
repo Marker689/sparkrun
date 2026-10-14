@@ -236,6 +236,17 @@ def resource_name(suffix: str = "") -> str:
 
 
 def child_environment(*, config_path: str | Path | None = None) -> dict[str, str]:
+    """Environment variables that bind a child process to this application.
+
+    Merge the result over the child's environment so a subprocess that calls
+    :func:`sparkrun.application.initialize` (or ``run_cli``) selects the same
+    application profile and, when *config_path* is given, the same
+    configuration file. Returns only the binding variables, not the parent's
+    whole environment.
+
+    Raises:
+        RuntimeError: The selected profile has no ``profile_ref`` to export.
+    """
     profile = get_application_profile()
     if not profile.profile_ref:
         raise RuntimeError("Application profile %r must provide profile_ref for child execution" % profile.id)

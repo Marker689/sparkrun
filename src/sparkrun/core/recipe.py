@@ -2288,6 +2288,25 @@ class Recipe:
         instance.__setstate__(data)
         return instance
 
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> Recipe:
+        """Rebuild a recipe from its serialized state.
+
+        *state* is what sparkrun persists for a launched recipe — job
+        metadata's ``recipe_state`` and the benchmark state's saved recipe.
+        The result is the recipe **as it was at launch**: nothing is
+        re-resolved, so it reads neither the recipe file nor a registry, and
+        a recipe edited since the launch does not leak into it. Plugin-owned
+        items are re-parsed by their handler when the owning plugin is
+        loaded, and preserved verbatim otherwise.
+
+        Raises:
+            TypeError: *state* is not a mapping.
+        """
+        if not isinstance(state, dict):
+            raise TypeError("Recipe state must be a mapping, got %s" % type(state).__name__)
+        return cls._deserialize(state)
+
     def _serialize_yaml(self) -> str:
         """Serialize full Recipe state to a YAML string."""
         from sparkrun.utils.yaml_helpers import LiteralBlockDumper
