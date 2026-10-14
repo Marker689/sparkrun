@@ -10,9 +10,9 @@ shared unless noted below. The tables also cover pre-release plugin contracts.
 | Consumer | Supported surface |
 | --- | --- |
 | Application authors | `sparkrun.application`: `initialize`, `run_cli`, `ApplicationProfile`, `UpdateSource`, `APPLICATION_PROFILE_API_VERSION`, and application/controller identity helpers. |
-| Workload and benchmark callers | `sparkrun.api`: operation functions, options, results, decisions/events, and operational errors. |
+| Workload and benchmark callers | `sparkrun.api`: operation functions, options, results, decisions/events, operational errors, `resolve_sctx` / `default_sctx`, and the returned types listed under [stability tiers](#stability-tiers-and-returned-types). |
 | Catalog/front-end callers | `sparkrun.api`: catalog functions and `Catalog*` dictionary types; see the [headless catalog guide](CATALOG_API.md#browse-preview-and-retain). |
-| Setup callers | `sparkrun.api.setup`: checks/models, probe/plan helpers, apply/undo runners, manifest manager, statuses, and `SetupFailed`. |
+| Setup callers | `sparkrun.api.setup`: SSH bootstrap/mesh, `rdma_test`, host-identity check/rotation, the `run_setup_steps` / `run_setup_undo` runners and their results, statuses, and `SetupFailed`. The planning internals it re-exports are **experimental** (see below). |
 | Benchmark integration authors | `sparkrun.core.benchmark_integrations`: registration, `BenchmarkIntegration`, `BenchmarkDefaults`, context and immutable measurement/state snapshots. |
 | Setup extension authors | `sparkrun.core.setup_steps`: step/constraint registration; `sparkrun.core.setup_plans.SetupPlan`: hardware-owned, opt-in executor plans; caller-facing types are also exported by `api.setup`. |
 | Other extension authors | Documented registries such as `core.cli_registry`, `core.run_handlers`, `core.hardware_probe_extensions`, and `core.features`; shared transactions and `PLUGIN_API_VERSION` in `core.registration`. |
@@ -22,6 +22,63 @@ shared unless noted below. The tables also cover pre-release plugin contracts.
 Documented core extension modules remain supported imports. Private API/CLI
 modules are implementation details; installed plugins should not depend on the
 bundled Arena adapter's private command helpers.
+
+## Stability tiers and returned types
+
+**Re-exported from `sparkrun.api`** because public functions return or take them
+(imported lazily, so `import sparkrun.api` does not load their modules):
+
+| Type | Returned by / used with |
+| --- | --- |
+| `ClusterStatus`, `HostOccupancy`, `RunningWorkload`, `GpuOccupancy` | `api.status()` and the occupancy inside `api.status_report()` / monitor frames. |
+| `ClusterDefinition` | `RunPlan.cluster`, `BuildPlan.cluster`, and every `cluster=` argument. |
+| `SchedulingRequest`, `SchedulingResult` | `api.schedule()`. |
+
+They are the core classes (`api.ClusterStatus is core.cluster_status.ClusterStatus`),
+so `isinstance` checks and attribute access are stable; field additions are
+non-breaking.
+
+**Opaque or unstable** — returned by public functions but not part of the
+contract; read only what is documented here:
+
+| Value | Treat as |
+| --- | --- |
+| `RunResult.launch_result` | An opaque handle. Pass the whole `RunResult` back to `wait_ready` / `post_launch`, and test the handle only for `None` (no launch: dry run, `ensure` hit, or a handler without one). Its type and attributes may change in any release. |
+| `api.status_report()` result (`ClusterStatusResult`) | A display aggregate; its shape follows the CLI's grouping and may change. Use `api.status()` for occupancy. |
+| `TelemetrySession` (`api.open_telemetry()`) | A session handle: call `snapshot()` / `close()` only. |
+| `RealizedRecipe.pins` (`api._pin.Pin`) | Diagnostic records of what pinning resolved; the realized recipe document is the contract. |
+| `ModelArtifactRequest` and the reports of `api.model_cache` | Core model types; see experimental surfaces below. |
+
+**Experimental** — usable, documented, but may change in a 0.4.x minor release;
+pin a sparkrun version if you depend on them:
+
+- `sparkrun.api.workloads` (activation, receipts, lifecycle control and their
+  result dictionaries).
+- The lifecycle helpers `api.wait_ready`, `api.post_launch` (returns
+  `api.PostLaunchResult`) and `api.discovery_snapshot`.
+- `sparkrun.api.model_cache`.
+- The `sparkrun.api.setup` planning internals: `ManifestManager`,
+  `SetupManifest`, `PhaseRecord`, `SetupPlan`, `PlannedStep`, `SetupStep`,
+  `CheckContext`, `CheckItem`, `HostState`, `SetupActionContext`,
+  `SetupActionResult`, `probe_setup_hosts`, `resolve_setup_context`,
+  `build_setup_plan`, `evaluate_host` and `apply_setup_step`.
+
+## Run and build options, lifecycle helpers and exports
+
+| Previous surface | 0.4.0 surface |
+| --- | --- |
+| `RunOptions` / `BuildOptions` fields passed positionally after `recipe` | Keyword-only. Both now share one base (`api._models.TargetOptions`, internal) holding `recipe`, `hosts`, `cluster`, `overrides`, `dry_run`, `trust`, transfer/cache fields, `offline`, `executor` / `executor_config`, `topology`, `sync_tuning` and the model-distribution overrides, with unchanged names and defaults. Only `recipe` is positional. |
+| `BuildOptions` without `offline`; executor keys in `BuildOptions.overrides` rendered as serve flags | `BuildOptions.offline` (same meaning as `RunOptions.offline`; `BuildPlan.offline` records the resolved mode) and the same executor-key split, so `build -o entrypoint=''` reaches `executor_config`. `sparkrun build --offline/--online`. |
+| `api.post_launch(...)` returning `{"stopped": bool}` | `api.PostLaunchResult(stopped=...)`. Trust is required only when the recipe has `post_exec` / `post_commands`, and the verdict `run` recorded is reused. |
+| `api.wait_ready(result, timeout=0)` raising `ValueError` | `0` (like `None`) adds no caller budget, matching the readiness config's "`0` = unbounded"; the readiness policy and operation cancellation still apply. Negative values raise. |
+| `api.discovery_snapshot(cluster="unknown")` raising `ValueError`; no default cluster | Resolves like other `api` calls (explicit hosts/cluster, else the default cluster, else `default_hosts`), prepares the cluster's transport and uses its SSH identity. An unknown cluster raises `SparkrunError`. With no host source the snapshot stays metadata-only. |
+| `api.discover_endpoints` in `api.__all__` | Removed from the public list (still importable for now). Use `api.discovery_snapshot`, or `sparkrun.proxy.discovery.discover_endpoints` from gateway code. |
+| `api.setup.build_authorized_key_script` / `build_collect_key_script` / `build_install_keys_script` | Removed from `api.setup`; they remain in `api.setup._ssh_access` / `api.setup._mesh` for tests. The SSH operations own script generation. |
+| `api._benchmark.__all__` listing `_ProgressEmitter`, `_execute_benchmark`, `_build_result` | Lists only `benchmark` and `resume_benchmark`. The private emitter is a CLI adapter; use `progress_callback` / `decision_callback`. |
+| `sparkrun.api._context.resolve_sctx` | `sparkrun.api.resolve_sctx`. |
+| `core.resolve.load_recipe(config, name, *, resolve)` | Adds keyword-only `offline`, `allow_untrusted_host`, `choose_ambiguous`, `retry_after_update` and `on_refresh`; the CLI's interactive loader wraps it. `benchmark` and `export recipe --realize` now load by name honoring `offline`. |
+| `api.catalog_recipes()` deleting abandoned imports while listing | Listing is read-only. Abandoned imports are swept when a new import is staged or by `cleanup_catalog_imports()`; re-importing the same content restarts its age, and an unreadable reference record is skipped (kept) rather than failing the sweep. |
+| `workloads.ensure_ready()` writing a `launch_started` receipt before a launch that `TrustRejected` | Raises `WorkloadError(code="trust_required")` before any receipt. |
 
 ## Application initialization and identity
 
