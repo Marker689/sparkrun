@@ -114,6 +114,10 @@ def add_infrastructure_schemas(schema, operations):
         {"type": {"enum": ["snapshot"]}, "jobs": {"type": "array", "items": {"$ref": "#/components/schemas/DaemonJob"}}}, ["type", "jobs"]
     )
     paths = schema["paths"]
+    paths["/v1/jobs/{identifier}/artifacts/diagnostics"]["get"]["responses"]["200"] = {
+        "description": "Redacted NDJSON diagnostic bundle. Download after the job finishes; retained with job history.",
+        "content": {"application/x-ndjson": {"schema": {"type": "string", "format": "binary"}}},
+    }
     for path, method, result in (
         ("/v1/info", "get", {"$ref": "#/components/schemas/DaemonInfo"}),
         ("/v1/jobs", "get", {"type": "array", "items": {"$ref": "#/components/schemas/DaemonJob"}}),

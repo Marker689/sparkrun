@@ -5,10 +5,10 @@ version = "0.1.4"
 module = "sparkrun.plugins.oci_relay"
 feature = "plugins.oci_relay"
 repository = "https://github.com/spark-arena/oci-relay.git"
-commit = "070d4f68c690630fcb1427c1370b3958e19d48e9"
-tree = "22de3610c3bb5ea1d39797b3ecf662e1b566545d"
+commit = "f0718b1ba6653a9f465047d036123314aa20f529"
+tree = "ddf995aef664273439a85fb441899f77280258c2"
 sparkrun = ">=0.4.0,<0.5"
-content_sha256 = "8f7fddec0068af9a04c290744c5c1355cddb144ceffa8d4ecf806b9643bb9eeb"
+content_sha256 = "06b406807947b2d90e407fbfdd07480c529aa15d820b49813befc50c4889cc43"
 image_distribution_api = 1
 image_pull_api = 1
 
@@ -22,15 +22,19 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/README.md"
-sha256 = "12355f2c17cc88d56909364d9a89cbabd66f3c0c58037f4ce435ccdb69dd40ae"
+sha256 = "1eef616185fd9827e021aece1a802428e3b36d255bc050d40ef0a103bb29e810"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/__init__.py"
-sha256 = "6b4a13267bd70836ab3e564013c614c99abf50dca908d538a501869f7d60c9b4"
+sha256 = "352b6cce533d232059ad009cd12b4c50be976561dd935f78936e684c4f5382fe"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/decoder.py"
 sha256 = "2fe7a0728427b38b8cd4b2d5363a6a3629ccc5a65e491ff91f837b52634993df"
+
+[[files]]
+path = "src/sparkrun/plugins/oci_relay/diagnostics.py"
+sha256 = "7fbbafda551a9d38e8bb5d4cd185df7b99816faeb323211c145703064ba28a6e"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/disk.py"
@@ -58,7 +62,7 @@ sha256 = "5ad82f5e7e8f6e187581aecadda6f2608cbaf1d8eb980d275419e54d8a06b616"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/provider.py"
-sha256 = "01da2ce6ebb7ad1bdfdc62e3b7bd3e2b38c3e7f195d65891b19bdd3530fe4f0e"
+sha256 = "fb6831b6995b8c7d0e796d4c37d45cc987a569478f72bac36995f9efa20df17d"
 
 [[files]]
 path = "src/sparkrun/plugins/oci_relay/registry_ranges.py"
@@ -87,3 +91,7 @@ sha256 = "05971a42063d652b01777fd7dc6214db9a33f63f2bd6991551a2d0d54a6e4538"
 [[files]]
 path = "tests/vendor/oci_relay/test_oci_relay_contract.py"
 sha256 = "45ac687c1e06150b7c5f62b61d482383b047fe29cea2f4b0e36f9825d3072b60"
+
+[[files]]
+path = "tests/vendor/oci_relay/test_oci_relay_diagnostics.py"
+sha256 = "821edc982e2cd07386e7d3e051c59b6159b18aae8ef9d99854e93155e48abec5"

@@ -321,6 +321,9 @@ class JobStore:
                     db.execute("DELETE FROM jobs WHERE id=?", (row[0],))
                     db.execute("DELETE FROM prompts WHERE job=?", (row[0],))
                     (self.directory / (row[0] + ".error.log")).unlink(missing_ok=True)
+                    from sparkrun.daemon.artifacts import diagnostics_path
+
+                    diagnostics_path(self.directory, row[0]).unlink(missing_ok=True)
             db.execute(
                 "DELETE FROM submissions WHERE created<? AND job NOT IN "
                 "(SELECT id FROM jobs WHERE state NOT IN ('succeeded','failed','cancelled','lost'))",

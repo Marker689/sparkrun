@@ -19,6 +19,7 @@ import time
 from urllib.parse import urlsplit
 
 from . import __version__, pins, decoder, runtime as runtime_connection
+from . import diagnostics
 from .disk import registry_cache_budget
 from .host import Lines, OperationError, UnsupportedHost, Runner, pump
 from .parallel import parallel
@@ -203,6 +204,11 @@ class RelayProvider:
                     raise OperationError("pinned cache checks exceeded operation deadline")
                 if present and all(present.values()):
                     status(logger, 'source', 'OCI Relay: pinned image already verified on all %d receiver(s); no transfer', len(present), feedback=getattr(request, "feedback", None))
+                    diag = diagnostics.bind(feedback=getattr(request, "feedback", None))
+                    if diag is not None and diag.enabled:
+                        diag.snapshot("source_selection", lambda: {
+                            "image": request.image[:512], "mode": "verified_present", "receivers": len(present),
+                        }, stage="pin")
                     return ImageCopyResult(dict.fromkeys(request.targets, "already_present"), runtime_images={host: image for host, image in present.items() if image is not None})
                 if not registry:
                     # Offline/local mode can reuse a verified pin on a receiver,
@@ -354,6 +360,7 @@ class RelayProvider:
         timings = {}
         completed = False
         progress = Progress(request.image, feedback=getattr(request, "feedback", None))
+        diag = diagnostics.bind(feedback=progress.feedback)
         source_image = source_image or request.image
         pin = pins.digest(request.image)
         destination = pins.retention_tag(request.image) if pin else request.image
@@ -366,6 +373,9 @@ class RelayProvider:
 
         heartbeat_stop = threading.Event()
         source_process = None
+        source_errors = None
+        peer_diagnostics = {}
+        ids = {}
         try:
             if pin:
                 progress.phase("checking registry pin metadata storage", stage="pin")
@@ -434,6 +444,12 @@ class RelayProvider:
             selection = detect(runner, source_host, source_image, settings, facts[source_host])
             logger.info("OCI Relay source selection: requested=%s selected=%s reason=%s",
                         settings.get("source_mode", "auto"), selection.mode, selection.reason)
+            if diag is not None and diag.enabled:
+                diag.snapshot("source_selection", lambda: {
+                    "image": request.image[:512], "mode": selection.mode,
+                    "reason": selection.reason[:512], "receivers": len(request.targets),
+                    "source_limits": {key: value for key, value in source_limits.items()},
+                }, host=source_host, stage="discovery")
             settings = dict(settings, source_mode=selection.mode)
             mark("discovery")
             source_dir = runner.directory(source_host)
@@ -583,6 +599,10 @@ class RelayProvider:
                     if errors:
                         logger.info("OCI Relay uses stdio for %s after route preflight: %s", host, "; ".join(errors))
                 target_routes[identity] = chosen
+                if diag is not None and diag.enabled:
+                    diag.snapshot("route_selection", lambda chosen=chosen: {
+                        "transport": chosen[0], "fallback_reasons": [e[-512:] for e in errors[:8]],
+                    }, host=host, stage="preflight")
                 logger.info("OCI Relay route %s -> %s: %s", source_host or "controller", host, chosen[0])
             mark("preflight")
             progress.phase("checking receiver caches and starting transfers", stage="transfer")
@@ -670,6 +690,12 @@ class RelayProvider:
                 progress.outcome(identity, observation, valid)
                 if not valid:
                     errors[host] = observation.get("error") or "\n".join(peer_diagnostics[identity].tail)[-2000:] or "receiver failed"
+                    if diag is not None and diag.enabled:
+                        diag.snapshot("receiver_failure", lambda: {
+                            "state": observation.get("state"), "return_code": code,
+                            "detail": errors[host][-1024:],
+                            "stderr_tail": [line[-512:] for line in list(peer_diagnostics[identity].tail)[-8:]],
+                        }, host=host, stage="verify")
             source_code = source_process.wait(timeout=15)
             if source_code and all(value in {"complete", "already_present"} for value in result.values()):
                 raise OperationError("source process failed after reporting complete receivers")
@@ -705,6 +731,21 @@ class RelayProvider:
             if pin:
                 return ImageCopyResult(result, errors, runtime_images=runtime_images)
             return ImageCopyResult(result, errors)
+        except Exception as error:
+            if diag is not None and diag.enabled:
+                diag.snapshot("receiver_failure", lambda error=error: {
+                    "error_type": type(error).__name__, "detail": str(error)[-1024:],
+                    "receiver_tails_omitted": max(0, len(peer_diagnostics) - 8),
+                    "stderr_tail": [line[-512:] for line in list(source_errors.tail)[-8:]] if source_errors else [],
+                }, host=request.source_host, stage=progress.stage)
+                # Evidence is still available here; the following finally owns teardown.
+                from itertools import islice
+                for identity, output in islice(peer_diagnostics.items(), 8):
+                    diag.snapshot("receiver_failure", lambda: {
+                        "stderr_tail": [line[-512:] for line in list(output.tail)[-8:]],
+                        "detail": "transfer aborted before receiver verification",
+                    }, host=ids.get(identity), stage=progress.stage)
+            raise
         finally:
             cleanup_start = time.monotonic()
             progress.phase("cleaning up transfer resources", stage="cleanup")
@@ -724,6 +765,12 @@ class RelayProvider:
                                total_seconds=time.monotonic() - operation_start,
                                state="COMPLETE" if completed else "FAILED")
                 logger.info("OCI Relay timings: %s", timings)
+                if diag is not None and diag.enabled:
+                    diag.snapshot("transfer_result", lambda: {
+                        "completed": completed, "receivers": len(request.targets),
+                        "timings": timings, "cleanup_errors": [str(e)[-512:] for e in cleanup[:8]],
+                        "cleanup_errors_omitted": max(0, len(cleanup) - 8),
+                    }, stage="cleanup")
             finally:
                 progress.close(completed and cleanup is not None, cleanup is None or bool(cleanup))
 

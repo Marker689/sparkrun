@@ -6,8 +6,8 @@ depend on; field additions are non-breaking, field removals are
 breaking.
 
 Options describe library operations. Frontends translate flags or UI inputs
-into these values and own prompting, terminal rendering, and diagnostics
-collection.
+into these values and own prompting and terminal rendering. Diagnostic bundles
+use the separate, opt-in capture_diagnostics API.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class RunOptions:
     Frontends translate their inputs into this operation contract. Hosts may
     be explicit, supplied by a cluster, or resolved from application defaults.
     Recipe/runtime settings, including the serve port, belong in ``overrides``.
-    Terminal rendering and diagnostics collection belong to the frontend.
+    Terminal rendering belongs to the frontend; capture_diagnostics can wrap this operation.
     """
 
     recipe: "str | Recipe"

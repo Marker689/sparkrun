@@ -1972,19 +1972,14 @@ def setup_diagnose(ctx, hosts, hosts_file, cluster_name, dry_run, output_file, o
     """
     from datetime import datetime, timezone
 
-    from sparkrun.diagnostics import (
-        NDJSONWriter,
-        collect_config_diagnostics,
-        collect_spark_diagnostics,
-        collect_sudo_diagnostics,
-    )
+    from sparkrun import api
 
     from .._common import _get_context, _resolve_setup_context
 
     sctx = _get_context(ctx)
     config = sctx.config
 
-    host_list, user, ssh_kwargs = _resolve_setup_context(hosts, hosts_file, cluster_name, config)
+    host_list, user, _ = _resolve_setup_context(hosts, hosts_file, cluster_name, config)
 
     if not output_file:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -1999,58 +1994,31 @@ def setup_diagnose(ctx, hosts, hosts_file, cluster_name, dry_run, output_file, o
     click.echo("Output: %s" % output_file)
     click.echo()
 
-    with NDJSONWriter(output_file) as writer:
-        try:
-            from sparkrun import __version__
-        except Exception:
-            __version__ = "unknown"
-
-        writer.emit(
-            "diag_header",
-            {
-                "sparkrun_version": __version__,
-                "hosts": host_list,
-                "command": "sparkrun setup diagnose",
-                "sudo": use_sudo,
-            },
-        )
-
-        # Local config: clusters and registries
-        cluster_mgr = _get_cluster_manager()
-        registry_mgr = config.get_registry_manager()
-        collect_config_diagnostics(
-            writer,
-            config=config,
-            cluster_mgr=cluster_mgr,
-            registry_mgr=registry_mgr,
-        )
-
-        host_data = collect_spark_diagnostics(
+    try:
+        bundle = api.collect_diagnostics(
+            output_file,
             hosts=host_list,
-            ssh_kwargs=ssh_kwargs,
-            writer=writer,
+            cluster=cluster_name,
+            sctx=sctx,
+            sudo_password=sudo_password,
             dry_run=dry_run,
         )
-
-        # Sudo pass: dmidecode
-        if use_sudo and sudo_password:
-            click.echo("Collecting sudo diagnostics (dmidecode)...")
-            collect_sudo_diagnostics(
-                hosts=host_list,
-                ssh_kwargs=ssh_kwargs,
-                sudo_password=sudo_password,
-                writer=writer,
-                dry_run=dry_run,
-            )
+    except OSError as exc:
+        raise click.ClickException("Cannot open diagnostic bundle: %s" % exc) from exc
+    host_data = bundle.hosts
 
     # Display summary
-    ok = sum(1 for v in host_data.values() if v.get("DIAG_COMPLETE") == "1")
-    fail = len(host_list) - ok
+    ok = sum(host_data.values())
+    fail = 0 if dry_run else len(host_list) - ok
 
     click.echo()
     click.echo("Diagnostics complete: %d/%d hosts OK" % (ok, len(host_list)))
     if fail:
         click.echo("  %d host(s) failed — see %s for details" % (fail, output_file), err=True)
+
+    for section in bundle.sections:
+        if section["status"] != "ok":
+            click.echo("  %s: %s — %s" % (section["section"], section["status"], section.get("detail", "")), err=True)
 
     if output_json:
         from .._common import print_json
@@ -2060,11 +2028,13 @@ def setup_diagnose(ctx, hosts, hosts_file, cluster_name, dry_run, output_file, o
             "total_hosts": len(host_list),
             "successful": ok,
             "failed": fail,
-            "hosts": {h: bool(d.get("DIAG_COMPLETE") == "1") for h, d in host_data.items()},
+            "hosts": host_data,
+            "partial": bundle.partial,
+            "sections": bundle.sections,
         }
         print_json(summary)
 
-    if fail:
+    if fail or (bundle.partial and not dry_run):
         sys.exit(1)
 
 

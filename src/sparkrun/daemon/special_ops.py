@@ -16,6 +16,10 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
     from sparkrun.orchestration.primitives import build_ssh_kwargs
 
     data = dict(arguments)
+    if name == "diagnostics.collect":
+        from sparkrun.daemon.artifacts import collect
+
+        return collect(data, sctx)
     cluster = (
         resolve_cluster(data.pop("cluster", None), data.get("hosts"), sctx=sctx) if name.startswith(("setup.", "tailscale.")) else None
     )
@@ -131,6 +135,7 @@ def register_special_ops():
     from sparkrun.daemon.request_fields import fields
 
     specs = [
+        ("diagnostics.collect", "read", "hosts cluster workload_id log_tail max_bytes dry_run", ""),
         ("recipes.validate", "read", "recipe overrides", "recipe"),
         ("setup.probe_hosts", "read", "hosts cluster", ""),
         ("setup.plan", "read", "hosts cluster", ""),
@@ -172,6 +177,8 @@ def register_special_ops():
     ]
     for name, scope, names, required in specs:
         properties = fields(names)
+        if name == "diagnostics.collect":
+            properties["max_bytes"] = {"type": "integer", "minimum": 16384, "maximum": 67108864}
         if "confirm_inactive" in properties:
             properties["confirm_inactive"] = {"type": "boolean", "enum": [True]}
         register_daemon_op(

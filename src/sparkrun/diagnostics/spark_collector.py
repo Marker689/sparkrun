@@ -422,6 +422,8 @@ def collect_config_diagnostics(
     config=None,
     cluster_mgr=None,
     registry_mgr=None,
+    *,
+    strict=False,
 ) -> None:
     """Emit sparkrun configuration state: clusters, registries, config.
 
@@ -465,6 +467,8 @@ def collect_config_diagnostics(
                     }
                 )
         except Exception as e:
+            if strict:
+                raise
             logger.warning("Failed to list clusters: %s", e)
 
         writer.emit(
@@ -494,6 +498,8 @@ def collect_config_diagnostics(
                     }
                 )
         except Exception as e:
+            if strict:
+                raise
             logger.warning("Failed to list registries: %s", e)
 
         writer.emit(

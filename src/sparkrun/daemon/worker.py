@@ -50,7 +50,11 @@ class Worker:
         self.answered = {}
         self.secrets = set()
         self.operation = OperationState(
-            id=job, events=lambda event: self.store.emit(job, self.redact(event)), via_daemon=True, manager=self.job["manager"]
+            id=job,
+            events=lambda event: self.store.emit(job, self.redact(event)),
+            via_daemon=True,
+            manager=self.job["manager"],
+            secrets=self.secrets,
         )
 
     def redact(self, value):

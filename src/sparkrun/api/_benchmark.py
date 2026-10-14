@@ -7,6 +7,7 @@ Terminal presentation is supplied by the CLI adapter.
 from __future__ import annotations
 
 from sparkrun.core.coordination import operation_boundary
+from sparkrun.diagnostics.session import capture_before_cleanup, capture_operation
 
 from sparkrun.benchmarking._measurement import (
     capture_launch_context,
@@ -1006,12 +1007,15 @@ def _execute_benchmark(
 
     cleanup_attempted = False
 
-    def cleanup():
+    def cleanup(error=None):
         nonlocal cleanup_attempted
         if not launched or no_stop or dry_run or cleanup_attempted:
             return
         cleanup_attempted = True
-        _stop_inference(host_list, cluster_id, dry_run, sctx=sctx, strict=True)
+        # Snapshot while sources still exist, including after successful
+        # measurement: cleanup or subsequent publication can still fail.
+        with capture_before_cleanup(cluster_id, sctx=sctx, error=error):
+            _stop_inference(host_list, cluster_id, dry_run, sctx=sctx, strict=True)
 
     try:
         bench_result.benchmark_id = state.benchmark_id if state else ""
@@ -1312,7 +1316,7 @@ def _execute_benchmark(
         # Finalization also uses cleanup(); its once-only guard covers both
         # paths, including interrupts and secondary cleanup failures.
         try:
-            cleanup()
+            cleanup(error)
         except Exception as cleanup_error:
             _record_cleanup_failure(error, cleanup_error)
         if isinstance(error, KeyboardInterrupt):
@@ -1471,7 +1475,7 @@ def _finalize_measurement(execution, integrations, state, cache_dir, *, dry_run=
         if cleanup is not None:
             try:
                 with _finalization_errors(execution, "cleanup"):
-                    cleanup()
+                    cleanup(primary)
             except Exception as exc:
                 if primary is None:
                     primary = exc
@@ -1662,6 +1666,7 @@ def _resume_benchmark(
         return _notify_complete(result, emitter)
 
 
+@capture_operation
 @operation_boundary(mutation=True)
 def resume_benchmark(
     benchmark_id: str,
@@ -2059,6 +2064,7 @@ def _resume_locked(
 # ---------------------------------------------------------------------------
 
 
+@capture_operation
 @operation_boundary(mutation=True)
 def benchmark(
     options: BenchmarkOptions,

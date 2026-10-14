@@ -19,16 +19,21 @@ logger = logging.getLogger(__name__)
 class _DiagnosticsLogHandler(logging.Handler):
     """Logging handler that captures records into an NDJSON writer.
 
-    Attached to the root logger at DEBUG level so that *all* log
-    records are captured regardless of the console verbosity setting.
+    Captures only records attributed to this operation, at the application's
+    existing logging level. It never changes process-wide verbosity.
     Records are emitted as ``log`` events in the diagnostics file.
     """
 
-    def __init__(self, writer: NDJSONWriter):
+    def __init__(self, writer: NDJSONWriter, operation):
         super().__init__(level=logging.DEBUG)
         self._writer = writer
+        self._operation = operation
 
     def emit(self, record: logging.LogRecord) -> None:
+        from sparkrun.core.operation import CURRENT
+
+        if CURRENT.get() is not self._operation:
+            return
         try:
             self._writer.emit(
                 "log",
@@ -56,10 +61,9 @@ class RunDiagnosticsCollector:
             diag.phase_end("launch")
             diag.emit_summary()
 
-    When opened, attaches a logging handler to the root logger that
-    captures **all** log records (DEBUG and above) into the NDJSON
-    file.  This provides full diagnostic logging in the output file
-    even when the console is at default (quiet) verbosity.
+    Logging is scoped to the current operation and preserves configured levels.
+    Public callers should use ``api.capture_diagnostics`` for bundle lifecycle,
+    section results, redaction, and bounded storage.
     """
 
     def __init__(
@@ -78,37 +82,39 @@ class RunDiagnosticsCollector:
         self._current_phase: str | None = None
         self._success = True
         self._log_handler: _DiagnosticsLogHandler | None = None
-        self._prev_root_level: int | None = None
+        self._operation_scope = None
 
     @property
     def writer(self) -> NDJSONWriter:
         return self._writer
 
     def open(self) -> RunDiagnosticsCollector:
-        self._writer.open()
         self._start_time = time.monotonic()
-        # Attach a log handler that captures all records at DEBUG level
-        self._log_handler = _DiagnosticsLogHandler(self._writer)
+        from sparkrun.core.operation import operation_scope
+
+        self._operation_scope = operation_scope()
+        operation = self._operation_scope.__enter__()
+        try:
+            self._writer.open()
+        except BaseException:
+            self._operation_scope.__exit__(None, None, None)
+            self._operation_scope = None
+            raise
+        self._log_handler = _DiagnosticsLogHandler(self._writer, operation)
         self._log_handler.setFormatter(logging.Formatter("%(message)s"))
         root = logging.getLogger()
         root.addHandler(self._log_handler)
-        # Ensure root logger accepts DEBUG even if console is at PROGRESS
-        if root.level > logging.DEBUG:
-            self._prev_root_level = root.level
-            root.setLevel(logging.DEBUG)
-        else:
-            self._prev_root_level = None
         return self
 
     def close(self) -> None:
-        # Remove the diagnostics handler and restore root level
         if self._log_handler is not None:
             root = logging.getLogger()
             root.removeHandler(self._log_handler)
-            if self._prev_root_level is not None:
-                root.setLevel(self._prev_root_level)
             self._log_handler = None
         self._writer.close()
+        if self._operation_scope is not None:
+            self._operation_scope.__exit__(None, None, None)
+            self._operation_scope = None
 
     def collect_spark_diagnostics(self) -> dict[str, dict]:
         """Run host diagnostics (Tool #1) and emit to the writer."""
@@ -198,7 +204,7 @@ class RunDiagnosticsCollector:
         """Emit ``run_launch_result`` from a LaunchResult."""
         data = {
             "rc": getattr(result, "rc", -1),
-            "cluster_id": getattr(result, "cluster_id", ""),
+            "workload_id": getattr(result, "cluster_id", ""),
             "runtime_info": getattr(result, "runtime_info", {}),
             "nccl_env": getattr(result, "nccl_env", None),
         }
@@ -222,7 +228,9 @@ class RunDiagnosticsCollector:
         """Capture tail of container logs and emit as ``run_container_logs``."""
         from sparkrun.orchestration.ssh import run_remote_script
 
-        script = "docker logs --tail %d %s 2>&1 || echo '[no logs]'" % (tail, container)
+        from shlex import quote
+
+        script = "docker logs --tail %d %s 2>&1 || echo '[no logs]'" % (tail, quote(container))
         result = run_remote_script(host, script, dry_run=self._dry_run, **ssh_kwargs)
         lines = result.stdout.strip().splitlines() if result.success else []
         self._writer.emit(
@@ -235,27 +243,25 @@ class RunDiagnosticsCollector:
             },
         )
 
-    def capture_workload_logs(self, launch, tail: int = 200) -> None:
-        """Capture the runtime's head log on its actual executor substrate."""
-        from sparkrun.orchestration.primitives import build_ssh_kwargs, run_command_on_host
+    def capture_workload_logs(self, launch, tail: int = 200, *, sctx=None) -> None:
+        """Read bounded tails through the shared workload log target API."""
+        from sparkrun.api import open_log_target
 
-        runtime = launch.runtime
-        for source in runtime.log_sources(launch.cluster_id, launch.host_list, is_solo=launch.is_solo):
-            command = runtime.executor.read_logs_cmd(source, follow=False, tail=tail)
-            result = run_command_on_host(
-                source.host,
-                command,
-                ssh_kwargs=build_ssh_kwargs(launch.config),
-                timeout=30,
-                dry_run=self._dry_run,
-                quiet=True,
-            )
+        target = open_log_target(
+            launch.cluster_id,
+            cache_dir=str(launch.config.cache_dir),
+            sctx=sctx,
+            scope="all",
+        )
+        for source in target.sources:
+            lines = target.page(source, skip=0, count=tail, timeout=30)
             self._writer.emit(
                 "run_container_logs",
                 {
                     "host": source.host,
                     "container": source.container,
-                    "lines": result.stdout.strip().splitlines(),
+                    "source_id": source.source_id,
+                    "lines": [line.text for line in lines],
                     "tail": tail,
                 },
             )

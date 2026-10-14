@@ -1,6 +1,6 @@
 # Daemon operation and HTTP reference
 
-Reviewed: 2026-10-12, for the unreleased Sparkrun 0.4.0 daemon/discovery migration.
+Reviewed: 2026-10-13, for the unreleased Sparkrun 0.4.0 daemon/discovery migration.
 This inventory was rendered from the actual operation declarations in the local
 host and SparkRoute plugin worktrees, without running handlers or a live daemon.
 Operational setup and examples are in [DAEMON.md](DAEMON.md).
@@ -110,6 +110,7 @@ ColdSnap continues implementing the common lifecycle provider without HTTP route
 | GET | `/v1/jobs/{id}` | job owner/admin + operation scope | Durable state, result/error, public prompt metadata; no raw arguments, worker nonce or runtime lease. |
 | DELETE | `/v1/jobs/{id}` | job access + operate | Requests cancellation; does **not** delete history or promise remote rollback. |
 | POST | `/v1/jobs/{id}/input` | job access + operation scope; secret if needed | Exactly `prompt_id`, `value`; answer a live worker prompt. |
+| GET | `/v1/jobs/{id}/artifacts/diagnostics` | job access | Download a finished job's bounded NDJSON bundle; expires with job history. |
 | GET | `/v1/jobs/{id}/events` | job access | Durable SSE; `Last-Event-ID`; expired cursor → 410, later expiry → `gap` event. |
 | GET | `/v1/events` | read + job visibility | SSE snapshots of visible jobs every 2 seconds; no inventory stream or replay cursor. |
 | GET | `/v1/streams/logs` | read | SSE; optional `workload_id`, `recipe`, comma-separated `hosts`, `cluster`, `host`, `container`, `source_id`, `scope=head/all`, nonnegative `tail`, `follow=true/false`. Includes saved native Kubernetes workloads. Records carry source identity/resource metadata. Disconnect cancels finite/follow readers. |
@@ -135,7 +136,7 @@ SSE `error` record. Each request resolves its target anew; there is no target-ID
 registry or paging route. See [LOGGING_API.md](LOGGING_API.md) for matching,
 cancellation, ordering, and Python paging contracts.
 
-This snapshot contains **94 operations: 83 core, 8 K8s and 3 SparkRoute**.
+This snapshot contains **95 operations: 84 core, 8 K8s and 3 SparkRoute**.
 
 ## Domain vocabulary
 
@@ -175,8 +176,8 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `benchmarks.resume` | `/v1/benchmarks/resume` | job / operate | auto | `benchmark_id!: string`, `dry_run: boolean`, `integrations: object`, `export_files: boolean`, `output_file: string`, `timeout: integer`, `exit_on_first_fail: boolean`, `api_key_env: string` |
-| `benchmarks.run` | `/v1/benchmarks/run` | job / operate | auto | `recipe!: string`, `category: string`, `framework: string`, `profile: string`, `bench_args: object`, `hosts: string[]`, `cluster: string`, `overrides: object`, `resume: string`, `skip_run: boolean`, `no_stop: boolean`, `exit_on_first_fail: boolean`, `timeout: integer`, `api_key_env: string`, `integrations: object`, `output_file: string`, `export_files: boolean`, `solo: boolean`, `dry_run: boolean`, `scheduler: string`, `rootful: boolean`, `trust: boolean`, `offline: boolean`, `sync_tuning: boolean`, `extra_docker_opts: string[]` |
+| `benchmarks.resume` | `/v1/benchmarks/resume` | job / operate | auto | `benchmark_id!: string`, `dry_run: boolean`, `integrations: object`, `export_files: boolean`, `output_file: string`, `timeout: integer`, `exit_on_first_fail: boolean`, `api_key_env: string`, `collect_diagnostics: boolean` |
+| `benchmarks.run` | `/v1/benchmarks/run` | job / operate | auto | `recipe!: string`, `category: string`, `framework: string`, `profile: string`, `bench_args: object`, `hosts: string[]`, `cluster: string`, `overrides: object`, `resume: string`, `skip_run: boolean`, `no_stop: boolean`, `exit_on_first_fail: boolean`, `timeout: integer`, `api_key_env: string`, `integrations: object`, `output_file: string`, `export_files: boolean`, `solo: boolean`, `dry_run: boolean`, `scheduler: string`, `rootful: boolean`, `trust: boolean`, `offline: boolean`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `collect_diagnostics: boolean` |
 
 ### catalog
 
@@ -209,6 +210,12 @@ own namespaces and routing-policy fields.
 | `cluster.observe` | `/v1/cluster/observe` | job / read | auto | `hosts!: string[]`, `cluster: string`, `executor: string` |
 | `cluster.report` | `/v1/cluster/report` | job / read | auto | `hosts!: string[]`, `cluster: string`, `executor: string` |
 | `cluster.update` | `/v1/cluster/update` | job / admin | auto | `name!: string`, `hosts: string[]`, `description: string`, `user: string` |
+
+### diagnostics
+
+| Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
+| --- | --- | --- | --- | --- |
+| `diagnostics.collect` | `/v1/diagnostics/collect` | job / read | auto | `hosts: string[]`, `cluster: string`, `workload_id: string`, `log_tail: integer`, `max_bytes: integer`, `dry_run: boolean` |
 
 ### discovery
 
@@ -296,7 +303,7 @@ own namespaces and routing-policy fields.
 | `workloads.plan` | `/v1/workloads/plan` | job / read | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
 | `workloads.plugins` | `/v1/workloads/plugins` | job / read | none | `{}` |
 | `workloads.reconcile` | `/v1/workloads/reconcile` | job / admin | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string`, `acknowledge_effects!: boolean` |
-| `workloads.run` | `/v1/workloads/run` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string`, `confirm: boolean`, `wait_ready: boolean`, `post_launch: boolean` |
+| `workloads.run` | `/v1/workloads/run` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string`, `collect_diagnostics: boolean`, `confirm: boolean`, `wait_ready: boolean`, `post_launch: boolean` |
 | `workloads.sleep` | `/v1/workloads/sleep` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 | `workloads.status` | `/v1/workloads/status` | job / read | none | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 | `workloads.stop` | `/v1/workloads/stop` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
@@ -306,7 +313,7 @@ own namespaces and routing-policy fields.
 
 ## Bundled Kubernetes plugin
 
-Requires the enabled and loaded `k8s` plugin (`sparkrun plugins enable k8s`).
+Requires the loaded `k8s` integration and `integration.k8s`.
 
 ### operations
 
@@ -389,3 +396,20 @@ python scripts/render-daemon-api.py --sparkroute-checkout /path/to/sparkrun-spar
 Use `--check` to detect drift without writing. The prose/infrastructure table is
 reviewed separately when routes or semantics change. `/v1/ops` and OpenAPI expose
 full request/result schemas for the running installation.
+
+## Diagnostic bundles
+
+`diagnostics.collect` produces a standalone, read-only diagnostic bundle. Its
+result includes section status, `partial`/`truncated`, and an artifact descriptor;
+clients download it at `/v1/jobs/{job_id}/artifacts/diagnostics` after completion.
+The route enforces the job's ownership and operation scope and expires with job
+retention. Requests cannot select filesystem paths or include credentials.
+
+`workloads.run`, `benchmarks.run`, and `benchmarks.resume` accept optional
+`collect_diagnostics: true`. Capture surrounds the full adapter, including run
+readiness/hooks, without altering the normal operation result. An `artifact`
+event advertises the download URL, which also works for failed/cancelled jobs
+when a bundle was created. Capture defaults to off.
+
+See [DIAGNOSTICS_API.md](DIAGNOSTICS_API.md) for Python/CLI use, the versioned NDJSON
+format, redaction, bounds, partial sections, and current collection limits.

@@ -3307,3 +3307,33 @@ _CACHE_REPORT = {
 }
 for _action in ("list", "prune", "pin", "reconcile"):
     RESULT_SCHEMAS["model_cache." + _action] = _CACHE_REPORT
+
+RESULT_SCHEMAS["diagnostics.collect"] = object_schema(
+    {
+        "schema_version": {"type": "integer", "enum": [1]},
+        "partial": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "hosts": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "sections": {
+            "type": "array",
+            "items": object_schema(
+                {
+                    "section": {"type": "string"},
+                    "status": {"enum": ["ok", "error", "skipped", "cancelled"]},
+                    "detail": {"type": "string"},
+                },
+                ["section", "status"],
+            ),
+        },
+        "artifact": object_schema(
+            {
+                "name": {"type": "string", "enum": ["diagnostics"]},
+                "media_type": {"type": "string", "enum": ["application/x-ndjson"]},
+                "size_bytes": {"type": "integer", "minimum": 0},
+                "url": {"type": "string"},
+            },
+            ["name", "media_type", "size_bytes", "url"],
+        ),
+    },
+    ["schema_version", "partial", "truncated", "hosts", "sections", "artifact"],
+)

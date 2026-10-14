@@ -20,7 +20,7 @@ from typing import Any
 import anyio
 from anyio.to_thread import run_sync
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import uvicorn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
@@ -473,6 +473,23 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
     @app.get("/v1/jobs/{identifier}")
     async def job(identifier: str, request: Request):
         return public_job(job_access(request, identifier))
+
+    @app.get("/v1/jobs/{identifier}/artifacts/diagnostics", response_class=FileResponse)
+    async def diagnostic_bundle(identifier: str, request: Request):
+        """Download a finished job's diagnostic bundle under its job permissions."""
+        from sparkrun.daemon.artifacts import diagnostics_path
+        import stat
+
+        job = job_access(request, identifier)
+        if job["state"] not in TERMINAL:
+            raise Conflict("Diagnostic bundle is available after the job finishes")
+        path = diagnostics_path(binding.directory, identifier)
+        try:
+            if not stat.S_ISDIR(path.parent.lstat().st_mode) or not stat.S_ISREG(path.lstat().st_mode):
+                raise FileNotFoundError(path)
+        except FileNotFoundError:
+            return JSONResponse({"detail": "Diagnostic bundle not found"}, status_code=404)
+        return FileResponse(path, media_type="application/x-ndjson", filename=f"diagnostics-{identifier}.ndjson")
 
     @app.delete("/v1/jobs/{identifier}")
     async def cancel(identifier: str, request: Request):

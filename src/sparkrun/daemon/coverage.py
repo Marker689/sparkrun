@@ -9,6 +9,7 @@ API_OPERATIONS["validate_recipe"] = "recipes.validate"
 API_OPERATIONS["configure_registry"] = " / ".join("catalog.registries." + action for action in REGISTRY_ACTIONS)
 API_OPERATIONS.update(
     {
+        "collect_diagnostics": "diagnostics.collect",
         "wait_ready": "workloads.run",
         "post_launch": "workloads.run",
         "schedule": "workloads.plan",
@@ -40,6 +41,7 @@ API_OPERATIONS.update(
     }
 )
 EXCLUSIONS = {
+    "capture_diagnostics": "Python context manager; workloads.run and benchmarks.run/resume accept collect_diagnostics.",
     "open_log_target": "Python reader handle; /v1/streams/logs resolves each request and accepts the same host/container filters.",
     "discover_endpoints": "List-only Python API; use discovery.snapshot for scoped endpoints and observation coverage.",
     "default_sctx": "Python application binding; daemon creates an operation-local context.",

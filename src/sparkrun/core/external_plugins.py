@@ -166,6 +166,9 @@ def clear_loaded_plugin_modules() -> None:
         GATEWAY_FEATURE_FLAGS.pop(name, None)
     _GATEWAY_OWNERS.clear()
     clear_plugin_identities()
+    from sparkrun.diagnostics.plugin import _PLUGINS as diagnostic_plugins
+
+    diagnostic_plugins.clear()
     clear_plugin_load_failures()
     _LOADED_PLUGIN_MODULES.clear()
     _REGISTERED_MODULES.clear()

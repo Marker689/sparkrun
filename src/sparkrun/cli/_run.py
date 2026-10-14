@@ -1,12 +1,14 @@
 """sparkrun run command — thin Click wrapper around :func:`sparkrun.api.run`.
 
-The CLI handles presentation concerns (banner, VRAM display, diagnostics
-emission, pre-launch summary, post-launch echoing) and delegates the
+The CLI handles presentation concerns (banner, VRAM display, diagnostic
+bundle destination, pre-launch summary, post-launch echoing) and delegates the
 actual launch orchestration to :func:`sparkrun.api.run`.  All
 ``--option`` flags map onto :class:`sparkrun.api.RunOptions` fields.
 """
 
 from __future__ import annotations
+
+from sparkrun.cli._diagnostics import with_run_diagnostics
 
 from sparkrun.core.application_profile import render_identity_text
 
@@ -287,6 +289,7 @@ def _report_readiness_outcome(readiness) -> None:
 @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
 @with_host_context
+@with_run_diagnostics
 def run(
     ctx,
     recipe_name,
@@ -638,7 +641,6 @@ def run(
         sys.exit(1)
 
     host_list = list(run_plan.host_list)
-    is_solo = run_plan.is_solo
     if render_run_plan(run_plan, run_options, host_source=host_source, verbose=(ctx.find_root().obj or {}).get("verbose", 0) >= 1):
         run_plan = dataclasses.replace(run_plan, hardware_reported=True)
 
@@ -651,36 +653,10 @@ def run(
     # "the endpoint is up now" is worth having while logs scroll whether or
     # not you want a breakdown afterwards.  Diagnostics needs the timeline for
     # its own record regardless.
-    if show_timings or diagnostics_path:
+    if show_timings and sctx.timing is None:
         from sparkrun.core.timing import Timeline
 
         sctx.timing = Timeline()
-
-    # --- Diagnostics setup ---
-    diag = None
-    if diagnostics_path:
-        from sparkrun.diagnostics import RunDiagnosticsCollector
-        from sparkrun.orchestration.primitives import build_ssh_kwargs as _diag_ssh
-
-        _diag_ssh_kw = _diag_ssh(config)
-        diag = RunDiagnosticsCollector(diagnostics_path, host_list, _diag_ssh_kw, dry_run=dry_run)
-        diag.open()
-        diag.emit_header(cluster_name=cluster_cfg.name or cluster_name, command="sparkrun run %s" % recipe_name)
-        diag.emit_recipe(recipe, overrides)
-        diag.emit_config(
-            hosts=host_list,
-            is_solo=is_solo,
-            serve_port=port,
-            cache_dir=remote_cache_dir,
-            transfer_mode=effective_transfer_mode,
-        )
-        try:
-            diag.phase_start("spark_diagnostics")
-            diag.collect_spark_diagnostics()
-            diag.phase_end("spark_diagnostics")
-        except Exception as e:
-            diag.phase_end("spark_diagnostics", error=str(e))
-            logger.warning("Spark diagnostics collection failed: %s", e)
 
     # Launch via the library API; the API call internally drives
     # ``launch_inference`` (which calls ``runtime.run``).  Tests that
@@ -691,8 +667,6 @@ def run(
     # second resolution, no second transport prepare, no second occupancy
     # sweep, and no chance of the launch landing somewhere other than the
     # hosts named in the banner.
-    if diag:
-        diag.phase_start("launch")
     # Spans the whole API call, not just ``launch_inference``: the difference
     # between this and the ``launch`` span nested inside it is ``api.run``'s
     # own preamble (transport prepare, eviction setup), which is otherwise
@@ -704,44 +678,16 @@ def run(
         run_result = api.run(run_options, sctx=sctx, plan=run_plan)
     except KeyboardInterrupt:
         click.echo("\nLaunch interrupted; inspect workload status before retrying.", err=True)
-        if diag:
-            diag.close()
         sys.exit(130)
     except TransferError as e:
-        if diag:
-            diag.phase_end("launch", error=str(e))
-            diag.emit_error("launch", e)
-            diag.emit_timeline(sctx.timing)
-            diag.emit_summary()
-            diag.close()
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
     except IncompatibleHardwareError as e:
-        if diag:
-            diag.phase_end("launch", error=str(e))
-            diag.emit_error("launch", e)
-            diag.emit_timeline(sctx.timing)
-            diag.emit_summary()
-            diag.close()
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
     except api.SparkrunError as e:
-        if diag:
-            diag.phase_end("launch", error=str(e))
-            diag.emit_error("launch", e)
-            diag.emit_timeline(sctx.timing)
-            diag.emit_summary()
-            diag.close()
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
-    except Exception as e:
-        if diag:
-            diag.phase_end("launch", error=str(e))
-            diag.emit_error("launch", e)
-            diag.emit_timeline(sctx.timing)
-            diag.emit_summary()
-            diag.close()
-        raise
 
     if _run_span is not None and sctx.timing is not None:
         sctx.timing.end(_run_span, rc=int(run_result.rc))
@@ -750,11 +696,6 @@ def run(
     # status use that contract; legacy lifecycle needs its private launch handle.
     launch_result = run_result.launch_result
     result = launch_result if launch_result is not None else run_result
-
-    if diag:
-        diag.phase_end("launch")
-        diag.emit_launch_result(result)
-        diag.emit_serve_command(result.serve_command, result.container_image)
 
     # region USER FACING STDOUT INFORMATION
 
@@ -852,19 +793,5 @@ def run(
                 click.echo(_block)
         if _startup or _timings:
             click.echo()
-
-    # --- Diagnostics finalize ---
-    if diag:
-        if exit_code != 0:
-            diag.emit_error("completion", "CLI observation interrupted" if exit_code == 130 else "Run did not complete successfully")
-            if launch_result is not None and exit_code != 130:
-                try:
-                    diag.capture_workload_logs(launch_result)
-                except Exception:
-                    logger.debug("Could not collect workload failure logs", exc_info=True)
-        diag.emit_timeline(sctx.timing)
-        diag.emit_summary()
-        diag.close()
-        click.echo("Diagnostics written to: %s" % diagnostics_path)
 
     sys.exit(exit_code)

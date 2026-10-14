@@ -8,6 +8,8 @@ Unknown field declarations fail during registration instead of guessing types.
 from copy import deepcopy
 
 FIELD_SCHEMAS = {
+    "log_tail": {"type": "integer", "minimum": 0, "maximum": 2000},
+    "collect_diagnostics": {"type": "boolean"},
     "acknowledge_effects": {"maxLength": 4096, "type": "string"},
     "acknowledge_trust": {"type": "boolean"},
     "alias": {"maxLength": 4096, "type": "string"},

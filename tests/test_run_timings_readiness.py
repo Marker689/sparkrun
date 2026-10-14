@@ -1013,7 +1013,7 @@ def test_readiness_failure_marks_diagnostics_failed(run_env, launched, monkeypat
     import json
 
     monkeypatch.setattr("sparkrun.core.launcher.wait_for_serve_ready", lambda *a, **kw: _ready(ready=False, reason="health"))
-    monkeypatch.setattr("sparkrun.diagnostics.RunDiagnosticsCollector.capture_workload_logs", lambda *a: None)
+    monkeypatch.setattr("sparkrun.diagnostics.session.DiagnosticsCapture.collect_logs", lambda *a: None)
     output = tmp_path / "failed.ndjson"
     result = _invoke(CliRunner(), "--no-follow", "--collect-diagnostics", str(output))
     assert result.exit_code == 1, result.output

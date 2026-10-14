@@ -21,11 +21,15 @@ party automation, the CLI itself) depend on.  Surfaces:
 - **Functions** — ``plan``, ``run``, ``stop``, ``logs``, ``open_log_target``, ``status``,
   ``schedule``, ``list_jobs``, ``search_recipes``, ``benchmark``, and
   ``resume_benchmark``.
+- **Diagnostics** — ``collect_diagnostics`` for standalone bundles and
+  ``capture_diagnostics`` for opt-in capture around shared API operations.
 
 The API never writes to ``stdout`` / ``stderr`` and never calls
 ``sys.exit``. Operational failures generally use :class:`SparkrunError` subclasses;
 log readers also expose standard ``OSError`` / ``subprocess`` read failures
 (see ``docs/LOGGING_API.md``).
+Diagnostic bundle output-open failures raise ``OSError``; section failures are
+reported in the bundle/result (see ``docs/DIAGNOSTICS_API.md``).
 Pure model/plan validation may raise ValueError or TypeError. Implicit bootstrap
 failures are wrapped with their original cause; interrupts propagate. Streaming
 surfaces (``logs``) return iterators of structured records that the CLI renders
@@ -69,6 +73,7 @@ from sparkrun.api._catalog_models import (
     ResolvedCatalogRecipe,
 )
 from sparkrun.api._context import default_sctx
+from sparkrun.api._diagnostics import DiagnosticsCapture, DiagnosticsResult, capture_diagnostics, collect_diagnostics
 from sparkrun.api._errors import (
     AmbiguousCategoryError,
     AmbiguousWorkload,
@@ -173,6 +178,10 @@ __all__ = [
     # Session context
     "SparkrunContext",
     "default_sctx",
+    "collect_diagnostics",
+    "capture_diagnostics",
+    "DiagnosticsCapture",
+    "DiagnosticsResult",
     "build",
     "plan_build",
     # Data models

@@ -13,5 +13,8 @@ def register(v):
     if getattr(api, "IMAGE_DISTRIBUTION_API_VERSION", None) != 1 or getattr(api, "IMAGE_PULL_API_VERSION", None) != 1:
         raise RuntimeError("OCI Relay requires Sparkrun develop-next / 0.4.0 with image-distribution API 1 and pre-pull API 1")
     from .provider import PROVIDER
+    from .diagnostics import register as register_diagnostics
+
+    register_diagnostics()
 
     api.register_image_distribution_provider("oci-relay", PROVIDER)

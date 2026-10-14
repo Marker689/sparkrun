@@ -15,6 +15,9 @@ from typing import Any, Callable
 class OperationState:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     events: Callable[[dict], None] | None = None
+    observers: list[Callable[[dict], None]] = field(default_factory=list, repr=False, compare=False, kw_only=True)
+    secrets: set[str] = field(default_factory=set, repr=False, compare=False, kw_only=True)
+    diagnostics_sink: Any = field(default=None, repr=False, compare=False, kw_only=True)
     cancel: threading.Event = field(default_factory=threading.Event)
     deadline: float | None = None
     hub: Any = None
@@ -30,10 +33,10 @@ class OperationState:
         if getattr(self._feedback_local, "busy", False):
             return
         with self._feedback_lock:
-            if self.events is not None:
+            for subscriber in ([self.events] if self.events is not None else []) + list(self.observers):
                 self._feedback_local.busy = True
                 try:
-                    self.events({**payload, "operation_id": self.id})
+                    subscriber({**payload, "operation_id": self.id})
                 except Exception:
                     import logging
 
@@ -51,8 +54,16 @@ class OperationState:
         self.check()
         if kind in {"progress", "feedback", "warning", "log"}:
             self.feedback({"type": kind, **data})
-        elif self.events is not None:
-            self.events({"type": kind, "operation_id": self.id, **data})
+        else:
+            # Observers are advisory; the existing primary event sink retains
+            # its delivery/error contract for durable operation events.
+            for observer in list(self.observers):
+                try:
+                    observer({"type": kind, "operation_id": self.id, **data})
+                except Exception:
+                    pass
+            if self.events is not None:
+                self.events({"type": kind, "operation_id": self.id, **data})
 
 
 CURRENT: ContextVar[OperationState | None] = ContextVar("sparkrun_operation", default=None)
@@ -72,7 +83,7 @@ def operation_scope(sctx=None, *, state=None):
         from contextlib import nullcontext
         from sparkrun.core.feedback_logging import forward_operation_logs
 
-        if sctx is not None and getattr(sctx, "progress", None) is None and state.events is not None:
+        if sctx is not None and getattr(sctx, "progress", None) is None and (state.events is not None or state.observers):
             from sparkrun.core.progress import LaunchProgress
 
             sctx.progress = LaunchProgress(timeline=getattr(sctx, "timing", None))

@@ -295,12 +295,15 @@ def test_native_handler_result_needs_no_private_launch_handle(
             serve_command="native serve --port 9001",
         )
 
-    monkeypatch.setattr(api, "run", native_run)
+    from sparkrun.diagnostics.session import capture_operation
+
+    native_run.__name__ = "run"
+    monkeypatch.setattr(api, "run", capture_operation(native_run))
     lifecycle, follow = mock.Mock(), mock.Mock()
     monkeypatch.setattr("sparkrun.core.launcher.post_launch_lifecycle", lifecycle)
     monkeypatch.setattr(SglangRuntime, "follow_logs", follow)
-    collector = mock.Mock()
-    monkeypatch.setattr("sparkrun.diagnostics.RunDiagnosticsCollector", mock.Mock(return_value=collector))
+    monkeypatch.setattr("sparkrun.diagnostics.spark_collector.collect_spark_diagnostics", lambda *a, **kw: {})
+    monkeypatch.setattr("sparkrun.diagnostics.session.DiagnosticsCapture.collect_logs", lambda *a: None)
     args = ["run", _RECIPE_NAME, "--cluster", "wopr", "--port", "9001"]
     if no_ready_wait:
         args += ["--no-ready-wait"]
@@ -319,5 +322,8 @@ def test_native_handler_result_needs_no_private_launch_handle(
     lifecycle.assert_not_called()
     follow.assert_not_called()
     if diagnostics:
-        assert collector.emit_launch_result.call_args.args[0].launch_result is None
-        collector.close.assert_called_once()
+        import json
+
+        records = [json.loads(line) for line in (tmp_path / "run.ndjson").read_text().splitlines()]
+        assert next(r for r in records if r["_type"] == "run_launch_result")["rc"] == 0
+        assert records[-1]["_type"] == "bundle_complete"

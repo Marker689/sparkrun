@@ -7,6 +7,7 @@ import inspect
 from typing import Any
 
 from sparkrun.daemon.request_fields import fields
+from sparkrun.daemon.artifacts import with_diagnostics
 
 from sparkrun.api._wire import object_schema, to_wire, validate
 from sparkrun.core.daemon_registry import DaemonOp, register_daemon_op
@@ -151,6 +152,7 @@ def _benchmark_progress(sctx, event):
         sctx.operation.emit("progress", event=to_wire(event))
 
 
+@with_diagnostics
 def invoke(target, arguments, sctx, prompt=unavailable_prompt):
     from sparkrun import api
 
@@ -178,6 +180,7 @@ def invoke(target, arguments, sctx, prompt=unavailable_prompt):
         return to_wire(fn(**arguments))
 
 
+@with_diagnostics
 def invoke_options(target, model, arguments, sctx, prompt=unavailable_prompt):
     from sparkrun import api
 
@@ -234,6 +237,8 @@ def _options_loader(target, model):
 def register_core_ops():
     for name, target, kind, scope, names, required in SPECS:
         properties = fields(names)
+        if name == "benchmarks.resume":
+            properties["collect_diagnostics"] = B
         if name == "cluster.default":
             properties["name"] = nullable(S)
         if name == "catalog.import":
@@ -259,6 +264,8 @@ def register_core_ops():
         properties = fields(OPTION_FIELDS[model])
         if "recipe" in properties:
             properties["recipe"] = S
+        if target in {"run", "benchmark"}:
+            properties["collect_diagnostics"] = B
         if target == "run":
             properties.update({"confirm": B, "wait_ready": B, "post_launch": B})
         register_daemon_op(

@@ -17,6 +17,13 @@ of which is "a runtime" or "an executor" on its own.
 
 from sparkrun.core.cli_registry import register_cli_command
 from sparkrun.feedback import FEEDBACK_API_VERSION, FeedbackEvent, FeedbackReporter, get_feedback
+from sparkrun.diagnostics.plugin import (
+    DIAGNOSTICS_API_VERSION,
+    DiagnosticSection,
+    DiagnosticsReporter,
+    PluginDiagnostics,
+    register_plugin_diagnostics,
+)
 from sparkrun.core.image_distribution import (
     IMAGE_DISTRIBUTION_API_VERSION,
     IMAGE_PULL_API_VERSION,
@@ -55,6 +62,11 @@ from sparkrun.core.workload_lifecycle import (
 )
 
 __all__ = [
+    "DIAGNOSTICS_API_VERSION",
+    "DiagnosticSection",
+    "DiagnosticsReporter",
+    "PluginDiagnostics",
+    "register_plugin_diagnostics",
     "FEEDBACK_API_VERSION",
     "FeedbackEvent",
     "FeedbackReporter",

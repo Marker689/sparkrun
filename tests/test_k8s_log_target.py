@@ -72,6 +72,22 @@ def _add_worker(env, *, node="node-2"):
     return pod
 
 
+def test_diagnostic_bundle_reads_native_logs_without_ssh(saved_logs, tmp_path):
+    import json
+
+    env = saved_logs
+    env.script.write_text("print('native diagnostic log')\n")
+    path = tmp_path / "native-diagnostics.ndjson"
+    result = api.collect_diagnostics(path, workload_id=CID, sctx=env.sctx)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert any(section["section"] == "hosts" and section["status"] == "skipped" for section in result.sections)
+    logs = [row for row in rows if row["_type"] == "workload_log"]
+    assert logs and logs[0]["text"] == "native diagnostic log"
+    assert logs[0]["resource"]["kind"] == "Pod"
+    assert logs[0]["source_id"]
+    assert not any(section["status"] == "error" for section in result.sections)
+
+
 def test_saved_native_target_reads_full_history_locally_and_pages(saved_logs, monkeypatch):
     env = saved_logs
     env.script.write_text(

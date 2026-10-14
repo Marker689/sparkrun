@@ -45,8 +45,8 @@ def _assert_dead(pid_file):
         try:
             if path.read_text().split()[2] == "Z":
                 return
-        except FileNotFoundError:
-            return  # the process may exit between existence check and read
+        except (FileNotFoundError, ProcessLookupError):
+            return  # the process may exit while /proc serves the read
         time.sleep(0.01)
     pytest.fail("benchmark worker is still running")
 

@@ -30,6 +30,7 @@ Invalid programmatic inputs may raise ValueError/TypeError; interrupts propagate
 from __future__ import annotations
 
 from sparkrun.core.coordination import operation_boundary
+from sparkrun.diagnostics.session import capture_operation
 
 from sparkrun.core.offline import resolve_offline
 from sparkrun.core.status_observation import RunningSnapshot
@@ -97,6 +98,7 @@ def _observe_plan_hardware(cluster, hosts, *, sctx, dry_run):
     return cluster, observations
 
 
+@capture_operation
 def plan(options: RunOptions, *, sctx: "SparkrunContext | None" = None) -> RunPlan:
     """Decide *what* the launch described by *options* would do, without doing it.
 
@@ -503,6 +505,7 @@ def _apply_recipe_overrides_for_plan(recipe, options: RunOptions, *, runtime, cl
     return resolution
 
 
+@capture_operation
 @operation_boundary(mutation=True)
 def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: RunPlan | None = None) -> RunResult:
     """Launch the workload described by *options* and return a :class:`RunResult`.
