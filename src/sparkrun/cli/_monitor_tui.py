@@ -17,6 +17,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Footer, Header, Static
 
+from sparkrun.core.application_profile import get_application_profile
 from sparkrun.core.monitoring import HostActivity, MonitorSample
 
 if TYPE_CHECKING:
@@ -66,7 +67,7 @@ def _render_workloads(activity: HostActivity, cache_dir: str | None) -> list[str
     lines: list[str] = []
     total = _container_count(activity)
     if not activity.workloads:
-        lines.append("  [dim]No sparkrun workloads running[/dim]")
+        lines.append("  [dim]No %s workloads running[/dim]" % get_application_profile().command)
         return lines
 
     lines.append(f"  [bold]Workloads ({total}):[/bold]")
@@ -303,7 +304,7 @@ class ClusterMonitorApp(App):
     # -- lifecycle ----------------------------------------------------------
 
     def on_mount(self) -> None:
-        self.title = "sparkrun cluster monitor"
+        self.title = "%s cluster monitor" % get_application_profile().command
         self.sub_title = "%d host(s) — every %ds" % (len(self._hosts), self._interval)
 
         table = self.query_one("#host-table", DataTable)

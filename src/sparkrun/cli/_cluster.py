@@ -969,7 +969,7 @@ def cluster_monitor(ctx, hosts, hosts_file, cluster_name, dry_run, interval, sim
 def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json):
     """Show {app_command} containers running on cluster hosts.
 
-    Lists all Docker containers whose names start with sparkrun_ on each
+    Lists all Docker containers whose names start with {resource_namespace}_ on each
     host.  Accepts the same host-resolution flags as run/stop/logs.
 
     Examples:

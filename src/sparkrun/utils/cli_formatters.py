@@ -143,7 +143,9 @@ def format_recipe_table(
 
 def format_job_label(meta: dict[str, Any], cluster_id: str) -> str:
     """Format a display label from job metadata."""
-    short_id = cluster_id.removeprefix("sparkrun_")  # [:8]
+    from sparkrun.core.application_profile import resource_name
+
+    short_id = cluster_id.removeprefix(resource_name("_"))
     label = meta.get("recipe", cluster_id)
     tp = meta.get("tensor_parallel")
     pp = meta.get("pipeline_parallel")
@@ -165,9 +167,12 @@ def format_job_commands(meta: dict[str, Any], cluster_id: str | None = None) -> 
     that are always unambiguous.  Falls back to recipe-name-based commands
     (with host/tp/port flags) when no cluster_id is available.
     """
+    from sparkrun.core.application_profile import get_application_profile, resource_name
+
+    command = get_application_profile().command
     if cluster_id:
-        short_id = cluster_id.removeprefix("sparkrun_")
-        return f"sparkrun logs {short_id}", f"sparkrun stop {short_id}"
+        short_id = cluster_id.removeprefix(resource_name("_"))
+        return f"{command} logs {short_id}", f"{command} stop {short_id}"
     # Fallback: recipe-based (for jobs without metadata)
     recipe_name = meta.get("recipe_ref") or meta.get("recipe")
     if not recipe_name:
@@ -180,8 +185,8 @@ def format_job_commands(meta: dict[str, Any], cluster_id: str | None = None) -> 
     tp_flag = f" --tp {tp}" if tp else ""
     port_flag = f" --port {port}" if port else ""
     name_flag = f" --served-model-name {served_name}" if served_name else ""
-    logs_cmd = f"sparkrun logs {recipe_name}{host_flag}{tp_flag}{port_flag}{name_flag}"
-    stop_cmd = f"sparkrun stop {recipe_name}{host_flag}{tp_flag}{port_flag}{name_flag}"
+    logs_cmd = f"{command} logs {recipe_name}{host_flag}{tp_flag}{port_flag}{name_flag}"
+    stop_cmd = f"{command} stop {recipe_name}{host_flag}{tp_flag}{port_flag}{name_flag}"
     return logs_cmd, stop_cmd
 
 

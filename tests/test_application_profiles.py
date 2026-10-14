@@ -731,3 +731,35 @@ def test_profile_namespaces_reject_none(name):
 
     with pytest.raises(ValueError):
         ApplicationProfile(id="example", display_name="Example", command="example", package="example", **{name: None})
+
+
+def test_job_commands_and_labels_follow_the_application_profile():
+    from sparkrun.utils.cli_formatters import format_job_commands, format_job_label
+
+    alternate(resource_namespace="alt")
+    meta = {"recipe": "r", "hosts": ["10.0.0.1"], "tensor_parallel": 2}
+    assert format_job_commands(meta, cluster_id="alt_aabbccdd1122") == (
+        "alternate-test logs aabbccdd1122",
+        "alternate-test stop aabbccdd1122",
+    )
+    logs_cmd, stop_cmd = format_job_commands(meta)
+    assert logs_cmd.startswith("alternate-test logs r ")
+    assert stop_cmd.startswith("alternate-test stop r ")
+    assert format_job_label(meta, "alt_aabbccdd1122").endswith("[aabbccdd1122]")
+
+
+def test_monitor_tui_follows_the_application_profile():
+    pytest.importorskip("textual")
+    import asyncio
+
+    alternate()  # before importing the CLI package, which selects a profile
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp, _render_workloads
+
+    assert "No alternate-test workloads running" in _render_workloads(SimpleNamespace(workloads=[]), None)[0]
+
+    async def title():
+        app = ClusterMonitorApp(Mock(), ["h1"], interval=60)
+        async with app.run_test():
+            return app.title
+
+    assert asyncio.run(title()) == "alternate-test cluster monitor"
