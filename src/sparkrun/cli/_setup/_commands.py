@@ -472,12 +472,15 @@ def setup_features_list(ctx, output_json, include_all):
     if config.profile.feature_channel_defaults:
         click.echo("Application channel: %s" % config.self_update_channel)
     click.echo("")
-    width = max(len(f.name) for f in flags)
+    table = [("FEATURE", "STATE", "SOURCE", "OWNER", "DESCRIPTION")]
     for flag in flags:
         enabled, source, _override = _feature_state(config, flag)
-        state = "on " if enabled else "off"
+        state = "on" if enabled else "off"
         owner = getattr(FEATURE_OWNERS.get(flag.name), "plugin_id", "core")
-        click.echo("%-*s  %s  (%-7s)  %-12s  %s" % (width, flag.name, state, source, owner, flag.description))
+        table.append((flag.name, state, source, owner, flag.description))
+    widths = [max(len(cell) for cell in column) for column in zip(*table, strict=True)]
+    for cells in table:
+        click.echo("  ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True)).rstrip())
 
 
 def _require_known_flag(name):

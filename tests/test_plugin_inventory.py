@@ -486,6 +486,10 @@ assert text_result.exit_code == 0, (text_result.output, text_result.exception)
 assert "not checked" not in text_result.output
 assert "enabled" in text_result.output
 assert "disabled" in text_result.output
+table = {line.split()[0]: line for line in text_result.output.splitlines() if line and not line.startswith(" ")}
+assert table["lil"].endswith("none"), text_result.output
+assert "gateway.litellm" in table["litellm"], text_result.output
+assert "disabled" in table["litellm"], text_result.output
 for route in (["plugins", "list", "--json"], ["setup", "plugins", "list", "--json"]):
     result = runner.invoke(main, route, obj={"config_path": config})
     assert result.exit_code == 0, (result.output, result.exception)
@@ -499,13 +503,15 @@ for route in (["plugins", "list", "--json"], ["setup", "plugins", "list", "--jso
         assert row["loaded"] is False, row
     assert rows["k8s"]["enabled"] is True
     assert rows["lil"]["enabled"] is False
+    assert rows["litellm"]["enabled"] is False
+    assert rows["litellm"]["features"] == ["gateway.litellm"]
 report = reconcile_plugins(SparkrunConfig(config), update=False)
 assert all(row["compatibility"]["status"] == "compatible" for row in report["plugins"] if row["name"] in BUNDLED_PLUGIN_NAMES)
 assert not any(name.startswith("sparkrun.plugins.") for name in sys.modules)
 print(text_result.output)
 """
     config = tmp_path / "config.yaml"
-    config.write_text("features:\n  integration.k8s: true\n  registry.lil: false\n")
+    config.write_text("plugins:\n  enabled:\n    litellm: false\nfeatures:\n  integration.k8s: true\n  registry.lil: false\n")
     env = {key: value for key, value in os.environ.items() if not key.startswith("SPARKRUN_FEATURE_")}
     # The vendor lock is the expected release, independent of the inventory's
     # source reader. Relay upgrades must not require duplicating its version here.

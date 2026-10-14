@@ -146,6 +146,14 @@ def plugins_list(ctx, output_json, check):
     COMPATIBILITY checks declared requirements against the current installation.
     Explanations for unknown or incompatible results follow the table.
 
+    FEATURES lists declared capability flags that can be configured separately
+    within a plugin. Names do not indicate whether those features are enabled;
+    use `{app_command} setup features list` to inspect their effective state.
+    `none` means no separate capability flags are declared; `unavailable` means
+    their declaration metadata could not be read. Disabled plugins still show
+    their declarations, but their capabilities are inactive. Legacy whole-plugin
+    flags are represented by STATE; use `plugins enable/disable` to control loading.
+
     Listing reads metadata without importing plugin code. Use --check to also
     validate loading for managed plugins, including disabled ones. JSON reports
     actual loaded status separately from compatibility and load-check results.
@@ -165,18 +173,22 @@ def plugins_list(ctx, output_json, check):
     config = management_config(ctx)
     host = HostSnapshot.current()
     rows = []
+    feature_labels = []
     for plugin in list_plugins(config):
         row = plugin.to_dict()
         row["managed"] = plugin.managed
         from sparkrun.core.plugin_lifecycle import plugin_details
         from sparkrun.core.plugin_policy import plugin_state
 
+        features_available = True
         try:
             details = plugin_details(plugin)
         except (PluginError, OSError, ValueError) as exc:
             details = {"declarations": {}}
             row["failure"] = str(exc)
+            features_available = False
         row["features"] = sorted(details["declarations"].get("features", {}))
+        feature_labels.append((", ".join(row["features"]) or "none") if features_available else "unavailable")
         state = plugin_state(
             plugin.plugin_id or plugin.name,
             config,
@@ -214,7 +226,7 @@ def plugins_list(ctx, output_json, check):
         return
     header = ("NAME", "VERSION", "SOURCE", "STATE", "COMPATIBILITY", "FEATURES")
     table: list[tuple[str, ...]] = [header]
-    for row in rows:
+    for row, features in zip(rows, feature_labels, strict=True):
         state = "disabled" if not row["enabled"] else "enabled (load failed)" if row["failure"] else "enabled"
         table.append(
             (
@@ -223,12 +235,13 @@ def plugins_list(ctx, output_json, check):
                 row["source"],
                 state,
                 row["compatibility"]["status"],
-                (", ".join(row["features"]) or "—") if row["enabled"] else "unavailable (plugin disabled)",
+                features,
             )
         )
     widths = [max(len(cell) for cell in column) for column in zip(*table, strict=True)]
     lines = ["  ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True)).rstrip() for cells in table]
     click.echo("\n".join(lines))
+    click.echo("\nFEATURES: declared capability flags; none = no separate flags. Disabled plugins' capabilities are inactive.")
     diagnostics = [
         row
         for row in rows
