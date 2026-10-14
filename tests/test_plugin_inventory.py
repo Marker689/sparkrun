@@ -331,6 +331,34 @@ def test_json_output_is_a_bare_array_of_plugin_objects(runner, tmp_path, fake_in
     }
 
 
+def test_list_shows_enabled_plugins_unless_all(runner, fake_in_tree):
+    import json
+
+    from sparkrun.cli import main
+
+    fake_in_tree("cli_on", "def register(v): pass")
+    fake_in_tree("cli_off", "def register(v): pass", flag=False)
+
+    default = runner.invoke(main, ["plugins", "list"])
+    assert default.exit_code == 0, default.output
+    assert "cli_on" in default.output and "cli_off" not in default.output
+    assert "disabled plugin(s) hidden; use --all" in default.output
+    # A disabled plugin has no diagnostics entry: STATE already says it.
+    assert "Unavailable: plugin disabled" not in default.output
+
+    everything = runner.invoke(main, ["plugins", "list", "--all"])
+    assert everything.exit_code == 0, everything.output
+    assert "cli_off" in everything.output and "hidden" not in everything.output
+    assert "Unavailable: plugin disabled" not in everything.output
+    assert "  cli_off:" not in everything.output
+
+    names = {row["name"] for row in json.loads(runner.invoke(main, ["plugins", "list", "--json"]).output)}
+    assert "cli_on" in names and "cli_off" not in names
+    rows = json.loads(runner.invoke(main, ["plugins", "list", "--all", "--json"]).output)
+    assert {"cli_on", "cli_off"} <= {row["name"] for row in rows}
+    assert all(row["enabled"] for row in json.loads(runner.invoke(main, ["plugins", "list", "--json"]).output))
+
+
 def test_json_spells_an_unknown_version_as_null(runner, fake_in_tree):
     """'unknown' is a display rendering.
 
@@ -368,7 +396,7 @@ def test_json_serializes_an_external_plugins_path(runner, tmp_path, monkeypatch)
         property(lambda self: [plugin_dir]),
     )
 
-    result = runner.invoke(main, ["setup", "plugins", "list", "--json"])
+    result = runner.invoke(main, ["setup", "plugins", "list", "--all", "--json"])
     assert result.exit_code == 0, result.output
     row = next(r for r in json.loads(result.output) if r["name"] == "inv_ext_json")
     assert row["path"] == str(plugin_dir)
@@ -481,7 +509,7 @@ from sparkrun.core.in_tree_plugins import BUNDLED_PLUGIN_NAMES
 
 config = sys.argv[1]
 runner = CliRunner()
-text_result = runner.invoke(main, ["plugins", "list"], obj={"config_path": config})
+text_result = runner.invoke(main, ["plugins", "list", "--all"], obj={"config_path": config})
 assert text_result.exit_code == 0, (text_result.output, text_result.exception)
 assert "not checked" not in text_result.output
 assert "enabled" in text_result.output
@@ -490,7 +518,7 @@ table = {line.split()[0]: line for line in text_result.output.splitlines() if li
 assert table["lil"].endswith("none"), text_result.output
 assert "gateway.litellm" in table["litellm"], text_result.output
 assert "disabled" in table["litellm"], text_result.output
-for route in (["plugins", "list", "--json"], ["setup", "plugins", "list", "--json"]):
+for route in (["plugins", "list", "--all", "--json"], ["setup", "plugins", "list", "--all", "--json"]):
     result = runner.invoke(main, route, obj={"config_path": config})
     assert result.exit_code == 0, (result.output, result.exception)
     rows = {row["name"]: row for row in json.loads(result.output)}

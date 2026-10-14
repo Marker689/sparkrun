@@ -150,8 +150,8 @@ implementation. Explicit feature enabling selects it for subsequent starts;
 plugin installation/enabling alone does not switch the selection.
 
 ```bash
-sparkrun plugins list
-sparkrun setup features
+sparkrun plugins list --all
+sparkrun setup features list --all
 sparkrun setup features enable gateway.litellm
 sparkrun proxy start --host 127.0.0.1 --cluster <name>
 sparkrun proxy status --json

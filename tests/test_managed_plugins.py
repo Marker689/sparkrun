@@ -566,8 +566,8 @@ def test_public_cli_lifecycle_and_legacy_alias(repository, manager, monkeypatch)
     result = runner.invoke(main, ["plugins", "add", str(root), "--trust", "--enable"])
     assert result.exit_code == 0, result.output
     assert "installed" in result.output
-    primary = runner.invoke(main, ["plugins", "list", "--json"])
-    legacy = runner.invoke(main, ["setup", "plugins", "list", "--json"])
+    primary = runner.invoke(main, ["plugins", "list", "--all", "--json"])
+    legacy = runner.invoke(main, ["setup", "plugins", "list", "--all", "--json"])
     assert primary.exit_code == legacy.exit_code == 0
     assert json.loads(primary.output) == json.loads(legacy.output)
     row = next(r for r in json.loads(primary.output) if r["managed"])

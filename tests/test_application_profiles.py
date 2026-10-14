@@ -625,7 +625,7 @@ def test_feature_diagnostics_identify_application_channel(tmp_path, monkeypatch)
     config = SparkrunConfig(tmp_path / "config.yaml")
     config.set("self_update.channel", "next")
     monkeypatch.setattr(_commands, "_get_context", lambda ctx: SimpleNamespace(config=config))
-    result = CliRunner().invoke(_commands.setup_features_list, ["--json"])
+    result = CliRunner().invoke(_commands.setup_features_list, ["--all", "--json"])
     assert result.exit_code == 0, result.output
     row = next(row for row in json.loads(result.output) if row["name"] == "cli.tune")
     assert row["enabled"] is False

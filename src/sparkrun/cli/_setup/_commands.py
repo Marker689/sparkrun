@@ -435,17 +435,25 @@ def _feature_state(config, flag):
 
 @setup_features.command("list")
 @json_option()
-@click.option("--all", "include_all", is_flag=True, hidden=True, help="Include application setup-step flags.")
+@click.option("--all", "include_all", is_flag=True, help="Include disabled flags and setup-step flags (default: enabled flags only).")
 @click.pass_context
 def setup_features_list(ctx, output_json, include_all):
-    """List feature flags and their effective state."""
+    """List enabled feature flags and their effective state.
+
+    Flags that resolve off, and the ``setup.steps.*`` flags, are omitted unless
+    --all is given (in --json output too).
+    """
     from sparkrun.core.features import all_features
 
     config = _get_context(ctx).config
     channel = config.feature_channel
     from sparkrun.core.features import FEATURE_OWNERS
 
-    flags = [flag for flag in all_features() if include_all or not flag.name.startswith("setup.steps.")]
+    states = {flag.name: _feature_state(config, flag) for flag in all_features()}
+    flags = [flag for flag in all_features() if include_all or (states[flag.name][0] and not flag.name.startswith("setup.steps."))]
+    hidden_off = (
+        0 if include_all else sum(1 for flag in all_features() if not states[flag.name][0] and not flag.name.startswith("setup.steps."))
+    )
 
     if output_json:
         # Preserve `channel` as core maturity; application release policy has
@@ -462,13 +470,16 @@ def setup_features_list(ctx, output_json, include_all):
                     "channel": channel,
                     "application_channel": config.self_update_channel,
                 }
-                for flag, (enabled, source, override) in ((f, _feature_state(config, f)) for f in flags)
+                for flag, (enabled, source, override) in ((f, states[f.name]) for f in flags)
             ]
         )
         return
 
+    hidden_note = "%d disabled feature(s) hidden; use --all to include them." % hidden_off if hidden_off else None
     if not flags:
-        click.echo("No feature flags registered.")
+        click.echo("No enabled feature flags." if hidden_off else "No feature flags registered.")
+        if hidden_note:
+            click.echo(hidden_note)
         return
 
     click.echo("Feature channel: %s" % channel)
@@ -477,13 +488,16 @@ def setup_features_list(ctx, output_json, include_all):
     click.echo("")
     table = [("FEATURE", "STATE", "SOURCE", "OWNER", "DESCRIPTION")]
     for flag in flags:
-        enabled, source, _override = _feature_state(config, flag)
+        enabled, source, _override = states[flag.name]
         state = "on" if enabled else "off"
         owner = getattr(FEATURE_OWNERS.get(flag.name), "plugin_id", "core")
         table.append((flag.name, state, source, owner, flag.description))
     widths = [max(len(cell) for cell in column) for column in zip(*table, strict=True)]
     for cells in table:
         click.echo("  ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True)).rstrip())
+    if hidden_note:
+        click.echo("")
+        click.echo(hidden_note)
 
 
 def _require_known_flag(name):

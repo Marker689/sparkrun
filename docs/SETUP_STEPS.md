@@ -90,9 +90,9 @@ A plugin being off means its steps and feature definitions are not registered.
 Turning a step off excludes its probe and findings. Application profiles can
 supply baseline and release-channel defaults for registered step features.
 
-`setup features list` omits `setup.steps.*` by default, including in JSON output.
-Use the hidden `--all` option (`setup features list --all`, optionally with
-`--json`) to include every registered feature. Setup-step flags remain available
+`setup features list` shows only enabled flags and omits `setup.steps.*` by
+default, including in JSON output. Use `--all` (`setup features list --all`,
+optionally with `--json`) to include every registered feature. Setup-step flags remain available
 to the normal `enable`, `disable`, and `reset` commands. This prefix is a feature
 naming/display convention, not a hardware-matching or setup-ownership rule.
 Plugin steps reference their `feature_flag` explicitly; it need not use that prefix.

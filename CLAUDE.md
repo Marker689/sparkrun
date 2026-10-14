@@ -291,7 +291,8 @@ the rationale.
 
 ### Plugin Inventory (`core/plugin_inventory.py`)
 
-`list_plugins()` is the console-free source behind `sparkrun setup plugins list`
+`list_plugins()` is the console-free source behind `sparkrun plugins list`
+(`setup plugins list` is a hidden alias)
 — the inventory peer of the two loaders: they decide what to *load*, it reports
 what exists. Scope is **plugin modules**, exactly the set
 `in_tree_plugins` / `external_plugins` govern; a runtime or executor shipped in
@@ -306,9 +307,10 @@ read as an answer, and is worse than no catalog.
 
 **Nothing here imports a plugin.** Enumeration is directory-level; a version is
 read only off a module some loader already imported. So a gated-off plugin is
-listed (you cannot decide whether to enable a gate without seeing what it
+enumerated (you cannot decide whether to enable a gate without seeing what it
 governs) while staying unimported — reported `unknown`, not resolved by
-importing something the user switched off. Note this also means external
+importing something the user switched off. The CLI shows disabled plugins only
+with `--all` (and says how many it hid); `list_plugins()` itself never filters. Note this also means external
 plugins are enumerated even when `core.external_plugins` is off; that flag
 exists to avoid *importing* untrusted code, and reading directory entries for a
 command the user explicitly typed costs nothing it protects.

@@ -96,7 +96,7 @@ drops Linux **page cache**, not model files. Diagnostics are NDJSON;
 
 ```bash
 sparkrun plugins
-sparkrun plugins list --json
+sparkrun plugins list --all --json
 sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin
 sparkrun plugins add https://github.com/sparksq/sparkrun-coldsnap-plugin
 sparkrun plugins update --all
@@ -106,7 +106,7 @@ sparkrun plugins enable <plugin_name>
 sparkrun plugins disable <plugin_name>
 sparkrun plugins remove <plugin_name>
 sparkrun setup features
-sparkrun setup features list --json
+sparkrun setup features list --all --json
 sparkrun setup features enable gateway.sparkroute
 sparkrun setup features disable gateway
 sparkrun setup features reset gateway
@@ -121,7 +121,9 @@ by default (configurable).
 Plugin enable/disable controls whole-plugin loading. Feature flags control its
 capabilities; a flag cannot load a disabled plugin. Installation/update is not
 explicit feature activation. Plugin list shows declared flags, not on/off values;
-`setup features` shows effective state. OCI Relay is bundled and enabled on all
+`setup features` shows effective state. Both list only enabled entries by
+default (text and JSON, with a "N disabled ... hidden" hint); add `--all` to
+include disabled plugins/flags (and `setup.steps.*` flags). OCI Relay is bundled and enabled on all
 channels; use `plugins enable/disable oci_relay`, not a legacy integration flag.
 
 Gateway support defaults on; LiteLLM is bundled/default on every channel. After

@@ -81,8 +81,9 @@ def _show_result(result):
 def plugins(ctx):
     """Manage plugin loading, installations, and compatibility.
 
-    With no subcommand, list all plugins. Listing includes bundled plugins,
-    directory plugins, installed integrations, and managed external plugins.
+    With no subcommand, list enabled plugins (`plugins list --all` includes
+    disabled ones). Listing covers bundled plugins, directory plugins,
+    installed integrations, and managed external plugins.
     Add, update, rollback, and remove manage plugins installed with this group.
 
     Managed installations are stored beside the active configuration, separately
@@ -134,15 +135,17 @@ def plugins_disable(ctx, name, dry_run):
 
 @plugins.command("list", short_help="Show plugin versions, state, and compatibility.")
 @json_option(help="Output plugin metadata, compatibility reasons, and load-check results as JSON")
+@click.option("--all", "include_all", is_flag=True, help="Include disabled plugins (default: enabled plugins only)")
 @click.option(
     "--check", is_flag=True, help="Also execute trusted managed plugins in child processes to check loading (60-second timeout each)"
 )
 @click.pass_context
 @plugin_errors
-def plugins_list(ctx, output_json, check):
-    """List all plugin sources, versions, and compatibility with this host.
+def plugins_list(ctx, output_json, include_all, check):
+    """List enabled plugin sources, versions, and compatibility with this host.
 
-    Includes disabled plugins. STATE shows the effective plugin loading policy;
+    Disabled plugins are omitted unless --all is given (in --json output too).
+    STATE shows the effective plugin loading policy;
     COMPATIBILITY checks declared requirements against the current installation.
     Explanations for unknown or incompatible results follow the table.
 
@@ -155,12 +158,14 @@ def plugins_list(ctx, output_json, check):
     flags are represented by STATE; use `plugins enable/disable` to control loading.
 
     Listing reads metadata without importing plugin code. Use --check to also
-    validate loading for managed plugins, including disabled ones. JSON reports
-    actual loaded status separately from compatibility and load-check results.
+    validate loading for the listed managed plugins (with --all, disabled ones
+    too). JSON reports actual loaded status separately from compatibility and
+    load-check results.
 
     \b
     Examples:
       {app_command} plugins list
+      {app_command} plugins list --all
       {app_command} plugins list --json
       {app_command} plugins list --check
     """
@@ -174,7 +179,11 @@ def plugins_list(ctx, output_json, check):
     host = HostSnapshot.current()
     rows = []
     feature_labels = []
+    hidden = 0
     for plugin in list_plugins(config):
+        if not include_all and not plugin.enabled:
+            hidden += 1
+            continue
         row = plugin.to_dict()
         row["managed"] = plugin.managed
         from sparkrun.core.plugin_lifecycle import plugin_details
@@ -221,8 +230,11 @@ def plugins_list(ctx, output_json, check):
     if output_json:
         print_json(rows)
         return
+    hidden_note = "%d disabled plugin(s) hidden; use --all to include them." % hidden if hidden else None
     if not rows:
-        click.echo("No plugins found.")
+        click.echo("No enabled plugins found." if hidden else "No plugins found.")
+        if hidden_note:
+            click.echo(hidden_note)
         return
     header = ("NAME", "VERSION", "SOURCE", "STATE", "COMPATIBILITY", "FEATURES")
     table: list[tuple[str, ...]] = [header]
@@ -242,14 +254,20 @@ def plugins_list(ctx, output_json, check):
     lines = ["  ".join(cell.ljust(width) for cell, width in zip(cells, widths, strict=True)).rstrip() for cells in table]
     click.echo("\n".join(lines))
     click.echo("\nFEATURES: declared capability flags; none = no separate flags. Disabled plugins' capabilities are inactive.")
+    if hidden_note:
+        click.echo(hidden_note)
+    # A disabled plugin's diagnostics restate that it is disabled; STATE says so.
     diagnostics = [
         row
         for row in rows
-        if row["failure"]
-        or row["compatibility"]["reasons"]
-        or row.get("load_check")
-        or row.get("selected_gateway")
-        or row.get("blocked_reason")
+        if row["enabled"]
+        and (
+            row["failure"]
+            or row["compatibility"]["reasons"]
+            or row.get("load_check")
+            or row.get("selected_gateway")
+            or row.get("blocked_reason")
+        )
     ]
     if diagnostics:
         click.echo("\nPlugin diagnostics:")
@@ -258,7 +276,7 @@ def plugins_list(ctx, output_json, check):
         if row.get("blocked_reason"):
             click.echo("    Unavailable: " + row["blocked_reason"])
         if row.get("selected_gateway"):
-            click.echo("    Selected gateway: " + row["selected_gateway"] + (" (plugin disabled)" if not row["enabled"] else ""))
+            click.echo("    Selected gateway: " + row["selected_gateway"])
         if row["failure"]:
             click.echo("    Load failure: %s" % row["failure"])
         if row["compatibility"]["reasons"]:

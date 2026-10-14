@@ -405,28 +405,35 @@ class TestFeatureListSetupSteps:
         monkeypatch.setattr(_commands, "_get_context", lambda ctx: SimpleNamespace(config=config))
         # The prefix applies equally to built-in and plugin-contributed steps.
         monkeypatch.setitem(FEATURE_FLAGS, "setup.steps.fixture", FeatureFlag("setup.steps.fixture", "Plugin setup step", default=True))
+        monkeypatch.setitem(FEATURE_FLAGS, "test.off.fixture", FeatureFlag("test.off.fixture", "Off by default", default=False))
         runner = CliRunner()
         expected = {flag.name for flag in all_features()}
+        enabled = {name for name in expected if config.is_feature_enabled(name) and not name.startswith("setup.steps.")}
+        hidden_off = sum(1 for name in expected if not config.is_feature_enabled(name) and not name.startswith("setup.steps."))
+        assert hidden_off >= 1
         for include_all in (False, True):
             args = ["--all"] if include_all else []
             result = runner.invoke(_commands.setup_features_list, [*args, "--json"])
             assert result.exit_code == 0, result.output
-            names = {row["name"] for row in json.loads(result.output)}
-            assert names == (expected if include_all else {name for name in expected if not name.startswith("setup.steps.")})
+            rows = json.loads(result.output)
+            assert {row["name"] for row in rows} == (expected if include_all else enabled)
+            assert include_all or all(row["enabled"] for row in rows)
             result = runner.invoke(_commands.setup_features_list, args)
             assert result.exit_code == 0, result.output
             assert ("setup.steps.sudoers" in result.output) is include_all
             assert ("setup.steps.fixture" in result.output) is include_all
+            assert ("test.off.fixture" in result.output) is include_all
+            assert ("%d disabled feature(s) hidden; use --all" % hidden_off in result.output) is not include_all
             assert "cli.tune" in result.output
 
-    def test_all_option_is_hidden(self):
+    def test_all_option_is_advertised(self):
         from click.testing import CliRunner
         from sparkrun.cli._setup import _commands
 
         result = CliRunner().invoke(_commands.setup_features_list, ["--help"])
         assert result.exit_code == 0
         assert "--json" in result.output
-        assert "--all" not in result.output
+        assert "--all" in result.output
 
     def test_omitted_steps_still_accept_overrides(self, tmp_path, monkeypatch):
         from click.testing import CliRunner

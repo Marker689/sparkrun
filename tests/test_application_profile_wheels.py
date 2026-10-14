@@ -174,7 +174,7 @@ def test_same_wheel_plugin_explicitly_selected_in_sparkrun(wheels, tmp_path):
     config = tmp_path / ".config/sparkrun/config.yaml"
     config.parent.mkdir(parents=True)
     config.write_text("integrations:\n  profile-test-plugin: true\n")
-    result = invoke(wheels, tmp_path, "sparkrun", "setup", "plugins", "list", "--json")
+    result = invoke(wheels, tmp_path, "sparkrun", "setup", "plugins", "list", "--all", "--json")
     assert result.returncode == 0, result.stderr
     plugin = next(p for p in json.loads(result.stdout) if p["name"] == "profile-test-plugin")
     assert plugin["selected"] and not plugin["loaded"] and plugin["failure"] is None
@@ -240,7 +240,7 @@ def test_alternate_tune_default_can_be_overridden_without_affecting_sparkrun(whe
 
 def test_arena_plugin_profile_defaults_and_override(wheels, tmp_path):
     for command, enabled in (("sparkrun", True), ("profile-test-app", False)):
-        result = invoke(wheels, tmp_path, command, "setup", "plugins", "list", "--json")
+        result = invoke(wheels, tmp_path, command, "setup", "plugins", "list", "--all", "--json")
         assert result.returncode == 0, result.stderr
         plugins = {plugin["name"]: plugin for plugin in json.loads(result.stdout)}
         assert "arena" not in plugins
@@ -310,12 +310,12 @@ def test_installed_k8s_plugin_defaults_and_explicit_opt_in(wheels, tmp_path, com
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({"features": {"channel": channel}}))
     enabled = command == "sparkrun" and channel == "alpha"
-    result = invoke(wheels, tmp_path, command, "setup", "plugins", "list", "--json")
+    result = invoke(wheels, tmp_path, command, "setup", "plugins", "list", "--all", "--json")
     assert result.returncode == 0, result.stderr
     row = next(row for row in json.loads(result.stdout) if row["name"] == "k8s")
     assert not row["loaded"] and row["enabled"] is enabled
     assert row["version"] == CORE_VERSION
-    result = invoke(wheels, tmp_path, command, "setup", "features", "list", "--json")
+    result = invoke(wheels, tmp_path, command, "setup", "features", "list", "--all", "--json")
     assert result.returncode == 0, result.stderr
     flags = {row["name"] for row in json.loads(result.stdout)}
     children = {"executor.k8s", "cli.setup.k8s", "api.run.k8s"}
