@@ -27,6 +27,14 @@ no path separators, so an include cannot walk the filesystem, and no bare
 includes at all from sources without a trustworthy directory (URL-fetched or
 catalog-imported recipes). A ``@registry/name`` reference resolves through the
 registry manager exactly as ``sparkrun run @registry/name`` would.
+
+A base in a foreign recipe format (a ``@lil/<Entry>`` manifest, or a sibling
+file a format claims by content) is loaded through that format, exactly as
+``Recipe.load`` would load it: translated, validated by the format, and subject
+to the foreign-format trust gate. Read as sparkrun YAML it would be a recipe
+nobody wrote. Translation-then-merge is coherent because a format's output is
+an ordinary v2 recipe; generated ``overrides:`` simply come first, as any
+base's do.
 """
 
 from __future__ import annotations
@@ -144,7 +152,7 @@ def listing_view(data: dict[str, Any], source_path: str | Path) -> dict[str, Any
     if "include" not in data:
         return data
     try:
-        return resolve_recipe_includes(data, source_path, registry_manager=_NO_REGISTRIES)[0]
+        return resolve_recipe_includes(data, source_path, registry_manager=_NO_REGISTRIES, offline=True)[0]
     except Exception:
         logger.debug("include: could not build a listing view for %s", source_path, exc_info=True)
         return data
@@ -166,16 +174,18 @@ def resolve_recipe_includes(
     *,
     registry_manager: RegistryManager | None = None,
     allow_local: bool = True,
+    offline: bool = False,
 ) -> tuple[dict[str, Any], tuple[IncludeSource, ...]]:
     """Return ``(merged_data, chain)`` for a recipe that may use ``include:``.
 
     A recipe without ``include`` is returned unchanged with an empty chain,
-    so callers can run every load through this.
+    so callers can run every load through this. *offline* is passed to a
+    foreign recipe format that loads a base.
     """
     if "include" not in data:
         return data, ()
     visited = {str(Path(source_path).resolve())} if source_path else set()
-    return _resolve(data, source_path, registry_manager, allow_local, visited, depth=0)
+    return _resolve(data, source_path, registry_manager, allow_local, visited, depth=0, offline=offline)
 
 
 def _resolve(
@@ -186,8 +196,9 @@ def _resolve(
     visited: set[str],
     *,
     depth: int,
+    offline: bool,
 ) -> tuple[dict[str, Any], tuple[IncludeSource, ...]]:
-    from sparkrun.core.recipe import RecipeError, read_yaml
+    from sparkrun.core.recipe import RecipeError, _load_foreign_format, read_yaml
 
     if "include" not in data:
         return data, ()
@@ -199,7 +210,7 @@ def _resolve(
         raise RecipeError("include: chain is deeper than %d recipes (at %r)" % (MAX_INCLUDE_DEPTH, ref))
     _reject_v1(data, source_path)
 
-    path, registry, registry_url = _locate(ref, source_path, registry_manager, allow_local)
+    path, registry, registry_url, manager = _locate(ref, source_path, registry_manager, allow_local)
     key = str(path.resolve())
     if key in visited:
         raise RecipeError("include: cycle detected — %r is already part of this include chain" % ref)
@@ -208,11 +219,18 @@ def _resolve(
     base = read_yaml(str(path))
     if not isinstance(base, dict):
         raise RecipeError("include: %r (%s) is not a YAML mapping" % (ref, path))
+    # The same dispatch Recipe.load runs: a foreign-format base is translated
+    # (or refused when its format is unavailable or untrusted), never merged raw.
+    # The listing sentinel cannot classify paths, so it dispatches as a load
+    # without a registry manager would.
+    foreign = _load_foreign_format(path, base, None if manager is _NO_REGISTRIES else manager, allow_local=True, offline=offline)
+    if foreign is not None:
+        base = foreign[0]
     _reject_v1(base, path)
 
     # A registry base is its own source: its sibling includes stay inside it,
     # and it may itself include across registries.
-    base, base_chain = _resolve(base, path, registry_manager, allow_local=True, visited=visited, depth=depth + 1)
+    base, base_chain = _resolve(base, path, registry_manager, allow_local=True, visited=visited, depth=depth + 1, offline=offline)
     if registry is not None:
         base = _qualify_inherited_mods(base, registry)
 
@@ -227,7 +245,8 @@ def _locate(
     source_path: str | Path | None,
     registry_manager: RegistryManager | None,
     allow_local: bool,
-) -> tuple[Path, str | None, str | None]:
+) -> tuple[Path, str | None, str | None, Any]:
+    """``(path, registry, registry_url, manager)``; *manager* is what owns *path* for format dispatch."""
     from sparkrun.core.recipe import RecipeError, find_recipe
 
     scope, name = parse_scoped_name(ref)
@@ -247,7 +266,7 @@ def _locate(
         path = Path(find_recipe(ref, registry_manager=manager))
         entry = manager.get_registry(scope, allow_discovery=False)
         _require_within(path, _registry_root(manager, entry), ref)
-        return path, entry.name, entry.url
+        return path, entry.name, entry.url, manager
 
     if not allow_local:
         raise RecipeError(
@@ -265,7 +284,7 @@ def _locate(
             # ``is_file`` follows symlinks, and a git registry can ship one
             # pointing anywhere; the resolved target must stay beside the includer.
             _require_within(candidate, directory, ref)
-            return candidate, None, None
+            return candidate, None, None, registry_manager
     raise RecipeError("include: %r not found next to %s" % (ref, source_path))
 
 

@@ -2253,6 +2253,12 @@ survives separately is provenance (`recipe.include_chain`), for two consumers:
 - **Mods**: an unscoped mod inherited from an `@registry` base is rewritten to
   `@registry/<mod>`, because mods resolve next to the recipe being *launched*.
 
+A base in a foreign recipe format (`@lil/<Entry>`, or a sibling a format claims)
+goes through the same `_load_foreign_format` dispatch as `Recipe.load`: translated,
+validated by the format, trust-gated, and refused when the format is unavailable.
+Merging it as raw YAML would launch a recipe nobody wrote. `offline` is threaded
+through (`listing_view` passes `True`).
+
 Sibling references take no path separators. They are refused outright
 (`allow_local_includes=False`) for URL-fetched and catalog-imported recipes, whose
 "directory" is a cache of other people's files. Listing (`recipe_summary`,

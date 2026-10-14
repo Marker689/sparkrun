@@ -1783,7 +1783,9 @@ class Recipe:
                 recipe.resolve()
             return recipe
         declared = deepcopy(data) if "include" in data else None
-        data, chain = resolve_recipe_includes(data, path, registry_manager=registry_manager, allow_local=allow_local_includes)
+        data, chain = resolve_recipe_includes(
+            data, path, registry_manager=registry_manager, allow_local=allow_local_includes, offline=offline
+        )
         recipe = cls(data, source_path=str(path))
         recipe.include_chain = chain
         recipe._include_declared = declared

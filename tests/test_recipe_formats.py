@@ -341,3 +341,77 @@ def test_a_materialized_plugin_registry_keeps_its_format(tmp_path, toy_format):
     [entry] = [e for e in mgr._load_registries() if e.name == "toycat"]
     assert entry.declared_by == ""  # materialized into registries.yaml
     assert [r["name"] for r in mgr.search_recipes("")] == ["@toycat/Alpha"]
+
+
+# --- include: of a foreign-format base -----------------------------------------------------------------
+
+
+def _wrapper(tmp_path: Path, include: str, **extra) -> Path:
+    wrapper = tmp_path / "local" / "wrap.yaml"
+    wrapper.parent.mkdir(exist_ok=True)
+    wrapper.write_text(yaml.safe_dump({"include": include, **extra}))
+    return wrapper
+
+
+def test_include_of_a_foreign_registry_recipe_is_translated(tmp_path, toy_registry, toy_format):
+    """The base goes through the format's loader, not read as v2 YAML (which would drop `weights`)."""
+    mgr, _ = toy_registry
+    wrapper = _wrapper(tmp_path, "@toyreg/Alpha", defaults={"max_num_seqs": 9})
+    recipe = Recipe.load(wrapper, registry_manager=mgr)
+    assert recipe.model == "org/alpha" and recipe.container == "img:toy"
+    assert recipe.defaults["max_num_seqs"] == 9 and recipe.defaults["port"] == 8000
+    assert [(s.ref, s.registry) for s in recipe.include_chain] == [("@toyreg/Alpha", "toyreg")]
+    assert CALLS == [False]
+
+
+def test_include_of_a_foreign_base_threads_offline(tmp_path, toy_registry, toy_format):
+    mgr, _ = toy_registry
+    Recipe.load(_wrapper(tmp_path, "@toyreg/Alpha"), registry_manager=mgr, offline=True)
+    assert CALLS == [True]
+
+
+def test_sibling_include_claimed_by_a_format_is_translated(tmp_path, toy_format):
+    wrapper = _wrapper(tmp_path, "toy", defaults={"port": 9000})
+    (wrapper.parent / "toy.yaml").write_text(yaml.safe_dump({"weights": "org/sib", "seqs": 3}))
+    recipe = Recipe.load(wrapper)
+    assert recipe.model == "org/sib" and recipe.defaults == {"port": 9000, "max_num_seqs": 3}
+
+
+def test_listing_view_of_a_foreign_sibling_base_is_offline(tmp_path, toy_format):
+    from sparkrun.core.recipe_include import listing_view
+
+    wrapper = _wrapper(tmp_path, "toy")
+    (wrapper.parent / "toy.yaml").write_text(yaml.safe_dump({"weights": "org/sib"}))
+    assert listing_view(yaml.safe_load(wrapper.read_text()), wrapper)["model"] == "org/sib"
+    assert CALLS == [True]
+
+
+def test_include_of_an_untrusted_foreign_registry_is_refused(tmp_path, toy_registry, toy_format):
+    mgr, _ = toy_registry
+    _untrust(mgr)
+    with pytest.raises(RecipeError):
+        Recipe.load(_wrapper(tmp_path, "@toyreg/Alpha"), registry_manager=mgr)
+    assert CALLS == []
+
+
+def test_include_enforces_the_format_gate_even_when_lookup_resolves(tmp_path, toy_registry, toy_format, monkeypatch):
+    """The trust gate is applied to the located base itself, not only by lookup hiding it."""
+    mgr, toy_dir = toy_registry
+    _untrust(mgr)
+    monkeypatch.setattr("sparkrun.core.recipe.find_recipe", lambda ref, registry_manager=None: toy_dir / "Alpha" / "toy.yaml")
+    with pytest.raises(RecipeError, match="only honored for trusted registries"):
+        Recipe.load(_wrapper(tmp_path, "@toyreg/Alpha"), registry_manager=mgr)
+    assert CALLS == []
+
+
+def test_include_of_a_registry_whose_format_is_unavailable_is_refused(tmp_path, toy_registry, monkeypatch):
+    mgr, toy_dir = toy_registry
+    monkeypatch.setattr("sparkrun.core.recipe.find_recipe", lambda ref, registry_manager=None: toy_dir / "Alpha" / "toy.yaml")
+    with pytest.raises(RecipeError, match="no loaded plugin provides"):
+        Recipe.load(_wrapper(tmp_path, "@toyreg/Alpha"), registry_manager=mgr)
+
+
+def test_native_registry_include_does_not_consult_formats(tmp_path, toy_registry, toy_format):
+    mgr, _ = toy_registry
+    recipe = Recipe.load(_wrapper(tmp_path, "@native/plain"), registry_manager=mgr)
+    assert recipe.model == "org/plain" and CALLS == []
