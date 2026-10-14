@@ -76,6 +76,9 @@ def render(operations):
                     "`" + name + ("!" if name in op.request_schema.get("required", []) else "") + ": " + schema_type(schema) + "`"
                     for name, schema in op.request_schema.get("properties", {}).items()
                 ]
+                one_of = [choice["required"][0] for choice in op.request_schema.get("anyOf", []) if choice.get("required")]
+                if one_of:
+                    fields.append("one of " + " / ".join("`" + name + "`" for name in one_of) + " required")
                 output += (
                     f"| `{op.name}` | `{operation_http_path(op)}` | {op.kind} / {op.scope} | {op.resources} | "
                     + (", ".join(fields) or "`{}`")

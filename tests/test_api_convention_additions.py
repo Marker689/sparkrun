@@ -175,3 +175,11 @@ def test_open_telemetry_without_hosts_uses_the_named_cluster(monkeypatch, sctx, 
 
     assert api.open_telemetry(cluster=lab, sctx=sctx) == "session"
     assert opened == [["h1", "h2"]]
+
+
+def test_stop_all_refuses_without_hosts_or_cluster(sctx):
+    """A teardown never falls back to the default cluster or default_hosts."""
+    from sparkrun import api
+
+    with pytest.raises(api.SparkrunError, match="requires hosts or a cluster"):
+        api.stop_all(sctx=sctx)

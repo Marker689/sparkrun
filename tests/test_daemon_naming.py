@@ -161,3 +161,17 @@ def test_advisory_service_publishes_the_scoped_discovery_contract(binding, monke
         assert value["result"]["complete"] is False
         job = client.request("GET", "/v1/jobs/" + value["job_id"])
         assert job["operation"] == "discovery.snapshot"
+
+
+def test_destructive_stop_all_requires_hosts_or_cluster_on_the_wire():
+    """A teardown names its target (hosts or a cluster); it never defaults to the default cluster."""
+    from sparkrun.core.daemon_schema import validate
+
+    register_core_ops()
+    schema = get_daemon_op("workloads.stop_all").request_schema
+    for ok in ({"hosts": ["h1"]}, {"cluster": "lab"}, {"hosts": ["h1"], "cluster": "lab", "dry_run": True}):
+        validate(ok, schema)
+    with pytest.raises(ValueError):
+        validate({"dry_run": True}, schema)
+    for read_only in ("cluster.observe", "cluster.report"):
+        assert "hosts" not in get_daemon_op(read_only).request_schema.get("required", [])

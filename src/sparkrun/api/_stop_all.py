@@ -29,6 +29,7 @@ from sparkrun.core.coordination import operation_boundary
 import logging
 from typing import TYPE_CHECKING
 
+from sparkrun.api._errors import SparkrunError
 from sparkrun.api._models import StopAllResult
 
 if TYPE_CHECKING:
@@ -52,8 +53,9 @@ def stop_all(
     """Discover and stop every sparkrun workload on *hosts*.
 
     Args:
-        hosts: Hosts to sweep.  ``None`` takes the resolved cluster's hosts
-            (*cluster*, else the default cluster, else ``config.default_hosts``).
+        hosts: Hosts to sweep.  ``None`` takes *cluster*'s hosts.  One of
+            *hosts* or *cluster* is required: a teardown never picks its own
+            target, so pass the default cluster's name to sweep it.
         cluster: Optional cluster name/definition for executor + transport
             resolution (forwarded to :func:`sparkrun.api.status_report`).
         cache_dir: Cache directory holding job metadata.
@@ -78,6 +80,8 @@ def stop_all(
     from sparkrun.api._resolve import resolve_cluster, scope_operation
 
     explicit_ssh = ssh_kwargs
+    if hosts is None and cluster is None:
+        raise SparkrunError("stop_all requires hosts or a cluster; a teardown never defaults to the default cluster")
     cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
     host_list = list(cluster_def.hosts) if hosts is None else list(hosts)
     sctx, ssh_kwargs = scope_operation(cluster_def, sctx=sctx, ssh_kwargs=ssh_kwargs, prepare=False)

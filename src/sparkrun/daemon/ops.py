@@ -44,7 +44,7 @@ SPECS = [
     ("workloads.find_intent", "find_running_intent", "job", "read", "intent_id hosts cluster", "intent_id hosts"),
     ("catalog.search", "search_recipes", "query", "read", "query registry runtime include_hidden include_local unique_names", ""),
     ("workloads.stop_matching", "stop", "job", "operate", "workload_id recipe hosts cluster overrides", ""),
-    ("workloads.stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", ""),
+    ("workloads.stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", "hosts|cluster"),
     ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster workload_ids", ""),
     (
         "benchmarks.resume",
@@ -110,7 +110,7 @@ DESCRIPTIONS = {
     "workloads.plan": "Resolve placement and launch settings without launching a workload.",
     "workloads.materialize": "Resolve container launch units from a plan without starting them.",
     "workloads.stop_matching": "Stop workloads selected by ID, recipe or hosts; no integration-owner guard.",
-    "workloads.stop_all": "Discover and stop all workloads on the selected hosts.",
+    "workloads.stop_all": "Discover and stop all workloads on the given hosts or cluster (one is required; a teardown never defaults its target).",
     "workloads.find_intent": "Find an observed running deployment matching a launch intent.",
     "cluster.observe": "Observe raw per-host occupancy and coverage errors.",
     "cluster.report": "Observe occupancy and enrich grouped workload/idle-host results with saved metadata.",
@@ -233,6 +233,18 @@ def _options_loader(target, model):
     return partial(invoke_options, target, model)
 
 
+def _request_schema(properties, required):
+    """``"a b"`` requires both; ``"a|b"`` requires at least one of them."""
+    groups = required.split()
+    schema = object_schema(properties, [name for name in groups if "|" not in name])
+    alternatives = [group.split("|") for group in groups if "|" in group]
+    if len(alternatives) > 1:
+        raise ValueError("Only one alternative-required group is supported per operation")
+    if alternatives:
+        schema["anyOf"] = [{"required": [name]} for name in alternatives[0]]
+    return schema
+
+
 @core_registration()
 def register_core_ops():
     for name, target, kind, scope, names, required in SPECS:
@@ -247,7 +259,7 @@ def register_core_ops():
             DaemonOp(
                 name,
                 partial(_loader, target),
-                object_schema(properties, required.split()),
+                _request_schema(properties, required),
                 result_schema=RESULT_SCHEMAS[name],
                 kind=kind,
                 scope=scope,
