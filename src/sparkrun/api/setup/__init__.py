@@ -20,7 +20,11 @@ Stable: the SSH bootstrap (``probe_ssh_access``, ``ensure_local_key``,
    ``CheckItem``, ``HostState``, ``SetupActionContext``, ``SetupActionResult``,
    ``probe_setup_hosts``, ``resolve_setup_context``, ``build_setup_plan``,
    ``evaluate_host``, ``apply_setup_step``) are core types aliased here and
-   may change in a minor release.
+   may change in a minor release. So may the CX7 fabric configuration
+   (``plan_cx7``, ``apply_cx7``, ``save_cx7_topology``,
+   ``validate_cx7_options`` and the ``Cx7*`` types) and the SSH diagnosis
+   (``diagnose_ssh`` and the ``SshDiagnos*`` types), which hold the decisions
+   behind ``setup cx7`` / the wizard's CX7 phase and ``setup ssh --diagnose``.
 """
 
 from __future__ import annotations
@@ -39,6 +43,26 @@ from sparkrun.core.setup_steps import PlannedStep, SetupStep, build_setup_plan, 
 
 from ._errors import SetupFailed, OpenSshUnavailable, RdmaTestError, SshAccessError, SshKeyError
 from ._mesh import MeshResult, mesh_ssh_keys_native
+from ._cx7 import (
+    CX7_EVENT_DETECTED,
+    CX7_EVENT_DETECTED_TOPOLOGY,
+    CX7_EVENT_DETECTING_TOPOLOGY,
+    CX7_EVENT_INTERFACES,
+    CX7_EVENT_RING_DETECTING,
+    CX7_EVENT_SAVED_TOPOLOGY,
+    CX7_EVENT_SUBNETS,
+    CX7_EVENT_TOPOLOGY,
+    CX7_TOPOLOGY_CHOICES,
+    Cx7ApplyResult,
+    Cx7InterfacesSave,
+    Cx7Plan,
+    Cx7PlanError,
+    Cx7TopologySave,
+    apply_cx7,
+    plan_cx7,
+    save_cx7_topology,
+    validate_cx7_options,
+)
 from ._rdma_plan import CoverageIssue
 from ._rdma import (
     DEFAULT_RDMA_TEST_IMAGE,
@@ -109,6 +133,25 @@ __all__ = [
     "install_public_key_interactive",
     "mesh_ssh_keys_native",
     "rdma_test",
+    # CX7 fabric configuration (experimental)
+    "plan_cx7",
+    "apply_cx7",
+    "save_cx7_topology",
+    "validate_cx7_options",
+    "Cx7Plan",
+    "Cx7ApplyResult",
+    "Cx7TopologySave",
+    "Cx7InterfacesSave",
+    "Cx7PlanError",
+    "CX7_TOPOLOGY_CHOICES",
+    "CX7_EVENT_DETECTED",
+    "CX7_EVENT_INTERFACES",
+    "CX7_EVENT_SAVED_TOPOLOGY",
+    "CX7_EVENT_DETECTING_TOPOLOGY",
+    "CX7_EVENT_DETECTED_TOPOLOGY",
+    "CX7_EVENT_RING_DETECTING",
+    "CX7_EVENT_TOPOLOGY",
+    "CX7_EVENT_SUBNETS",
     # Data models
     "SshProbe",
     "LocalSshKey",

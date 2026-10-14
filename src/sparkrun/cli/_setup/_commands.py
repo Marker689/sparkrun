@@ -1150,39 +1150,34 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
 
       {app_command} setup cx7 --cluster two --port 1              # same, by port index
     """
-    from sparkrun.core.config import SparkrunConfig
-    from sparkrun.orchestration.networking import (
-        CX7_NETPLAN_FILE,
-        CX7Topology,
-        _group_interfaces_by_port,
-        filter_cx7_interfaces,
-        ring_ports_error,
-        detect_cx7_for_hosts,
-        detect_topology,
-        select_subnets,
-        select_subnets_for_topology,
-        plan_cluster_cx7,
-        plan_ring_cx7,
-        apply_cx7_plan,
+    import os
+
+    from sparkrun.api.setup import (
+        CX7_EVENT_DETECTED,
+        CX7_EVENT_DETECTED_TOPOLOGY,
+        CX7_EVENT_DETECTING_TOPOLOGY,
+        CX7_EVENT_INTERFACES,
+        CX7_EVENT_RING_DETECTING,
+        CX7_EVENT_SUBNETS,
+        CX7_EVENT_TOPOLOGY,
+        Cx7PlanError,
+        apply_cx7,
+        plan_cx7,
+        validate_cx7_options,
     )
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.orchestration.networking import CX7_NETPLAN_FILE
+    from sparkrun.orchestration.sudo import SudoPasswords
+    from ._sudo import ensure_sudo_password
 
-    # Validate subnet pair
-    if (subnet1 is None) != (subnet2 is None):
-        click.echo("Error: --subnet1 and --subnet2 must be specified together.", err=True)
-        sys.exit(1)
-
-    # Interface selection: --interfaces (globs/names) and --port are mutually exclusive.
-    if interfaces and port is not None:
-        click.echo("Error: --interfaces and --port cannot be used together.", err=True)
+    try:
+        validate_cx7_options(interfaces=interfaces, port=port, subnet1=subnet1, subnet2=subnet2)
+    except Cx7PlanError as e:
+        click.echo("Error: %s" % e, err=True)
         sys.exit(1)
     explicit_interfaces: list[str] | None = None
     if interfaces:
         explicit_interfaces = [s.strip() for s in interfaces.split(",") if s.strip()]
-
-    import os
-
-    from sparkrun.orchestration.sudo import SudoPasswords
-    from ._sudo import ensure_sudo_password
 
     config = SparkrunConfig()
     host_list, user, ssh_kwargs = _resolve_setup_context(hosts, hosts_file, cluster_name, config, user)
@@ -1198,235 +1193,85 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
         dry_run=dry_run,
     )
 
-    # Step 1: Detect CX7 interfaces (with MACs)
-    detections = detect_cx7_for_hosts(host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
+    cluster_mgr = _get_cluster_manager()
 
-    # Check all hosts have CX7
-    no_cx7 = [h for h, d in detections.items() if not d.detected]
-    if no_cx7:
-        click.echo("Warning: No CX7 interfaces on: %s" % ", ".join(no_cx7), err=True)
-
-    hosts_with_cx7 = {h: d for h, d in detections.items() if d.detected}
-    if not hosts_with_cx7:
-        click.echo("Error: No CX7 interfaces detected on any host.", err=True)
-        sys.exit(1)
-
-    # Resolve the effective interface filter:
-    #   explicit --interfaces / --port  >  cluster's saved fabric_interfaces  >  None (auto)
-    effective_interfaces: list[str] | None = None
-    interfaces_explicit = False
-    if explicit_interfaces:
-        effective_interfaces = explicit_interfaces
-        interfaces_explicit = True
-    elif port is not None:
-        import re
-
-        rep = next(iter(hosts_with_cx7.values()))
-        groups = _group_interfaces_by_port(rep.interfaces)
-        pidx = int(port)
-        if pidx >= len(groups):
-            click.echo(
-                "Error: --port %d requested but only %d physical port group(s) detected." % (pidx, len(groups)),
-                err=True,
-            )
-            sys.exit(1)
-        m = re.search(r"np(\d+)$", groups[pidx][0].name)
-        if not m:
-            click.echo(
-                "Error: could not derive a port glob from interface '%s'; use --interfaces instead." % groups[pidx][0].name,
-                err=True,
-            )
-            sys.exit(1)
-        effective_interfaces = ["*np%s" % m.group(1)]
-        # The glob is derived from one host; verify it yields a pair on every
-        # host so a heterogeneous cluster fails fast here rather than deep in
-        # planning.
-        bad_hosts = [h for h, d in hosts_with_cx7.items() if len(filter_cx7_interfaces(d.interfaces, effective_interfaces)) < 2]
-        if bad_hosts:
-            click.echo(
-                "Error: --port %d (%s) does not select 2 interfaces on: %s. Use --interfaces with explicit names."
-                % (pidx, effective_interfaces[0], ", ".join(bad_hosts)),
-                err=True,
-            )
-            sys.exit(1)
-        interfaces_explicit = True
-    else:
-        # Fall back to a previously-saved per-cluster selection.
-        saved_cluster = cluster_name
-        if not saved_cluster:
-            try:
-                _mgr = _get_cluster_manager()
-                saved_cluster = _mgr.get_default() if _mgr else None
-            except Exception:
-                saved_cluster = None
-        if saved_cluster:
-            try:
-                _mgr = _get_cluster_manager()
-                if _mgr:
-                    saved = _mgr.get(saved_cluster).fabric_interfaces
-                    if saved:
-                        effective_interfaces = list(saved)
-            except Exception:
-                pass
-
-    if effective_interfaces:
-        click.echo("Interface filter: %s" % ", ".join(effective_interfaces))
-
-    # Lazy sudo handling — uses ensure_sudo_password() which tests NOPASSWD,
-    # prompts, verifies, and supports cross-user fallback.  The sudo_ssh_kwargs
-    # may differ from ssh_kwargs when the cluster user doesn't have sudo but
-    # another user does (indirect sudo).
-    sudo_ssh_kwargs = dict(ssh_kwargs)
-    sudo_password = None
-    sudo_hosts_needing_pw: set[str] = set()
-
-    def _ensure_sudo() -> str | None:
-        """Acquire sudo password lazily.  Returns password or None (NOPASSWD works)."""
-        nonlocal sudo_password, sudo_ssh_kwargs
-        if sudo_password is not None:
-            return sudo_password
-        if dry_run:
-            return None
-
-        default_user = os.environ.get("USER", "")
-        pw, indirect_user = ensure_sudo_password(
-            host_list,
-            user,
-            ssh_kwargs,
-            sudo_ssh_kwargs=sudo_ssh_kwargs,
-            dry_run=dry_run,
-            allow_indirect=True,
-            default_user=default_user,
-        )
-        if pw is None:
-            return None  # NOPASSWD works
-
-        sudo_password = pw
-        if indirect_user:
-            sudo_ssh_kwargs = dict(ssh_kwargs, ssh_user=indirect_user)
-
-        # Mark which hosts actually need the password
-        sudo_hosts_needing_pw.update(h for h, d in detections.items() if d.detected and not d.sudo_ok)
-        return sudo_password
-
-    # Step 2: Topology determination
-    effective_topology = CX7Topology.SWITCH  # default
-    topology_result = None
-
-    if topology == "ring":
-        effective_topology = CX7Topology.RING
-        # Fail fast: ring requires exactly 3 hosts with 2 ports each
-        if len(hosts_with_cx7) != 3:
-            click.echo(
-                "Error: ring topology requires exactly 3 hosts with CX7, found %d" % len(hosts_with_cx7),
-                err=True,
-            )
-            sys.exit(1)
-        for h, det in hosts_with_cx7.items():
-            # Honor the interface filter so the pre-check matches what
-            # plan_ring_cx7 will actually see, via the shared validator.
-            ring_ifaces = filter_cx7_interfaces(det.interfaces, effective_interfaces)
-            err = ring_ports_error(h, ring_ifaces)
-            if err:
-                click.echo("Error: %s" % err, err=True)
-                sys.exit(1)
-    elif topology == "direct":
-        effective_topology = CX7Topology.DIRECT
-    elif topology == "switch":
-        effective_topology = CX7Topology.SWITCH
-    elif topology == "auto":
-        n_hosts = len(hosts_with_cx7)
-        # Check if hosts have >= 4 interfaces (ring candidate)
-        has_4_ifaces = all(len(d.interfaces) >= 4 for d in hosts_with_cx7.values())
-
-        if n_hosts == 3 and has_4_ifaces:
-            # Run topology detection via MAC/ARP — ring candidate
+    def _render(kind, p):
+        if kind == CX7_EVENT_DETECTED:
+            if p.missing_cx7:
+                click.echo("Warning: No CX7 interfaces on: %s" % ", ".join(p.missing_cx7), err=True)
+        elif kind == CX7_EVENT_INTERFACES:
+            if p.interfaces:
+                click.echo("Interface filter: %s" % ", ".join(p.interfaces))
+        elif kind == CX7_EVENT_DETECTING_TOPOLOGY:
             click.echo("Detecting topology via neighbor discovery...")
-            topology_result = detect_topology(detections, host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
-            effective_topology = topology_result.topology
-            click.echo("Detected topology: %s" % effective_topology.value)
-        else:
-            # 2-node or switch: can't reliably distinguish direct vs switch
-            # at L2 without LLDP.  Use --topology direct to override.
-            effective_topology = CX7Topology.SWITCH
-
-    # For explicit ring topology without detection, create empty result
-    if effective_topology == CX7Topology.RING and topology_result is None:
-        if not dry_run:
+        elif kind == CX7_EVENT_DETECTED_TOPOLOGY:
+            click.echo("Detected topology: %s" % p.topology.value)
+        elif kind == CX7_EVENT_RING_DETECTING:
             click.echo("Running topology detection for ring configuration...")
-            topology_result = detect_topology(detections, host_list, ssh_kwargs=ssh_kwargs, dry_run=dry_run)
-        else:
-            from sparkrun.orchestration.networking import CX7TopologyResult
+        elif kind == CX7_EVENT_TOPOLOGY:
+            click.echo()
+            # Two hosts on auto cannot be told apart at L2 — show both.
+            click.echo("Topology: switch/direct" if p.topology_ambiguous else "Topology: %s" % p.topology.value)
+        elif kind == CX7_EVENT_SUBNETS:
+            click.echo("Subnets: %s" % ", ".join(str(s) for s in p.subnets))
 
-            topology_result = CX7TopologyResult(topology=CX7Topology.RING)
-
-    click.echo()
-    # For 2-node auto, we can't distinguish direct vs switch — show both
-    if effective_topology == CX7Topology.SWITCH and topology == "auto" and len(hosts_with_cx7) <= 2:
-        click.echo("Topology: switch/direct")
-    else:
-        click.echo("Topology: %s" % effective_topology.value)
-
-    # Step 3: Select subnets
     try:
-        if effective_topology == CX7Topology.RING:
-            all_subnets = select_subnets_for_topology(detections, effective_topology)
-            click.echo("Subnets: %s" % ", ".join(str(s) for s in all_subnets))
-        else:
-            s1, s2 = select_subnets(detections, override1=subnet1, override2=subnet2)
-            all_subnets = [s1, s2]
-            click.echo("Subnets: %s, %s" % (s1, s2))
-    except RuntimeError as e:
+        plan = plan_cx7(
+            host_list,
+            ssh_kwargs=ssh_kwargs,
+            dry_run=dry_run,
+            cluster_name=cluster_name,
+            cluster_manager=cluster_mgr,
+            topology=topology,
+            interfaces=explicit_interfaces,
+            port=int(port) if port is not None else None,
+            subnet1=subnet1,
+            subnet2=subnet2,
+            mtu=mtu,
+            force=force,
+            on_event=_render,
+        )
+    except Cx7PlanError as e:
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
 
     click.echo("MTU: %d" % mtu)
     click.echo()
 
-    # Step 4: Plan
-    if effective_topology == CX7Topology.RING:
-        if topology_result is None:
-            raise click.ClickException("Ring topology requires detected link information")
-        plan = plan_ring_cx7(detections, topology_result, all_subnets, mtu=mtu, force=force, interfaces=effective_interfaces)
-    else:
-        plan = plan_cluster_cx7(detections, all_subnets[0], all_subnets[1], mtu=mtu, force=force, interfaces=effective_interfaces)
-
-    # Display plan
-    for hp in plan.host_plans:
-        det = detections.get(hp.host)
+    cluster_plan = plan.cluster_plan
+    assert cluster_plan is not None
+    for hp in cluster_plan.host_plans:
+        det = plan.detections.get(hp.host)
         mgmt_label = " (%s)" % det.mgmt_ip if det and det.mgmt_ip else ""
         click.echo("  %s%s" % (hp.host, mgmt_label))
         for a in hp.assignments:
             status = "OK" if not hp.needs_change else "configure"
-            click.echo("    %-20s -> %s/%d  MTU %d  [%s]" % (a.iface_name, a.ip, plan.prefix_len, plan.mtu, status))
+            click.echo("    %-20s -> %s/%d  MTU %d  [%s]" % (a.iface_name, a.ip, cluster_plan.prefix_len, cluster_plan.mtu, status))
         if not hp.assignments and hp.needs_change:
             click.echo("    %s" % hp.reason)
         click.echo()
 
-    # Show warnings
-    for w in plan.warnings:
+    for w in cluster_plan.warnings:
         click.echo("Warning: %s" % w, err=True)
 
     # Plan-level errors (e.g. insufficient ports for ring)
-    if plan.errors and not plan.host_plans:
-        for e in plan.errors:
+    if plan.plan_failed:
+        for e in cluster_plan.errors:
             click.echo("Error: %s" % e, err=True)
         sys.exit(1)
 
-    # Step 5: Check if all valid
     if plan.all_valid and not force:
         click.echo("All hosts already configured. Use --force to reconfigure.")
         return
 
-    # Count
-    needs_config = sum(1 for hp in plan.host_plans if hp.needs_change and len(hp.assignments) >= 2)
-    already_ok = sum(1 for hp in plan.host_plans if not hp.needs_change)
-    has_errors = sum(1 for hp in plan.host_plans if hp.needs_change and len(hp.assignments) < 2)
+    needs_config = plan.configurable_count
+    already_ok = plan.already_valid_count
+    has_errors = plan.blocked_count
 
     if needs_config == 0:
         if has_errors:
             click.echo("Error: %d host(s) have issues that prevent configuration." % has_errors, err=True)
-            for e in plan.errors:
+            for e in cluster_plan.errors:
                 click.echo("  %s" % e, err=True)
             sys.exit(1)
         click.echo("No hosts need configuration changes.")
@@ -1436,33 +1281,44 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
         click.echo("[dry-run] Would configure %d host(s), %d already valid." % (needs_config, already_ok))
         return
 
-    # Confirm before applying
     if not force and not click.confirm("Apply changes to %d host(s)?" % needs_config, default=True):
         click.echo("Aborted.")
         return
 
-    # Step 7: Apply — acquire sudo now if not already prompted
-    _ensure_sudo()
+    # Sudo: ensure_sudo_password() tests NOPASSWD, prompts, verifies, and
+    # supports cross-user fallback.  sudo_ssh_kwargs differs from ssh_kwargs
+    # when the cluster user lacks sudo but another user has it (indirect sudo).
+    sudo_ssh_kwargs = dict(ssh_kwargs)
+    sudo_hosts_needing_pw: set[str] = set()
+    sudo_password, indirect_user = ensure_sudo_password(
+        host_list,
+        user,
+        ssh_kwargs,
+        sudo_ssh_kwargs=sudo_ssh_kwargs,
+        dry_run=dry_run,
+        allow_indirect=True,
+        default_user=os.environ.get("USER", ""),
+    )
+    if sudo_password is not None:
+        if indirect_user:
+            sudo_ssh_kwargs = dict(ssh_kwargs, ssh_user=indirect_user)
+        sudo_hosts_needing_pw.update(h for h, d in plan.hosts_with_cx7.items() if not d.sudo_ok)
 
     click.echo("Applying configuration to %d host(s)..." % needs_config)
-    results = apply_cx7_plan(
+    applied = apply_cx7(
         plan,
         ssh_kwargs=sudo_ssh_kwargs,
         dry_run=dry_run,
         sudo_password=sudo_password,
         sudo_hosts=sudo_hosts_needing_pw,
         passwords=SudoPasswords(prompt_host=host_password_prompt(sudo_ssh_kwargs.get("ssh_user", user))),
+        cluster_manager=cluster_mgr,
     )
-    result_map = {r.host: r for r in results}
+    configured = applied.configured
+    failed = applied.failed
 
-    # Collect final results in plan order
-    final_results = [result_map[hp.host] for hp in plan.host_plans if hp.host in result_map]
-    configured = sum(1 for r in final_results if r.success)
-    failed = sum(1 for r in final_results if not r.success)
-
-    for r in final_results:
-        if not r.success:
-            click.echo("  [FAIL] %s: %s" % (r.host, r.stderr.strip()[:100]), err=True)
+    for r in applied.failures:
+        click.echo("  [FAIL] %s: %s" % (r.host, r.stderr.strip()[:100]), err=True)
 
     click.echo()
     parts = []
@@ -1476,50 +1332,32 @@ def setup_cx7(ctx, hosts, hosts_file, cluster_name, user, dry_run, force, mtu, s
         parts.append("%d skipped (errors)" % has_errors)
     click.echo("Results: %s." % ", ".join(parts))
 
-    # Persist topology to cluster YAML (explicit --cluster or default cluster)
-    effective_cluster = cluster_name
-    if not effective_cluster:
-        try:
-            mgr = _get_cluster_manager()
-            effective_cluster = mgr.get_default() if mgr else None
-        except Exception:
-            pass
-    # A partial apply is not a topology: saving it would report the fabric
-    # as configured to everything that reads the cluster afterwards.
-    if effective_cluster and effective_topology != CX7Topology.UNKNOWN and failed:
+    saved_topology = applied.topology_save
+    if saved_topology is not None and saved_topology.refused:
         click.echo(
-            "Topology not saved to cluster '%s': %d host(s) failed. Re-run once they are fixed." % (effective_cluster, failed),
+            "Topology not saved to cluster '%s': %d host(s) failed. Re-run once they are fixed."
+            % (saved_topology.cluster_name, saved_topology.failed_hosts),
             err=True,
         )
-    elif effective_cluster and effective_topology != CX7Topology.UNKNOWN:
-        try:
-            mgr = _get_cluster_manager()
-            if mgr:
-                mgr.update(effective_cluster, topology=effective_topology.value)
-                click.echo("Saved topology '%s' to cluster '%s'." % (effective_topology.value, effective_cluster))
-        except Exception as e:
-            click.echo("Warning: could not save topology to cluster: %s" % e, err=True)
+    elif saved_topology is not None and saved_topology.saved:
+        click.echo("Saved topology '%s' to cluster '%s'." % (saved_topology.topology, saved_topology.cluster_name))
+    elif saved_topology is not None and saved_topology.error:
+        click.echo("Warning: could not save topology to cluster: %s" % saved_topology.error, err=True)
 
-    # Persist an explicitly-chosen interface filter so subsequent runs reuse it.
-    if effective_cluster and interfaces_explicit and effective_interfaces:
-        try:
-            mgr = _get_cluster_manager()
-            if mgr:
-                mgr.update(effective_cluster, fabric_interfaces=effective_interfaces)
-                click.echo("Saved interface filter %s to cluster '%s'." % (effective_interfaces, effective_cluster))
-        except Exception as e:
-            click.echo("Warning: could not save interface filter to cluster: %s" % e, err=True)
+    saved_ifaces = applied.interfaces_save
+    if saved_ifaces is not None and saved_ifaces.saved:
+        click.echo("Saved interface filter %s to cluster '%s'." % (saved_ifaces.interfaces, saved_ifaces.cluster_name))
+    elif saved_ifaces is not None and saved_ifaces.error:
+        click.echo("Warning: could not save interface filter to cluster: %s" % saved_ifaces.error, err=True)
 
-    subnet_strs = [str(s) for s in all_subnets]
     if configured and not dry_run:
-        cx7_ips = [a.ip for hp in plan.host_plans for a in hp.assignments if a.ip]
         _record_setup_phase(
             cluster_name,
             user,
             host_list,
             "cx7",
-            subnets=subnet_strs,
-            cx7_ips=cx7_ips,
+            subnets=[str(s) for s in plan.subnets],
+            cx7_ips=plan.assigned_ips,
             netplan_file=CX7_NETPLAN_FILE,
         )
 

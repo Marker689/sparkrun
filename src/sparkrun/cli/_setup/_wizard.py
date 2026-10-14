@@ -46,21 +46,23 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
     from sparkrun.core.version import display_version
     from sparkrun.core.cluster_manager import ClusterError
     from sparkrun.core.config import SparkrunConfig
+    from sparkrun.api.setup import (
+        CX7_EVENT_DETECTED_TOPOLOGY,
+        CX7_EVENT_DETECTING_TOPOLOGY,
+        CX7_EVENT_RING_DETECTING,
+        CX7_EVENT_SAVED_TOPOLOGY,
+        CX7_EVENT_SUBNETS,
+        CX7_EVENT_TOPOLOGY,
+        apply_cx7,
+        plan_cx7,
+        save_cx7_topology,
+    )
     from sparkrun.orchestration.networking import (
         CX7_NETPLAN_FILE,
-        CX7Topology,
-        _group_interfaces_by_port,
         build_host_detection,
-        detect_cx7_for_hosts,
-        detect_topology,
         discover_cx7_peers,
         generate_cx7_detect_script,
         parse_cx7_detect_output,
-        plan_cluster_cx7,
-        plan_ring_cx7,
-        select_subnets,
-        select_subnets_for_topology,
-        apply_cx7_plan,
         distribute_host_keys,
     )
     from sparkrun.orchestration.primitives import build_ssh_kwargs
@@ -771,119 +773,64 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
 
             if run_cx7:
                 try:
-                    detections = detect_cx7_for_hosts(
-                        host_list,
-                        ssh_kwargs=ssh_kwargs,
-                        dry_run=dry_run,
-                    )
 
-                    # Determine topology
-                    hosts_with_cx7 = {h: d for h, d in detections.items() if d.detected}
-                    n_hosts = len(hosts_with_cx7)
-                    has_2_ports = all(len(_group_interfaces_by_port(d.interfaces)) >= 2 for d in hosts_with_cx7.values())
-                    ring_eligible = n_hosts == 3 and has_2_ports
+                    def _render_cx7(kind, p):
+                        if kind == CX7_EVENT_SAVED_TOPOLOGY:
+                            click.echo("  Using saved topology: %s" % p.topology.value)
+                        elif kind == CX7_EVENT_DETECTING_TOPOLOGY:
+                            click.echo("  Detecting topology via neighbor discovery...")
+                        elif kind == CX7_EVENT_DETECTED_TOPOLOGY:
+                            click.echo("  Detected topology: %s" % p.topology.value)
+                        elif kind == CX7_EVENT_RING_DETECTING:
+                            click.echo("  Running topology detection for ring...")
+                        elif kind == CX7_EVENT_TOPOLOGY:
+                            click.echo("  Topology: %s" % p.topology.value)
+                            # The cluster's saved interface filter (e.g. from
+                            # `setup cx7 --interfaces '*np1'`) pins the same port pair.  See issue #203.
+                            if p.interfaces:
+                                click.echo("  Interface filter: %s" % ", ".join(p.interfaces))
+                        elif kind == CX7_EVENT_SUBNETS:
+                            click.echo("  Subnets: %s" % ", ".join(str(s) for s in p.subnets))
 
-                    effective_topology = CX7Topology.SWITCH
-                    topology_result = None
-
-                    # A configured cluster keeps the topology it was saved with:
-                    # re-detecting on every clean rerun could save a misread over
-                    # a deliberate `setup cx7 --topology` choice.
-                    saved_topology = None
-                    if cx7_checked and cluster_name:
-                        try:
-                            saved_topology = cluster_mgr.get(cluster_name).topology
-                        except Exception:
-                            logger.debug("Could not read saved topology for %s", cluster_name, exc_info=True)
-                    if saved_topology in {t.value for t in CX7Topology} - {CX7Topology.UNKNOWN.value}:
-                        effective_topology = CX7Topology(saved_topology)
-                        click.echo("  Using saved topology: %s" % effective_topology.value)
-                    elif ring_eligible and not auto_cx7:
-                        topo_choice = click.prompt(
+                    def _choose_topology():
+                        return click.prompt(
                             "  Topology (3 hosts with 2 ports detected)",
                             type=click.Choice(["auto", "switch", "ring"]),
                             default="auto",
                         )
-                        if topo_choice == "ring":
-                            effective_topology = CX7Topology.RING
-                        elif topo_choice == "auto":
-                            click.echo("  Detecting topology via neighbor discovery...")
-                            topology_result = detect_topology(
-                                detections,
-                                host_list,
-                                ssh_kwargs=ssh_kwargs,
-                                dry_run=dry_run,
-                            )
-                            effective_topology = topology_result.topology
-                            click.echo("  Detected topology: %s" % effective_topology.value)
-                    elif ring_eligible and auto_cx7:
-                        # --yes / already configured with ring-eligible: auto-detect
-                        click.echo("  Detecting topology via neighbor discovery...")
-                        topology_result = detect_topology(
-                            detections,
-                            host_list,
-                            ssh_kwargs=ssh_kwargs,
-                            dry_run=dry_run,
-                        )
-                        effective_topology = topology_result.topology
-                        click.echo("  Detected topology: %s" % effective_topology.value)
 
-                    # For explicit ring without detection data, run detection
-                    if effective_topology == CX7Topology.RING and topology_result is None:
-                        if not dry_run:
-                            click.echo("  Running topology detection for ring...")
-                            topology_result = detect_topology(
-                                detections,
-                                host_list,
-                                ssh_kwargs=ssh_kwargs,
-                                dry_run=dry_run,
-                            )
-                        else:
-                            from sparkrun.orchestration.networking import CX7TopologyResult
-
-                            topology_result = CX7TopologyResult(topology=CX7Topology.RING)
-
-                    click.echo("  Topology: %s" % effective_topology.value)
-
-                    # Reuse any interface filter saved on the cluster (e.g. set
-                    # via `setup cx7 --interfaces '*np1'`) so the wizard pins the
-                    # same port pair.  See issue #203.
-                    cx7_interfaces: list[str] | None = None
-                    if cluster_name:
-                        try:
-                            cx7_interfaces = cluster_mgr.get(cluster_name).fabric_interfaces or None
-                        except Exception:
-                            cx7_interfaces = None
-                    if cx7_interfaces:
-                        click.echo("  Interface filter: %s" % ", ".join(cx7_interfaces))
-
-                    # Select subnets and plan based on topology
-                    if effective_topology == CX7Topology.RING:
-                        all_subnets = select_subnets_for_topology(detections, effective_topology)
-                        click.echo("  Subnets: %s" % ", ".join(str(s) for s in all_subnets))
-                        if topology_result is None:
-                            raise click.ClickException("Ring topology requires detected link information")
-                        plan = plan_ring_cx7(detections, topology_result, all_subnets, interfaces=cx7_interfaces)
-                    else:
-                        s1, s2 = select_subnets(detections)
-                        all_subnets = [s1, s2]
-                        click.echo("  Subnets: %s, %s" % (s1, s2))
-                        plan = plan_cluster_cx7(detections, s1, s2, interfaces=cx7_interfaces)
+                    # A configured cluster keeps the topology it was saved with:
+                    # re-detecting on every clean rerun could save a misread over
+                    # a deliberate `setup cx7 --topology` choice.
+                    plan = plan_cx7(
+                        host_list,
+                        ssh_kwargs=ssh_kwargs,
+                        dry_run=dry_run,
+                        cluster_name=cluster_name,
+                        cluster_manager=cluster_mgr,
+                        use_saved_topology=cx7_checked,
+                        choose_topology=None if auto_cx7 else _choose_topology,
+                        on_event=_render_cx7,
+                    )
+                    topology_value = plan.topology.value
+                    cluster_plan = plan.cluster_plan
+                    assert cluster_plan is not None
 
                     cx7_failed = 0
+                    apply_result = None
                     # Check for plan-level errors (e.g. insufficient ports)
-                    if plan.errors and not plan.host_plans:
-                        for e in plan.errors:
+                    if plan.plan_failed:
+                        for e in cluster_plan.errors:
                             click.echo("  Error: %s" % e, err=True)
                         results["cx7"] = "failed"
                     else:
-                        needs_config = sum(1 for hp in plan.host_plans if hp.needs_change)
+                        needs_config = plan.changing_count
 
                         if plan.all_valid:
                             click.echo("  All hosts already configured.")
                             click.echo(render_identity_text("  (Run '{app_command} setup cx7 --force' to re-plan addresses deliberately.)"))
-                            results["cx7"] = "already configured (%s)" % effective_topology.value
-                        elif cx7_checked and not yes and not dry_run and not _confirm_off_plan(plan, needs_config):
+                            results["cx7"] = "already configured (%s)" % topology_value
+                        elif cx7_checked and not yes and not dry_run and not _confirm_off_plan(cluster_plan, needs_config):
                             results["cx7"] = "skipped"
                         elif dry_run:
                             click.echo("  [dry-run] Would configure %d host(s)." % needs_config)
@@ -893,8 +840,8 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
                             # Hosts with passwordless sudo run the script's own
                             # `sudo` calls; a password piped to `sudo -S` there
                             # would reach bash as a command (as in `setup cx7`).
-                            sudo_hosts = {hp.host for hp in plan.host_plans if hp.needs_change and not detections[hp.host].sudo_ok}
-                            apply_results = apply_cx7_plan(
+                            sudo_hosts = {hp.host for hp in plan.host_plans if hp.needs_change and not plan.detections[hp.host].sudo_ok}
+                            apply_result = apply_cx7(
                                 plan,
                                 ssh_kwargs=ssh_kwargs,
                                 dry_run=dry_run,
@@ -903,15 +850,15 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
                                 passwords=SudoPasswords(prompt_host=_host_password),
                                 # Indirect sudo is a different user: go through su, as other steps do.
                                 dispatch=_run_sudo_on_host if _indirect_sudo_user else None,
+                                cluster_manager=cluster_mgr,
                             )
-                            ok_count = sum(1 for r in apply_results if r.success)
-                            for r in apply_results:
-                                if not r.success:
-                                    cx7_failed += 1
-                                    click.echo("  [FAIL] %s: %s" % (r.host, r.stderr.strip()[:100]), err=True)
+                            ok_count = apply_result.configured
+                            cx7_failed = apply_result.failed
+                            for r in apply_result.failures:
+                                click.echo("  [FAIL] %s: %s" % (r.host, r.stderr.strip()[:100]), err=True)
 
                             # Distribute host keys for CX7 IPs
-                            all_cx7_ips = [a.ip for hp in plan.host_plans for a in hp.assignments if a.ip]
+                            all_cx7_ips = plan.assigned_ips
                             if all_cx7_ips:
                                 _report_host_key_distribution(
                                     distribute_host_keys(
@@ -923,7 +870,7 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
                                     len(all_cx7_ips),
                                 )
 
-                            results["cx7"] = "configured (%s)" % effective_topology.value if ok_count else "failed"
+                            results["cx7"] = "configured (%s)" % topology_value if ok_count else "failed"
                             if ok_count:
                                 cx7_changed_ips = True
                             if ok_count and not dry_run and cluster_name:
@@ -933,21 +880,23 @@ def setup_wizard(ctx, hosts, cluster_name, user, dry_run, yes):
                                     user,
                                     host_list,
                                     "cx7",
-                                    subnets=[str(s) for s in all_subnets],
+                                    subnets=[str(s) for s in plan.subnets],
                                     cx7_ips=all_cx7_ips,
                                     netplan_file=CX7_NETPLAN_FILE,
-                                    topology=effective_topology.value,
+                                    topology=topology_value,
                                 )
 
-                    # Save topology to cluster definition -- not after a partial
-                    # apply, which would report the fabric as configured.
-                    if cx7_failed and cluster_name:
+                    # Topology is saved to the cluster definition -- by apply_cx7
+                    # after an apply (never after a partial one, issue #311),
+                    # here otherwise.
+                    if apply_result is not None:
+                        topology_save = apply_result.topology_save
+                    else:
+                        topology_save = save_cx7_topology(plan, cluster_manager=cluster_mgr, dry_run=dry_run)
+                    if topology_save is not None and topology_save.refused:
                         click.echo("  Topology not saved: %d host(s) failed." % cx7_failed, err=True)
-                    elif not dry_run and cluster_name and effective_topology != CX7Topology.UNKNOWN:
-                        try:
-                            cluster_mgr.update(cluster_name, topology=effective_topology.value)
-                        except Exception as e:
-                            click.echo("  Warning: could not save topology to cluster: %s" % e, err=True)
+                    elif topology_save is not None and topology_save.error:
+                        click.echo("  Warning: could not save topology to cluster: %s" % topology_save.error, err=True)
 
                 except Exception as e:
                     results["cx7"] = "failed"
