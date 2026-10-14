@@ -19,16 +19,29 @@ from sparkrun.models.manifest import check_request, fetch_inventory, manifest_pa
 from sparkrun.models.preparation import PreparedModel, prepare_model
 
 
+def _ssh(ssh_kwargs, sctx):
+    """SSH arguments for host IO: *sctx*'s configured ones, overridden per key.
+
+    Without *sctx* the explicit arguments are used as given (the historical
+    behaviour), so callers that already pass ``ssh_kwargs`` see no change.
+    """
+    if sctx is None:
+        return ssh_kwargs
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    return {**build_ssh_kwargs(sctx.config), **(ssh_kwargs or {})}
+
+
 def resolve_manifest(request: ModelArtifactRequest, *, token: str | None = None, cache_dir: str | None = None) -> ModelArtifactManifest:
     """Resolve authoritative metadata, including a small weight index if present."""
     return select_manifest(request, fetch_inventory(request, token=token, cache=cache_dir))
 
 
 def inspect_model(
-    request: ModelArtifactRequest, *, cache_dir: str, hosts=("localhost",), checksums=False, ssh_kwargs=None, session=None
+    request: ModelArtifactRequest, *, cache_dir: str, hosts=("localhost",), checksums=False, ssh_kwargs=None, session=None, sctx=None
 ) -> tuple[CacheValidationReport, ...]:
     reports = []
-    with ModelHostIO(ssh_kwargs, session=session) as io:
+    with ModelHostIO(_ssh(ssh_kwargs, sctx), session=session) as io:
         for host in hosts:
             root = io.root(host, cache_dir)
             stored = io.read(host, str(manifest_path(root, request)))
@@ -58,6 +71,7 @@ def import_manifest(
     checksums=False,
     ssh_kwargs=None,
     session=None,
+    sctx=None,
 ) -> tuple[CacheValidationReport, ...]:
     """Import operator-supplied expected metadata, never infer it by listing files.
 
@@ -66,7 +80,7 @@ def import_manifest(
     """
     check_request(manifest, request)
     reports = []
-    with ModelHostIO(ssh_kwargs, session=session) as io:
+    with ModelHostIO(_ssh(ssh_kwargs, sctx), session=session) as io:
         for host in hosts:
             root = io.root(host, cache_dir)
             io.lock(host, root, request.repo)
@@ -90,8 +104,13 @@ def repair_model(
     config=None,
     session=None,
     manifest=None,
+    sctx=None,
 ) -> PreparedModel | None:
-    """Repair selected missing/corrupt paths and revalidate all requested hosts."""
+    """Repair selected missing/corrupt paths and revalidate all requested hosts.
+
+    With *sctx*, ``config`` and the SSH arguments default to its configuration
+    (explicit values still win, ``ssh_kwargs`` per key).
+    """
     return prepare_model(
         request.model,
         list(hosts),
@@ -106,22 +125,31 @@ def repair_model(
         offline=offline,
         dry_run=dry_run,
         token=token,
-        ssh_kwargs=ssh_kwargs,
-        config=config,
+        ssh_kwargs=_ssh(ssh_kwargs, sctx),
+        config=config if config is not None or sctx is None else sctx.config,
         session=session,
         manifest=manifest,
     )
 
 
-def inventory_cache(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None) -> tuple[CacheReport, ...]:
+def inventory_cache(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None, sctx=None) -> tuple[CacheReport, ...]:
     """Read host-local inventory, usage, pins and outstanding workload claims."""
     from sparkrun.models.cache import cache_operation
 
-    return cache_operation(cache_dir=cache_dir, hosts=hosts, ssh_kwargs=ssh_kwargs, session=session)
+    return cache_operation(cache_dir=cache_dir, hosts=hosts, ssh_kwargs=_ssh(ssh_kwargs, sctx), session=session)
 
 
 def prune_cache(
-    *, cache_dir, hosts=("localhost",), dry_run=True, min_age_days=7, max_bytes=None, min_free_bytes=None, ssh_kwargs=None, session=None
+    *,
+    cache_dir,
+    hosts=("localhost",),
+    dry_run=True,
+    min_age_days=7,
+    max_bytes=None,
+    min_free_bytes=None,
+    ssh_kwargs=None,
+    session=None,
+    sctx=None,
 ) -> tuple[CacheReport, ...]:
     """Evict eligible revisions in LRU order; preview by default.
 
@@ -134,7 +162,7 @@ def prune_cache(
     return cache_operation(
         cache_dir=cache_dir,
         hosts=hosts,
-        ssh_kwargs=ssh_kwargs,
+        ssh_kwargs=_ssh(ssh_kwargs, sctx),
         session=session,
         action="prune",
         dry_run=dry_run,
@@ -144,7 +172,9 @@ def prune_cache(
     )
 
 
-def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_kwargs=None, session=None) -> tuple[CacheReport, ...]:
+def pin_revision(
+    request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_kwargs=None, session=None, sctx=None
+) -> tuple[CacheReport, ...]:
     """Pin/unpin an already tracked immutable revision on selected cache hosts."""
     from sparkrun.models.cache import cache_operation
     from sparkrun.models.usage import usage_path
@@ -153,7 +183,7 @@ def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_k
     return cache_operation(
         cache_dir=cache_dir,
         hosts=hosts,
-        ssh_kwargs=ssh_kwargs,
+        ssh_kwargs=_ssh(ssh_kwargs, sctx),
         session=session,
         action="pin",
         dry_run=False,
@@ -165,7 +195,7 @@ def pin_revision(request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_k
 
 
 def reconcile_claim(
-    request, *, cache_dir, claim, confirm_inactive=False, hosts=("localhost",), ssh_kwargs=None, session=None
+    request, *, cache_dir, claim, confirm_inactive=False, hosts=("localhost",), ssh_kwargs=None, session=None, sctx=None
 ) -> tuple[CacheReport, ...]:
     """Release an interrupted workload claim after explicit operator inspection.
 
@@ -179,7 +209,7 @@ def reconcile_claim(
     return cache_operation(
         cache_dir=cache_dir,
         hosts=hosts,
-        ssh_kwargs=ssh_kwargs,
+        ssh_kwargs=_ssh(ssh_kwargs, sctx),
         session=session,
         action="reconcile",
         dry_run=False,

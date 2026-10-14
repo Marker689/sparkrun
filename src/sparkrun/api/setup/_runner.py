@@ -15,6 +15,7 @@ from ._errors import SetupFailed
 
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.context import SparkrunContext
     from sparkrun.core.setup_manifest import ManifestManager, SetupManifest
 
 
@@ -32,13 +33,20 @@ def run_setup_steps(
     host_credentials: Callable[[str], str | None] | None = None,
     progress_callback: Callable[[SetupEvent], None] | None = None,
     only_steps: set[str] | None = None,
+    sctx: "SparkrunContext | None" = None,
 ) -> SetupRunResult:
     """Sequence checked actions; orchestration failures raise SetupFailed.
 
     Per-host action failures are recorded in the returned result and do not
     abort other eligible actions. Callbacks run synchronously; interrupts pass
     through. See core.setup_runner.run_setup_steps for recording/preview policy.
+    With *sctx*, a *context* carrying no configuration (needed to reprobe
+    changed hosts) takes the shared context's.
     """
+    if sctx is not None and context.config is None:
+        from dataclasses import replace
+
+        context = replace(context, config=sctx.config)
     try:
         return _run_setup_steps(
             states,

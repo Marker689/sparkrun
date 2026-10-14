@@ -4,11 +4,18 @@ from sparkrun.core.config import SparkrunConfig
 from sparkrun.core.plugin_lifecycle import change_plugin
 
 
-def enable(name, *, config=None, dry_run=False):
+def _config(config, sctx):
+    """Explicit *config* wins, then the shared context's, then a fresh load."""
+    if config is not None:
+        return config
+    return sctx.config if sctx is not None else SparkrunConfig()
+
+
+def enable(name, *, config=None, dry_run=False, sctx=None):
     """Enable loading, retaining capability settings; run the explicit enable hook."""
-    return change_plugin(config if config is not None else SparkrunConfig(), name, True, dry_run=dry_run)
+    return change_plugin(_config(config, sctx), name, True, dry_run=dry_run)
 
 
-def disable(name, *, config=None, dry_run=False):
+def disable(name, *, config=None, dry_run=False, sctx=None):
     """Disable loading, retaining settings and allowing broken-plugin recovery."""
-    return change_plugin(config if config is not None else SparkrunConfig(), name, False, dry_run=dry_run)
+    return change_plugin(_config(config, sctx), name, False, dry_run=dry_run)

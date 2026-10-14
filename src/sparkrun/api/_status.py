@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def status(
-    hosts: list[str],
+    hosts: list[str] | None = None,
     *,
     executor: str | None = None,
     cluster: "str | ClusterDefinition | None" = None,
@@ -30,7 +30,9 @@ def status(
     """Return a :class:`ClusterStatus` snapshot of *hosts*.
 
     Args:
-        hosts: Host list to inspect.
+        hosts: Host list to inspect.  ``None`` takes the resolved
+            cluster's hosts (*cluster*, else the default cluster, else
+            ``config.default_hosts`` — the :func:`resolve_cluster` chain).
         executor: Optional executor name override (CLI-level).  When
             ``None``, the executor is resolved via the standard chain
             with *cluster* providing the cluster row.
@@ -56,6 +58,8 @@ def status(
     # Always end up with a populated ClusterDefinition; hosts are the
     # explicit list passed in.
     cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
+    if hosts is None:
+        hosts = list(cluster_def.hosts)
     # Refresh provider-backed connection details before any SSH (no-op for ssh).
     sctx, ssh_kwargs = scope_operation(cluster_def, sctx=sctx, ssh_kwargs=ssh_kwargs)
     v = sctx.variables
@@ -99,7 +103,7 @@ def _record_running_snapshot(snapshot: "ClusterStatus", sctx) -> None:
 
 
 def status_report(
-    hosts: list[str],
+    hosts: list[str] | None = None,
     *,
     executor: str | None = None,
     cluster: "str | ClusterDefinition | None" = None,
@@ -128,6 +132,10 @@ def status_report(
     from sparkrun.core.cluster_manager import classify_cluster_status
 
     sctx = resolve_sctx(sctx)
+    if hosts is None:
+        from sparkrun.api._resolve import resolve_cluster
+
+        hosts = list(resolve_cluster(cluster, None, sctx=sctx).hosts)
     snapshot = status(hosts, executor=executor, cluster=cluster, ssh_kwargs=ssh_kwargs, sctx=sctx)
 
     from sparkrun.core.config import resolve_configured_cache_dir

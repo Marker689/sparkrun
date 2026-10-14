@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 @operation_boundary(mutation=True)
 def stop_all(
-    hosts: list[str] | tuple[str, ...],
+    hosts: list[str] | tuple[str, ...] | None = None,
     *,
     cluster: "str | ClusterDefinition | None" = None,
     cache_dir: str | None = None,
@@ -52,7 +52,8 @@ def stop_all(
     """Discover and stop every sparkrun workload on *hosts*.
 
     Args:
-        hosts: Hosts to sweep.
+        hosts: Hosts to sweep.  ``None`` takes the resolved cluster's hosts
+            (*cluster*, else the default cluster, else ``config.default_hosts``).
         cluster: Optional cluster name/definition for executor + transport
             resolution (forwarded to :func:`sparkrun.api.status_report`).
         cache_dir: Cache directory holding job metadata.
@@ -76,9 +77,9 @@ def stop_all(
 
     from sparkrun.api._resolve import resolve_cluster, scope_operation
 
-    host_list = list(hosts)
     explicit_ssh = ssh_kwargs
-    cluster_def = resolve_cluster(cluster, host_list, sctx=sctx)
+    cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
+    host_list = list(cluster_def.hosts) if hosts is None else list(hosts)
     sctx, ssh_kwargs = scope_operation(cluster_def, sctx=sctx, ssh_kwargs=ssh_kwargs, prepare=False)
     from sparkrun.core.config import resolve_configured_cache_dir
 

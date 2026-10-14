@@ -44,7 +44,7 @@ def _resolve_ctx(hosts, cluster, ssh_kwargs, sctx):
 
 
 def open_telemetry(
-    hosts: list[str],
+    hosts: list[str] | None = None,
     *,
     cluster: "str | ClusterDefinition | None" = None,
     ssh_kwargs: dict | None = None,
@@ -59,10 +59,13 @@ def open_telemetry(
     then has occupancy-only monitoring).  The caller drives ``snapshot()`` and
     must ``close()`` (or use it as a context manager). SSH arguments override
     cluster-scoped defaults per key; explicit None/empty values clear that key.
+    ``hosts=None`` takes the resolved cluster's hosts (*cluster*, else the
+    default cluster, else ``config.default_hosts``).
     """
     from sparkrun.orchestration.telemetry import get_telemetry_provider
 
     cluster_def, scope, ssh_kwargs, sctx = _resolve_ctx(hosts, cluster, ssh_kwargs, sctx)
+    hosts = list(cluster_def.hosts) if hosts is None else hosts
     provider = get_telemetry_provider(scope, sctx.variables)
     if provider is None:
         logger.debug("No telemetry provider for scope %r; occupancy-only monitoring", scope)
@@ -166,7 +169,7 @@ class LiveMonitorSession:
 
 
 def open_live_monitor(
-    hosts: list[str],
+    hosts: list[str] | None = None,
     *,
     cluster: "str | ClusterDefinition | None" = None,
     ssh_kwargs: dict | None = None,
@@ -187,6 +190,7 @@ def open_live_monitor(
     from sparkrun.orchestration.telemetry import get_telemetry_provider
 
     cluster_def, scope, ssh_kwargs, sctx = _resolve_ctx(hosts, cluster, ssh_kwargs, sctx)
+    hosts = list(cluster_def.hosts) if hosts is None else hosts
     provider = get_telemetry_provider(scope, sctx.variables)
     telemetry_session = None
     if provider is not None:
@@ -202,7 +206,7 @@ def open_live_monitor(
 
 
 def live_monitor(
-    hosts: list[str],
+    hosts: list[str] | None = None,
     *,
     cluster: "str | ClusterDefinition | None" = None,
     ssh_kwargs: dict | None = None,
