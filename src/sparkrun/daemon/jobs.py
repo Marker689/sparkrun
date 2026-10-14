@@ -9,13 +9,12 @@ import sqlite3
 import time
 import uuid
 
+# Re-exported: defined in core so the api wire layer need not import the daemon.
+from sparkrun.core.coordination import Conflict as Conflict
+
 TERMINAL = frozenset({"succeeded", "failed", "cancelled", "lost"})
 SERVICE_OPERATIONS = frozenset({"proxy.watch", "proxy.serve"})
 ACTIVE = frozenset({"starting", "running", "waiting_input", "cancelling"})
-
-
-class Conflict(ValueError):
-    pass
 
 
 class ReplayGap(ValueError):

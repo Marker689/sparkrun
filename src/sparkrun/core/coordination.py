@@ -22,6 +22,16 @@ class ResourceBusy(RuntimeError):
     pass
 
 
+class Conflict(ValueError):
+    """A request conflicts with recorded state (an idempotency key, a job's lifecycle).
+
+    Lives here rather than in ``sparkrun.daemon.jobs`` (which re-exports it) so
+    the console-free wire layer can classify it without importing the daemon.
+    The class name is part of the wire contract: error bodies carry it as
+    ``error.type``.
+    """
+
+
 @contextmanager
 def document_lock(root):
     root = Path(root)

@@ -96,8 +96,7 @@ def to_wire(value, *, depth=0) -> Any:
 
 def error_body(exc):
     from sparkrun.api._errors import SparkrunError
-    from sparkrun.core.coordination import ResourceBusy
-    from sparkrun.daemon.jobs import Conflict
+    from sparkrun.core.coordination import Conflict, ResourceBusy
 
     known = isinstance(exc, (SparkrunError, ValueError, LookupError, TimeoutError, ResourceBusy, Conflict, ResultContractError))
     attrs = {
