@@ -344,6 +344,20 @@ def test_unknown_selector_validation_warning():
     assert "overrides[1]" in issue.summary and "'gpu_family'" in issue.summary and "'approx'" in issue.summary
 
 
+@pytest.mark.parametrize(
+    "when",
+    [{"arch": {"gt": "sm_100"}}, {"capability": {"gte": 1}}, {"runtime": {"lt": "z"}}, {"config": {"k": {"approx": 1}}}],
+)
+def test_validation_reports_exactly_what_the_launch_cannot_evaluate(when):
+    from sparkrun.core.validation import check_override_selectors
+
+    recipe = _recipe([{"when": when, "defaults": {"a": 1}}])
+    decision = evaluate_override(recipe.overrides[0], _ctx())
+    [issue] = check_override_selectors(recipe)
+    assert decision.unknown and not decision.matched
+    assert all(reason in issue.summary for reason in decision.unknown)
+
+
 # --- api.plan -------------------------------------------------------------------------------------
 
 

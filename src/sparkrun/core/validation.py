@@ -1027,22 +1027,12 @@ def check_override_selectors(recipe: Recipe) -> list[RecipeIssue]:
     on this sparkrun than on the one it was written for, which is what a
     warning means.
     """
-    from sparkrun.core.recipe_overrides import CONFIG_SELECTOR, OPERATORS, SELECTORS
-
-    def _bad_operators(value: Any) -> list[str]:
-        return sorted(str(op) for op in value if str(op) not in OPERATORS) if isinstance(value, dict) else []
+    from sparkrun.core.recipe_overrides import OPERATORS, SELECTORS, unevaluable_reasons
 
     issues: list[RecipeIssue] = []
     for override in getattr(recipe, "overrides", None) or ():
-        problems: list[str] = []
-        for selector, value in override.when.items():
-            if selector not in SELECTORS:
-                problems.append("unknown selector %r" % selector)
-            elif selector == CONFIG_SELECTOR:
-                for key, predicate in value.items():
-                    problems.extend("config.%s: unknown operator %r" % (key, op) for op in _bad_operators(predicate))
-            else:
-                problems.extend("%s: unknown operator %r" % (selector, op) for op in _bad_operators(value))
+        # The launch's own rule (recipe_overrides), so the two cannot drift.
+        problems = unevaluable_reasons(override)
         if problems:
             issues.append(
                 RecipeIssue(
@@ -1050,7 +1040,8 @@ def check_override_selectors(recipe: Recipe) -> list[RecipeIssue]:
                     "override-unknown-selector",
                     "overrides[%d] uses %s, which this sparkrun cannot evaluate, so the entry never matches here."
                     % (override.index, "; ".join(problems)),
-                    "Known selectors: %s. Operators: %s. Upgrade sparkrun if the recipe targets a newer version."
+                    "Known selectors: %s. Operators: %s (gt/gte/lt/lte need a numeric selector). "
+                    "Upgrade sparkrun if the recipe targets a newer version."
                     % (", ".join(sorted(SELECTORS)), ", ".join(sorted(OPERATORS))),
                 )
             )

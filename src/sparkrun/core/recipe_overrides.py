@@ -290,11 +290,32 @@ def _test(selector: str, op: str, operand: Any, actual: Any, *, absent_is_value:
 def _check(selector: str, predicates: list[tuple[str, Any]], actual: Any, *, absent_is_value: bool = False) -> tuple[bool, list[str]]:
     unknown = [op for op, _ in predicates if op not in OPERATORS]
     if unknown:
-        return False, ["%s: unknown operator %s" % (selector, ", ".join(sorted(unknown)))]
+        return False, ["%s: unknown operator %s" % (selector, ", ".join(repr(op) for op in sorted(unknown)))]
     unordered = [op for op, _ in predicates if op in _NUMERIC_OPERATORS and selector in _UNORDERED_SELECTORS]
     if unordered:
         return False, ["%s: %s needs a numeric selector" % (selector, ", ".join(sorted(unordered)))]
     return all(_test(selector, op, operand, actual, absent_is_value=absent_is_value) for op, operand in predicates), []
+
+
+def unevaluable_reasons(override: RecipeOverride) -> list[str]:
+    """Why this sparkrun cannot evaluate *override*'s ``when`` (empty when it can).
+
+    The launch treats any reason as "never matches" (:func:`evaluate_override`)
+    and ``recipe validate`` reports the same list, so the two cannot disagree
+    about which entries are dead here. Decided without a launch context: an
+    unknown selector or operator, or an ordering operator on an unordered
+    selector, is unevaluable whatever the values are.
+    """
+    reasons: list[str] = []
+    for selector, value in override.when.items():
+        if selector not in SELECTORS:
+            reasons.append("unknown selector %r" % selector)
+        elif selector == CONFIG_SELECTOR:
+            for key, predicate in value.items():
+                reasons.extend(_check("config.%s" % key, _compile(predicate), None, absent_is_value=True)[1])
+        else:
+            reasons.extend(_check(selector, _compile(value), None)[1])
+    return reasons
 
 
 def _accelerator_facts(host_hardware: HostHardware) -> list[dict[str, Any]]:
@@ -328,12 +349,10 @@ def _hardware_predicates(override: RecipeOverride) -> dict[str, list[tuple[str, 
     An entry with an unknown selector or operator never matches, so it cannot
     split hosts either.
     """
-    if any(selector not in SELECTORS for selector in override.when):
+    if unevaluable_reasons(override):
         return None
     hardware = {sel: _compile(val) for sel, val in override.when.items() if sel in HARDWARE_SELECTORS}
-    if not hardware or any(_check(sel, preds, None)[1] for sel, preds in hardware.items()):
-        return None
-    return hardware
+    return hardware or None
 
 
 def partition_hosts_by_hardware(overrides: list[RecipeOverride], hosts: Mapping[str, HostHardware]) -> list[tuple[str, ...]]:
@@ -362,37 +381,26 @@ def _host_matches(hardware_when: dict[str, list[tuple[str, Any]]], host_hardware
 
 def evaluate_override(override: RecipeOverride, ctx: OverrideContext) -> OverrideDecision:
     """Decide one entry. Raises :class:`OverrideConflictError` on a host split."""
-    unknown: list[str] = []
+    unknown = unevaluable_reasons(override)
+    if unknown:
+        return OverrideDecision(override.index, False, "; ".join(unknown) + " (this sparkrun cannot evaluate it)", tuple(unknown))
+
     failed: list[str] = []
     hardware_when: dict[str, list[tuple[str, Any]]] = {}
-
     for selector, value in override.when.items():
-        if selector not in SELECTORS:
-            unknown.append("unknown selector %r" % selector)
-            continue
         if selector == CONFIG_SELECTOR:
             for key, predicate in value.items():
-                ok, bad = _check("config.%s" % key, _compile(predicate), _config_get(ctx.config, str(key)), absent_is_value=True)
-                unknown.extend(bad)
-                if not ok and not bad:
+                if not _check("config.%s" % key, _compile(predicate), _config_get(ctx.config, str(key)), absent_is_value=True)[0]:
                     failed.append("config.%s" % key)
             continue
         predicates = _compile(value)
         if selector in HARDWARE_SELECTORS:
-            _ok, bad = _check(selector, predicates, None)
-            if bad:
-                unknown.extend(bad)
-            else:
-                hardware_when[selector] = predicates
+            hardware_when[selector] = predicates
             continue
         actual = ctx.shape.get(selector) if selector in SHAPE_SELECTORS else getattr(ctx, selector)
-        ok, bad = _check(selector, predicates, actual)
-        unknown.extend(bad)
-        if not ok and not bad:
+        if not _check(selector, predicates, actual)[0]:
             failed.append("%s=%s" % (selector, actual if actual is not None else "unknown"))
 
-    if unknown:
-        return OverrideDecision(override.index, False, "; ".join(unknown) + " (this sparkrun cannot evaluate it)", tuple(unknown))
     if failed:
         return OverrideDecision(override.index, False, "%s did not match" % ", ".join(failed))
 
