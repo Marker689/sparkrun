@@ -246,8 +246,6 @@ def display_recipe_detail(recipe, show_vram=True, registry_name=None, cli_overri
     click.echo(f"Container:    {recipe.container}")
     max_nodes = recipe.max_nodes or "unlimited"
     click.echo(f"Nodes:        {recipe.min_nodes} - {max_nodes}")
-    # click.echo(f"Registry:     {registry_name or 'N/A'}")
-    # click.echo(f"File Path:    {recipe.source_path}")
 
     if recipe.defaults:
         click.echo("\nDefaults:")

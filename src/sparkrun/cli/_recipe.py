@@ -82,9 +82,8 @@ def _search_recipes(ctx, query, *, registry, runtime, show_all, unique_names=Fal
 @click.option("--all", "-a", "show_all", is_flag=True, help="Include hidden registry recipes")
 @json_option()
 @click.argument("query", type=RECIPE_QUERY, required=False)
-# @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
-def recipe_list(ctx, registry, runtime, show_all, output_json, query, config_path=None):
+def recipe_list(ctx, registry, runtime, show_all, output_json, query):
     """List available recipes from all registries.
 
     QUERY may be scoped to a registry with the ``@registry`` shorthand:
@@ -110,9 +109,8 @@ def recipe_list(ctx, registry, runtime, show_all, output_json, query, config_pat
 @click.option("--all", "-a", "show_all", is_flag=True, help="Include hidden registry recipes")
 @json_option()
 @click.argument("query", type=RECIPE_QUERY)
-# @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
-def recipe_search(ctx, registry, runtime, show_all, output_json, query, config_path=None):
+def recipe_search(ctx, registry, runtime, show_all, output_json, query):
     """Search for recipes by name, model, or description.
 
     QUERY may be scoped to a registry with the ``@registry`` shorthand:
@@ -145,12 +143,11 @@ def recipe_search(ctx, registry, runtime, show_all, output_json, query, config_p
 @click.option("--tp", "--tensor-parallel", "tensor_parallel", type=int, default=None, help="Override tensor parallelism")
 @click.option("--gpu-mem", type=float, default=None, help="Override GPU memory utilization (0.0-1.0)")
 @json_option()
-# @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
-def recipe_show(ctx, recipe_name, no_vram, tensor_parallel, gpu_mem, output_json, config_path=None):
+def recipe_show(ctx, recipe_name, no_vram, tensor_parallel, gpu_mem, output_json):
     """Show detailed recipe information."""
 
-    config, _ = _get_config_and_registry(config_path)
+    config, _ = _get_config_and_registry()
     recipe, recipe_path, registry_mgr = _load_recipe(config, recipe_name)
 
     cli_overrides = {}
@@ -180,9 +177,8 @@ def recipe_show(ctx, recipe_name, no_vram, tensor_parallel, gpu_mem, output_json
     help="Least-severe finding that fails (default: error; --strict means warning)",
 )
 @json_option()
-# @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
-def recipe_validate(ctx, recipe_name, strict, fail_on, output_json, config_path=None):
+def recipe_validate(ctx, recipe_name, strict, fail_on, output_json):
     """Validate a recipe file.
 
     Findings come in three severities. ERRORS are things {app_command} cannot honor
@@ -200,7 +196,7 @@ def recipe_validate(ctx, recipe_name, strict, fail_on, output_json, config_path=
 
     sctx = _get_context(ctx)
     v = sctx.variables
-    config, _ = _get_config_and_registry(config_path)
+    config, _ = _get_config_and_registry()
     recipe, _recipe_path, _registry_mgr = _load_recipe(config, recipe_name)
 
     # --strict is the typeable spelling of the one threshold most people want;
@@ -254,9 +250,8 @@ def recipe_validate(ctx, recipe_name, strict, fail_on, output_json, config_path=
 @click.option("--gpu-mem", type=float, default=None, help="Override gpu_memory_utilization (0.0-1.0)")
 @click.option("--no-auto-detect", is_flag=True, help="Skip HuggingFace model auto-detection")
 @json_option()
-# @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
-def recipe_vram(ctx, recipe_name, tensor_parallel, max_model_len, gpu_mem, no_auto_detect, output_json, config_path=None):
+def recipe_vram(ctx, recipe_name, tensor_parallel, max_model_len, gpu_mem, no_auto_detect, output_json):
     """Estimate VRAM usage for a recipe on DGX Spark.
 
     Shows model weight size, KV cache requirements, GPU memory budget,
@@ -270,7 +265,7 @@ def recipe_vram(ctx, recipe_name, tensor_parallel, max_model_len, gpu_mem, no_au
 
       {app_command} recipe vram my-recipe.yaml --max-model-len 8192 --gpu-mem 0.9
     """
-    config, _ = _get_config_and_registry(config_path)
+    config, _ = _get_config_and_registry()
     recipe, _recipe_path, _registry_mgr = _load_recipe(config, recipe_name)
 
     if not output_json:

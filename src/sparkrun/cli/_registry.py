@@ -112,39 +112,6 @@ def registry_list(ctx, show_disabled, only_show_visible, output_json, config_pat
         click.echo(row)
 
 
-# @registry.command("manual-add")
-# @click.argument("name")
-# @click.option("--url", required=True, help="Git repository URL")
-# @click.option("--subpath", required=True, help="Path to recipes within repo")
-# @click.option("-d", "--description", default="", help="Registry description")
-# @click.option("--visible/--hidden", default=True, help="Registry visibility in default listings")
-# @click.option("--tuning-subpath", default="", help="Path to tuning configs within repo")
-# @click.option("--benchmark-subpath", default="", help="Path to benchmark profiles within repo")
-# @click.pass_context
-# def registry_add(ctx, name, url, subpath, description, visible, tuning_subpath, benchmark_subpath, config_path=None):
-#     """Add a new recipe registry."""
-#     from sparkrun.registry import RegistryEntry, RegistryError
-#
-#     config, registry_mgr = _get_config_and_registry(config_path)
-#
-#     try:
-#         entry = RegistryEntry(
-#             name=name,
-#             url=url,
-#             subpath=subpath,
-#             description=description,
-#             enabled=True,
-#             visible=visible,
-#             tuning_subpath=tuning_subpath,
-#             benchmark_subpath=benchmark_subpath,
-#         )
-#         registry_mgr.add_registry(entry)
-#         click.echo(f"Registry '{name}' added successfully.")
-#     except RegistryError as e:
-#         click.echo(f"Error: {e}", err=True)
-#         sys.exit(1)
-
-
 @registry.command("add")
 @click.argument("url")
 @click.option("--no-update", is_flag=True, help="Skip the automatic fetch of newly added registries")

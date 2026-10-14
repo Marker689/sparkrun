@@ -47,7 +47,7 @@ from ._common import (
 @click.option("--served-model-name", default=None, help="Override served model name (to match run-time override)")
 @dry_run_option
 @click.pass_context
-def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, port, served_model_name, dry_run, config_path=None):
+def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, port, served_model_name, dry_run):
     """Stop a running workload.
 
     TARGET can be a recipe name or a cluster ID (from {app_command} status output).
@@ -270,9 +270,7 @@ def _stop_all(hosts, hosts_file, cluster_name, config, dry_run, sctx=None):
     help="Read every worker/rank too, not just the head. Following interleaves them in arrival order.",
 )
 @click.pass_context
-def logs_cmd(
-    ctx, target, hosts, hosts_file, cluster_name, tp_override, port, served_model_name, lines, follow, all_sources, config_path=None
-):
+def logs_cmd(ctx, target, hosts, hosts_file, cluster_name, tp_override, port, served_model_name, lines, follow, all_sources):
     """Show logs of a running workload (``docker logs`` / ``journalctl`` semantics).
 
     Called bare, dumps the workload's logs and exits.  Use ``-n`` to limit how

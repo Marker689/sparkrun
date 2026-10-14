@@ -965,9 +965,8 @@ def cluster_monitor(ctx, hosts, hosts_file, cluster_name, dry_run, interval, sim
 @host_options
 @dry_run_option
 @json_option()
-# @click.option("--config", "config_path", default=None, help="Path to config file")
 @click.pass_context
-def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json, config_path=None):
+def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json):
     """Show {app_command} containers running on cluster hosts.
 
     Lists all Docker containers whose names start with sparkrun_ on each
@@ -1041,11 +1040,6 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json, c
             for host, role, status, image in group.members:
                 hdisp = format_host_display(host, group.meta)
                 click.echo(f"  {role:<10s} {hdisp:<40s} {status:<25s} {image}")
-            # ri = group.meta.get("runtime_info")
-            # if ri and isinstance(ri, dict):
-            #     click.echo("  versions: %s" % ", ".join(
-            #         "%s=%s" % (k, v) for k, v in sorted(ri.items())
-            #     ))
             logs_cmd, stop_cmd = format_job_commands(group.meta, cluster_id=cid)
             if logs_cmd:
                 click.echo(f"  logs: {logs_cmd}")

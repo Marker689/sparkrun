@@ -596,9 +596,6 @@ class LlamaBenchyFramework(BenchmarkingPlugin):
             except (json.JSONDecodeError, ValueError):
                 logger.warning("Failed to parse JSON output from llama-benchy")
 
-        # # Extract benchmark rows for summary display
-        # rows = json_data.get("benchmarks", [])
-
         # Build CSV from JSON when benchmark data is available
         csv_text = ""
         if json_data.get("benchmarks"):

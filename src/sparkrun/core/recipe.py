@@ -1013,13 +1013,6 @@ def fetch_and_cache_recipe(url: str, *, allow_untrusted_host: bool = False, offl
         raise RecipeError("Failed to fetch recipe from %s: %s" % (url, e.reason if isinstance(e, URLError) else e)) from e
 
 
-# # Backward-compat aliases (old underscore names)
-# _expand_recipe_shortcut = expand_recipe_shortcut
-# _simplify_recipe_ref = simplify_recipe_ref
-# _is_recipe_url = is_recipe_url
-# _fetch_and_cache_recipe = fetch_and_cache_recipe
-
-
 @dataclass
 class LaunchOverrides:
     """Internal, undocumented launch/infra overrides from a recipe's
@@ -1168,9 +1161,10 @@ class Recipe:
         except ValueError as error:
             raise RecipeError(str(error)) from error
 
-        # Core fields — name defaults to source filename stem if not provided
+        # Core fields. The name is always the source filename stem: a declared
+        # ``name:`` (v1 spelling) is ignored, and recipe validation reports it.
         default_name = Path(source_path).stem if source_path else "unnamed"
-        self.name: str = default_name  # data.get("name", default_name)
+        self.name: str = default_name
         self.description: str = data.get("description", "")
         self.model: str = data.get("model", "")
         self.model_revision: str | None = data.get("model_revision")
@@ -1249,11 +1243,7 @@ class Recipe:
                     "Plugin %s could not parse top-level recipe item '%s': %s" % (registration.owner, registration.key, error)
                 ) from error
 
-        # Metadata values supplement missing top-level fields
-        # if not self.name or self.name == default_name:
-        #     meta_name = self.metadata.get("name")
-        #     if meta_name:
-        #         self.name = str(meta_name)
+        # Metadata values supplement missing top-level fields (not the name).
         if not self.description:
             meta_desc = self.metadata.get("description")
             if meta_desc:
@@ -2389,12 +2379,6 @@ class Recipe:
             d["container"] = container
         if self.containers:
             d["containers"] = [dict(e) for e in self.containers]
-
-        # # -- Preserve Raw Topology flags from v1 --
-        # if self._raw.get("solo_only"):
-        #     d["solo_only"] = True
-        # if self._raw.get("cluster_only"):
-        #     d["cluster_only"] = True
 
         # -- Explicit placement layout (optional) --
         if self.layout is not None:

@@ -938,7 +938,6 @@ def export_systemd(
         user_home,
     )
     sudo_install_script = _render_sudo_install_script(slug, unit_contents, user_home=user_home, cluster_name=systemd_cluster_name)
-    # uninstall_script = _render_uninstall_script(slug, systemd_cluster_name, user_home)
 
     if not do_install:
         # Dry-run mode: display all generated artifacts
@@ -958,8 +957,6 @@ def export_systemd(
         click.echo(install_script)
         click.echo("--- Install script (sudo) ---")
         click.echo(sudo_install_script)
-        # click.echo("--- Uninstall script (sudo) ---")
-        # click.echo(uninstall_script)
         click.echo("To deploy, re-run with --install")
         return
 

@@ -313,7 +313,6 @@ def run(
     executor_args,
     fail_on,
     extra_args,
-    config_path=None,
     *,
     host_list: list[str],
     cluster_mgr=None,
