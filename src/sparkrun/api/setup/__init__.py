@@ -23,7 +23,8 @@ Stable: the SSH bootstrap (``probe_ssh_access``, ``ensure_local_key``,
    may change in a minor release. So may the CX7 fabric configuration
    (``plan_cx7``, ``apply_cx7``, ``save_cx7_topology``,
    ``validate_cx7_options`` and the ``Cx7*`` types) and the SSH diagnosis
-   (``diagnose_ssh`` and the ``SshDiagnos*`` types), which hold the decisions
+   (``diagnose_ssh``, ``find_local_public_key``, ``SshDiagnosticReport`` and
+   ``SshHostDiagnosis``), which hold the decisions
    behind ``setup cx7`` / the wizard's CX7 phase and ``setup ssh --diagnose``.
 """
 
@@ -90,6 +91,22 @@ from ._ssh_access import (
     probe_ssh_access,
 )
 
+from ._ssh_diagnose import (
+    SSH_DIAG_COLLECT_START,
+    SSH_DIAG_CONNECT_FAILED,
+    SSH_DIAG_CONNECT_START,
+    SSH_DIAG_HOST_DONE,
+    SSH_DIAG_KEY_CHECK_DONE,
+    SSH_DIAG_KEY_CHECK_SKIPPED,
+    SSH_DIAG_KEY_CHECK_START,
+    SSH_DIAG_LOCAL_KEY,
+    SSH_DIAG_PUBKEY_DONE,
+    SSH_DIAG_PUBKEY_START,
+    SshDiagnosticReport,
+    SshHostDiagnosis,
+    diagnose_ssh,
+    find_local_public_key,
+)
 from ._ssh_identity import SshHostIdentity, DuplicateHostIdentity, SshIdentityReport, check_ssh_host_identities
 from ._ssh_rotation import SshRotationResult, rotate_ssh_host_keys
 
@@ -152,6 +169,21 @@ __all__ = [
     "CX7_EVENT_RING_DETECTING",
     "CX7_EVENT_TOPOLOGY",
     "CX7_EVENT_SUBNETS",
+    # SSH diagnosis (experimental)
+    "diagnose_ssh",
+    "find_local_public_key",
+    "SshDiagnosticReport",
+    "SshHostDiagnosis",
+    "SSH_DIAG_LOCAL_KEY",
+    "SSH_DIAG_PUBKEY_START",
+    "SSH_DIAG_PUBKEY_DONE",
+    "SSH_DIAG_CONNECT_START",
+    "SSH_DIAG_CONNECT_FAILED",
+    "SSH_DIAG_COLLECT_START",
+    "SSH_DIAG_KEY_CHECK_START",
+    "SSH_DIAG_KEY_CHECK_DONE",
+    "SSH_DIAG_KEY_CHECK_SKIPPED",
+    "SSH_DIAG_HOST_DONE",
     # Data models
     "SshProbe",
     "LocalSshKey",

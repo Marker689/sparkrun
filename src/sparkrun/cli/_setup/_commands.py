@@ -465,14 +465,25 @@ def setup_features_reset(ctx, name):
 
 
 def _run_ssh_diagnose(host_list, user, local_user):
-    """Run comprehensive SSH diagnostics on each host.
+    """Run SSH diagnostics on each host and render them (``api.setup.diagnose_ssh``).
 
     Uses interactive password-based SSH (ControlMaster) to connect, then
     collects permission info, sshd settings, and tests pubkey auth
     independently.  Prints structured pass/fail results with remediation.
     """
-    import subprocess
-    import tempfile
+    from sparkrun.api.setup import (
+        SSH_DIAG_COLLECT_START,
+        SSH_DIAG_CONNECT_FAILED,
+        SSH_DIAG_CONNECT_START,
+        SSH_DIAG_HOST_DONE,
+        SSH_DIAG_KEY_CHECK_DONE,
+        SSH_DIAG_KEY_CHECK_SKIPPED,
+        SSH_DIAG_KEY_CHECK_START,
+        SSH_DIAG_LOCAL_KEY,
+        SSH_DIAG_PUBKEY_DONE,
+        SSH_DIAG_PUBKEY_START,
+        diagnose_ssh,
+    )
 
     cross_user = user != local_user
 
@@ -483,447 +494,160 @@ def _run_ssh_diagnose(host_list, user, local_user):
     click.echo("Hosts: %s" % ", ".join(host_list))
     click.echo()
 
-    # Find local public key — use ssh -G to respect ~/.ssh/config IdentityFile
-    import os
-
-    local_pubkey = None
-    local_pubkey_source = None
-
-    # Ask SSH which identity files it would use for the first host
-    try:
-        ssh_g_result = subprocess.run(
-            ["ssh", "-G", "%s@%s" % (user, host_list[0])],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if ssh_g_result.returncode == 0:
-            for line in ssh_g_result.stdout.splitlines():
-                if line.startswith("identityfile "):
-                    idf = os.path.expanduser(line.split(None, 1)[1])
-                    pub = idf + ".pub"
-                    if os.path.isfile(pub):
-                        with open(pub) as f:
-                            local_pubkey = f.read().strip()
-                        local_pubkey_source = pub
-                        break
-    except Exception:
-        pass
-
-    # Fallback: check standard key filenames
-    if not local_pubkey:
-        for kf in ("id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"):
-            path = os.path.join(os.path.expanduser("~"), ".ssh", kf)
-            if os.path.isfile(path):
-                with open(path) as f:
-                    local_pubkey = f.read().strip()
-                local_pubkey_source = path
-                break
-
-    if local_pubkey:
-        click.echo("Local public key (%s): %s ...%s" % (local_pubkey_source, local_pubkey[:30], local_pubkey[-20:]))
-    else:
-        click.echo("WARNING: No local SSH public key found!")
-    click.echo()
-
-    ssh_opts = [
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ServerAliveInterval=10",
-        "-o",
-        "ServerAliveCountMax=3",
-    ]
-
-    control_dir = tempfile.mkdtemp(prefix="sparkrun-diag-")
-    os.chmod(control_dir, 0o700)
-
-    all_passed = True
-
-    for h in host_list:
-        click.echo("--- Diagnosing %s@%s ---" % (user, h))
-        control_path = os.path.join(control_dir, "cm-%%r@%%h:%%p")
-
-        # Step 1: Test pubkey auth (no password, no ControlMaster)
-        # Use -v (verbose) so we can show WHY the key was rejected on failure.
-        click.echo("  [1/4] Testing pubkey authentication (BatchMode)...")
-        pubkey_result = subprocess.run(
-            ["ssh", "-v"]
-            + ssh_opts
-            + [
-                "-o",
-                "ControlPath=none",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                "%s@%s" % (user, h),
-                "true",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        pubkey_ok = pubkey_result.returncode == 0
-        click.echo("        %s" % ("PASS" if pubkey_ok else "FAIL"))
-
-        # Parse verbose SSH output for key diagnostic lines
-        ssh_verbose_lines = []
-        if not pubkey_ok and pubkey_result.stderr:
-            for line in pubkey_result.stderr.splitlines():
-                line_lower = line.lower()
-                # Capture lines about key offers, rejections, auth methods, and errors
-                if any(
-                    kw in line_lower
-                    for kw in (
-                        "offering",
-                        "trying",
-                        "authentications that can continue",
-                        "no more authentication",
-                        "permission denied",
-                        "key_load",
-                        "identity file",
-                        "will attempt",
-                        "server accepts key",
-                        "authentication refused",
-                        "pubkey_prepare",
-                        "sign_and_send",
-                    )
-                ):
-                    ssh_verbose_lines.append(line.strip())
-            if ssh_verbose_lines:
+    def _render(kind, report, d):
+        if kind == SSH_DIAG_LOCAL_KEY:
+            key = report.local_pubkey
+            if key:
+                click.echo("Local public key (%s): %s ...%s" % (report.local_pubkey_source, key[:30], key[-20:]))
+            else:
+                click.echo("WARNING: No local SSH public key found!")
+            click.echo()
+        elif kind == SSH_DIAG_PUBKEY_START:
+            click.echo("--- Diagnosing %s@%s ---" % (user, d.host))
+            click.echo("  [1/4] Testing pubkey authentication (BatchMode)...")
+        elif kind == SSH_DIAG_PUBKEY_DONE:
+            click.echo("        %s" % ("PASS" if d.pubkey_ok else "FAIL"))
+            if d.ssh_debug_lines:
                 click.echo("        SSH debug (key-related):")
-                for vl in ssh_verbose_lines:
-                    click.echo("          %s" % vl)
-
-        if not pubkey_ok:
-            all_passed = False
-
-        # Step 2: Establish ControlMaster (interactive — may prompt for password)
-        click.echo("  [2/4] Establishing authenticated connection (may prompt for password)...")
-        cm_result = subprocess.run(
-            ["ssh"]
-            + ssh_opts
-            + [
-                "-o",
-                "ControlMaster=auto",
-                "-o",
-                "ControlPersist=2m",
-                "-o",
-                "ControlPath=%s" % control_path,
-                "%s@%s" % (user, h),
-                "true",
-            ],
-            timeout=60,
-        )
-        if cm_result.returncode != 0:
-            click.echo("        FAIL — cannot connect to %s (even with password)" % h)
+                for line in d.ssh_debug_lines:
+                    click.echo("          %s" % line)
+        elif kind == SSH_DIAG_CONNECT_START:
+            click.echo("  [2/4] Establishing authenticated connection (may prompt for password)...")
+        elif kind == SSH_DIAG_CONNECT_FAILED:
+            click.echo("        FAIL — cannot connect to %s (even with password)" % d.host)
             click.echo()
-            all_passed = False
-            continue
-
-        cm_ssh = (
-            ["ssh"]
-            + ssh_opts
-            + [
-                "-o",
-                "ControlMaster=auto",
-                "-o",
-                "ControlPersist=2m",
-                "-o",
-                "ControlPath=%s" % control_path,
-                "%s@%s" % (user, h),
-            ]
-        )
-
-        # Step 3: Collect remote diagnostics
-        click.echo("  [3/4] Collecting remote diagnostics...")
-        diag_script = r"""set -eu
-printf 'home_dir=%s\n' "$(eval echo ~)"
-printf 'home_perms=%s\n' "$(stat -c '%a' ~ 2>/dev/null || echo unknown)"
-printf 'home_owner=%s\n' "$(stat -c '%U' ~ 2>/dev/null || echo unknown)"
-printf 'ssh_dir_exists=%s\n' "$(test -d ~/.ssh && echo yes || echo no)"
-printf 'ssh_perms=%s\n' "$(stat -c '%a' ~/.ssh 2>/dev/null || echo missing)"
-printf 'ak_exists=%s\n' "$(test -f ~/.ssh/authorized_keys && echo yes || echo no)"
-printf 'ak_perms=%s\n' "$(stat -c '%a' ~/.ssh/authorized_keys 2>/dev/null || echo missing)"
-printf 'ak_lines=%s\n' "$(wc -l < ~/.ssh/authorized_keys 2>/dev/null || echo 0)"
-printf 'sshd_ak_file=%s\n' "$(grep -i '^AuthorizedKeysFile' /etc/ssh/sshd_config 2>/dev/null || echo default)"
-printf 'sshd_pubkey=%s\n' "$(grep -i '^PubkeyAuthentication' /etc/ssh/sshd_config 2>/dev/null || echo default)"
-printf 'sshd_strict=%s\n' "$(grep -i '^StrictModes' /etc/ssh/sshd_config 2>/dev/null || echo default)"
-printf 'sshd_allow_users=%s\n' "$(grep -i '^AllowUsers' /etc/ssh/sshd_config 2>/dev/null || echo none)"
-printf 'sshd_allow_groups=%s\n' "$(grep -i '^AllowGroups' /etc/ssh/sshd_config 2>/dev/null || echo none)"
-
-# Check sshd drop-in config files (Ubuntu 22.04+ uses Include)
-_dropin_dir="/etc/ssh/sshd_config.d"
-if [ -d "$_dropin_dir" ]; then
-    _dropin_files="$(ls -1 "$_dropin_dir"/*.conf 2>/dev/null | tr '\n' ',' || echo none)"
-    printf 'sshd_dropin_files=%s\n' "${_dropin_files%,}"
-
-    # Check for overrides in drop-in files that affect pubkey auth
-    _dropin_ak="$(grep -rhi '^AuthorizedKeysFile' "$_dropin_dir"/ 2>/dev/null || echo none)"
-    printf 'sshd_dropin_ak_file=%s\n' "$_dropin_ak"
-    _dropin_pubkey="$(grep -rhi '^PubkeyAuthentication' "$_dropin_dir"/ 2>/dev/null || echo none)"
-    printf 'sshd_dropin_pubkey=%s\n' "$_dropin_pubkey"
-    _dropin_accepted="$(grep -rhi '^PubkeyAcceptedAlgorithms\|^PubkeyAcceptedKeyTypes' "$_dropin_dir"/ 2>/dev/null || echo none)"
-    printf 'sshd_dropin_accepted_algs=%s\n' "$_dropin_accepted"
-    _dropin_allow_users="$(grep -rhi '^AllowUsers' "$_dropin_dir"/ 2>/dev/null || echo none)"
-    printf 'sshd_dropin_allow_users=%s\n' "$_dropin_allow_users"
-    _dropin_allow_groups="$(grep -rhi '^AllowGroups' "$_dropin_dir"/ 2>/dev/null || echo none)"
-    printf 'sshd_dropin_allow_groups=%s\n' "$_dropin_allow_groups"
-else
-    printf 'sshd_dropin_files=none\n'
-    printf 'sshd_dropin_ak_file=none\n'
-    printf 'sshd_dropin_pubkey=none\n'
-    printf 'sshd_dropin_accepted_algs=none\n'
-    printf 'sshd_dropin_allow_users=none\n'
-    printf 'sshd_dropin_allow_groups=none\n'
-fi
-
-# PubkeyAcceptedAlgorithms in main sshd_config
-printf 'sshd_accepted_algs=%s\n' "$(grep -i '^PubkeyAcceptedAlgorithms\|^PubkeyAcceptedKeyTypes' /etc/ssh/sshd_config 2>/dev/null || echo default)"
-
-# Key types present in authorized_keys
-printf 'ak_key_types=%s\n' "$(awk '{print $1}' ~/.ssh/authorized_keys 2>/dev/null | sort -u | tr '\n' ',' || echo none)"
-"""
-        diag_result = subprocess.run(
-            cm_ssh + [diag_script],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-
-        diag = {}
-        if diag_result.returncode == 0:
-            for line in diag_result.stdout.strip().splitlines():
-                if "=" in line:
-                    k, _, v = line.partition("=")
-                    diag[k.strip()] = v.strip()
-
-        # Step 4: Check if local pubkey is in authorized_keys
-        key_installed = False
-        if local_pubkey and cross_user:
+        elif kind == SSH_DIAG_COLLECT_START:
+            click.echo("  [3/4] Collecting remote diagnostics...")
+        elif kind == SSH_DIAG_KEY_CHECK_START:
             click.echo("  [4/4] Checking if local pubkey is in authorized_keys...")
-            # Extract just the key type + key data (no comment) for matching
-            key_parts = local_pubkey.split()
-            if len(key_parts) >= 2:
-                key_match = "%s %s" % (key_parts[0], key_parts[1])
-                grep_result = subprocess.run(
-                    cm_ssh + ["grep -cF '%s' ~/.ssh/authorized_keys 2>/dev/null || echo 0" % key_match],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                count = grep_result.stdout.strip()
-                key_installed = count != "0"
-                click.echo("        Key present: %s" % ("yes" if key_installed else "NO"))
-        else:
+        elif kind == SSH_DIAG_KEY_CHECK_DONE:
+            click.echo("        Key present: %s" % ("yes" if d.key_installed else "NO"))
+        elif kind == SSH_DIAG_KEY_CHECK_SKIPPED:
             click.echo("  [4/4] Key check: %s" % ("skipped (same user)" if not cross_user else "skipped (no local key)"))
+        elif kind == SSH_DIAG_HOST_DONE:
+            _render_ssh_host_diagnosis(d, report.local_pubkey_source)
 
-        # Print structured results
-        click.echo()
-        click.echo("  Results for %s@%s:" % (user, h))
+    report = diagnose_ssh(host_list, user, local_user=local_user, on_event=_render)
 
-        home_perms = diag.get("home_perms", "unknown")
-        home_ok = home_perms in ("700", "750", "755")
-        click.echo(
-            "    Home dir:           %s (perms: %s) %s"
-            % (
-                diag.get("home_dir", "?"),
-                home_perms,
-                "PASS" if home_ok else "FAIL — must not be group/world-writable",
-            )
-        )
-
-        ssh_perms = diag.get("ssh_perms", "missing")
-        ssh_ok = ssh_perms == "700"
-        click.echo(
-            "    .ssh/ dir:          perms %s %s"
-            % (
-                ssh_perms,
-                "PASS" if ssh_ok else ("FAIL" if ssh_perms != "missing" else "MISSING"),
-            )
-        )
-
-        ak_perms = diag.get("ak_perms", "missing")
-        ak_ok = ak_perms == "600"
-        click.echo(
-            "    authorized_keys:    perms %s, %s line(s) %s"
-            % (
-                ak_perms,
-                diag.get("ak_lines", "0"),
-                "PASS" if ak_ok else ("FAIL" if ak_perms != "missing" else "MISSING"),
-            )
-        )
-
-        ak_file = diag.get("sshd_ak_file", "default")
-        ak_file_ok = ak_file == "default"
-        click.echo(
-            "    AuthorizedKeysFile: %s %s"
-            % (
-                ak_file,
-                "PASS" if ak_file_ok else "NOTE — non-default location",
-            )
-        )
-
-        sshd_strict = diag.get("sshd_strict", "default")
-        click.echo("    StrictModes:        %s" % sshd_strict)
-
-        sshd_pubkey = diag.get("sshd_pubkey", "default")
-        pubkey_setting_ok = sshd_pubkey == "default" or "yes" in sshd_pubkey.lower()
-        click.echo(
-            "    PubkeyAuth:         %s %s"
-            % (
-                sshd_pubkey,
-                "PASS" if pubkey_setting_ok else "FAIL — pubkey auth disabled!",
-            )
-        )
-
-        allow_users = diag.get("sshd_allow_users", "none")
-        allow_groups = diag.get("sshd_allow_groups", "none")
-        if allow_users != "none":
-            click.echo("    AllowUsers:         %s — verify '%s' is listed" % (allow_users, user))
-        if allow_groups != "none":
-            click.echo("    AllowGroups:        %s — verify '%s' is in a listed group" % (allow_groups, user))
-
-        # Accepted key algorithms (main config)
-        accepted_algs = diag.get("sshd_accepted_algs", "default")
-        click.echo("    AcceptedAlgorithms: %s" % accepted_algs)
-
-        # Key types in authorized_keys
-        ak_key_types = diag.get("ak_key_types", "none")
-        if ak_key_types and ak_key_types != "none":
-            click.echo("    AK key types:       %s" % ak_key_types.rstrip(","))
-
-        # Drop-in config overrides
-        dropin_files = diag.get("sshd_dropin_files", "none")
-        if dropin_files != "none":
-            click.echo("    sshd drop-ins:      %s" % dropin_files)
-            dropin_ak = diag.get("sshd_dropin_ak_file", "none")
-            if dropin_ak != "none":
-                click.echo("    ↳ AuthorizedKeysFile override: %s" % dropin_ak)
-            dropin_pubkey = diag.get("sshd_dropin_pubkey", "none")
-            if dropin_pubkey != "none":
-                click.echo("    ↳ PubkeyAuthentication override: %s" % dropin_pubkey)
-            dropin_accepted = diag.get("sshd_dropin_accepted_algs", "none")
-            if dropin_accepted != "none":
-                click.echo("    ↳ AcceptedAlgorithms override: %s" % dropin_accepted)
-            dropin_allow_users = diag.get("sshd_dropin_allow_users", "none")
-            if dropin_allow_users != "none":
-                click.echo("    ↳ AllowUsers override: %s — verify '%s' is listed" % (dropin_allow_users, user))
-            dropin_allow_groups = diag.get("sshd_dropin_allow_groups", "none")
-            if dropin_allow_groups != "none":
-                click.echo("    ↳ AllowGroups override: %s — verify '%s' is in a listed group" % (dropin_allow_groups, user))
-
-        click.echo("    Pubkey auth test:   %s" % ("PASS" if pubkey_ok else "FAIL"))
-        if cross_user:
-            click.echo("    Local key installed: %s" % ("PASS" if key_installed else "FAIL"))
-        click.echo()
-
-        # Remediation suggestions
-        if not pubkey_ok:
-            click.echo("  Suggested fixes for %s:" % h)
-            if not home_ok and home_perms != "unknown":
-                click.echo("    chmod go-w ~%s    # Fix home dir permissions (most likely cause)" % user)
-            if not ak_ok and ak_perms != "missing":
-                click.echo("    chmod 600 ~%s/.ssh/authorized_keys" % user)
-            if not ssh_ok and ssh_perms != "missing":
-                click.echo("    chmod 700 ~%s/.ssh" % user)
-            if not ak_file_ok:
-                click.echo("    Check sshd_config: keys may need to go in %s" % ak_file)
-            if not pubkey_setting_ok:
-                click.echo("    Enable PubkeyAuthentication in /etc/ssh/sshd_config and restart sshd")
-            if cross_user and not key_installed:
-                click.echo(render_identity_text("    Re-run '{app_command} setup ssh' to install your public key"))
-
-            # Drop-in specific remediation
-            dropin_ak = diag.get("sshd_dropin_ak_file", "none")
-            if dropin_ak != "none":
-                click.echo("    ** Drop-in override detected: AuthorizedKeysFile = %s" % dropin_ak)
-                click.echo("       Your key may need to go in that location instead of ~/.ssh/authorized_keys")
-                click.echo("       Check files in /etc/ssh/sshd_config.d/ on the remote host")
-            dropin_pubkey = diag.get("sshd_dropin_pubkey", "none")
-            if dropin_pubkey != "none" and "no" in dropin_pubkey.lower():
-                click.echo("    ** Drop-in override DISABLES pubkey auth: %s" % dropin_pubkey)
-                click.echo("       Check files in /etc/ssh/sshd_config.d/ on the remote host")
-            dropin_accepted = diag.get("sshd_dropin_accepted_algs", "none")
-            if dropin_accepted != "none":
-                click.echo("    ** Drop-in restricts accepted key algorithms: %s" % dropin_accepted)
-                click.echo("       Ensure your key type is in the allowed list")
-            dropin_allow_users = diag.get("sshd_dropin_allow_users", "none")
-            if dropin_allow_users != "none":
-                click.echo("    ** Drop-in restricts AllowUsers: %s — verify '%s' is listed" % (dropin_allow_users, user))
-            dropin_allow_groups = diag.get("sshd_dropin_allow_groups", "none")
-            if dropin_allow_groups != "none":
-                click.echo("    ** Drop-in restricts AllowGroups: %s — verify '%s' is in a listed group" % (dropin_allow_groups, user))
-
-            # Check for key mismatch: SSH verbose output shows which key was offered
-            if not pubkey_ok and ssh_verbose_lines and local_pubkey_source:
-                offered_key_path = None
-                for vl in ssh_verbose_lines:
-                    if "offering public key:" in vl.lower() or "will attempt key:" in vl.lower():
-                        # Extract path from lines like "debug1: Offering public key: /home/me/.ssh/id_ed25519_shared ..."
-                        parts = vl.split(":", 2)
-                        if len(parts) >= 3:
-                            tokens = parts[2].strip().split()
-                            if tokens:
-                                offered_key_path = tokens[0]
-                                break
-                if offered_key_path:
-                    # Compare the key SSH tried with what we'd install
-                    expected_private = local_pubkey_source.removesuffix(".pub") if local_pubkey_source else None
-                    if expected_private and offered_key_path != expected_private:
-                        click.echo("    ** KEY MISMATCH: SSH is offering '%s'" % offered_key_path)
-                        click.echo(render_identity_text("       but {app_command} detected '%s' as the local key." % local_pubkey_source))
-                        click.echo("       Check your ~/.ssh/config IdentityFile settings.")
-
-            # If everything looks correct but still fails, point to verbose output
-            if (
-                home_ok
-                and ssh_ok
-                and ak_ok
-                and ak_file_ok
-                and pubkey_setting_ok
-                and (not cross_user or key_installed)
-                and dropin_ak == "none"
-                and dropin_pubkey == "none"
-            ):
-                click.echo("    All standard checks passed but pubkey auth still fails.")
-                click.echo("    The SSH debug output above may reveal the cause.")
-                click.echo("    Common hidden causes:")
-                click.echo("      - ~/.ssh/config IdentityFile points to a non-standard key")
-                click.echo("        (the mesh may have installed a different key than SSH uses)")
-                click.echo("      - sshd_config 'Include' loading a drop-in that overrides settings")
-                click.echo("      - SELinux/AppArmor blocking access to authorized_keys")
-                click.echo("      - authorized_keys owned by wrong user (must be owned by %s)" % user)
-                click.echo("      - Host key changed (check ~/.ssh/known_hosts on control machine)")
-            click.echo()
-
-        # Clean up ControlMaster
-        subprocess.run(
-            ["ssh"]
-            + ssh_opts
-            + [
-                "-o",
-                "ControlPath=%s" % control_path,
-                "-O",
-                "exit",
-                "%s@%s" % (user, h),
-            ],
-            capture_output=True,
-            timeout=5,
-        )
-
-    # Summary
     click.echo("=== Diagnostics Complete ===")
-    if all_passed:
+    if report.all_passed:
         click.echo("All hosts passed pubkey authentication.")
     else:
         click.echo("Some hosts failed. See remediation suggestions above.")
 
-    # Cleanup
-    import shutil
 
-    shutil.rmtree(control_dir, ignore_errors=True)
+def _render_ssh_host_diagnosis(d, local_pubkey_source):
+    """Results and remediation for one diagnosed host (see :func:`_run_ssh_diagnose`)."""
+    user, h = d.user, d.host
+    click.echo()
+    click.echo("  Results for %s@%s:" % (user, h))
+
+    home_perms = d.fact("home_perms", "unknown")
+    click.echo(
+        "    Home dir:           %s (perms: %s) %s"
+        % (d.fact("home_dir", "?"), home_perms, "PASS" if d.home_ok else "FAIL — must not be group/world-writable")
+    )
+    ssh_perms = d.fact("ssh_perms", "missing")
+    click.echo(
+        "    .ssh/ dir:          perms %s %s" % (ssh_perms, "PASS" if d.ssh_dir_ok else ("FAIL" if ssh_perms != "missing" else "MISSING"))
+    )
+    ak_perms = d.fact("ak_perms", "missing")
+    click.echo(
+        "    authorized_keys:    perms %s, %s line(s) %s"
+        % (ak_perms, d.fact("ak_lines", "0"), "PASS" if d.authorized_keys_ok else ("FAIL" if ak_perms != "missing" else "MISSING"))
+    )
+    ak_file = d.fact("sshd_ak_file", "default")
+    click.echo("    AuthorizedKeysFile: %s %s" % (ak_file, "PASS" if d.authorized_keys_file_ok else "NOTE — non-default location"))
+    click.echo("    StrictModes:        %s" % d.fact("sshd_strict", "default"))
+    click.echo(
+        "    PubkeyAuth:         %s %s"
+        % (d.fact("sshd_pubkey", "default"), "PASS" if d.pubkey_setting_ok else "FAIL — pubkey auth disabled!")
+    )
+
+    allow_users = d.fact("sshd_allow_users", "none")
+    allow_groups = d.fact("sshd_allow_groups", "none")
+    if allow_users != "none":
+        click.echo("    AllowUsers:         %s — verify '%s' is listed" % (allow_users, user))
+    if allow_groups != "none":
+        click.echo("    AllowGroups:        %s — verify '%s' is in a listed group" % (allow_groups, user))
+
+    click.echo("    AcceptedAlgorithms: %s" % d.fact("sshd_accepted_algs", "default"))
+    ak_key_types = d.fact("ak_key_types", "none")
+    if ak_key_types and ak_key_types != "none":
+        click.echo("    AK key types:       %s" % ak_key_types.rstrip(","))
+
+    dropin_ak = d.dropin("ak_file")
+    dropin_pubkey = d.dropin("pubkey")
+    dropin_accepted = d.dropin("accepted_algs")
+    dropin_allow_users = d.dropin("allow_users")
+    dropin_allow_groups = d.dropin("allow_groups")
+    dropin_files = d.fact("sshd_dropin_files", "none")
+    if dropin_files != "none":
+        click.echo("    sshd drop-ins:      %s" % dropin_files)
+        if dropin_ak:
+            click.echo("    ↳ AuthorizedKeysFile override: %s" % dropin_ak)
+        if dropin_pubkey:
+            click.echo("    ↳ PubkeyAuthentication override: %s" % dropin_pubkey)
+        if dropin_accepted:
+            click.echo("    ↳ AcceptedAlgorithms override: %s" % dropin_accepted)
+        if dropin_allow_users:
+            click.echo("    ↳ AllowUsers override: %s — verify '%s' is listed" % (dropin_allow_users, user))
+        if dropin_allow_groups:
+            click.echo("    ↳ AllowGroups override: %s — verify '%s' is in a listed group" % (dropin_allow_groups, user))
+
+    click.echo("    Pubkey auth test:   %s" % ("PASS" if d.pubkey_ok else "FAIL"))
+    if d.cross_user:
+        click.echo("    Local key installed: %s" % ("PASS" if d.key_installed else "FAIL"))
+    click.echo()
+
+    if d.pubkey_ok:
+        return
+    click.echo("  Suggested fixes for %s:" % h)
+    if not d.home_ok and home_perms != "unknown":
+        click.echo("    chmod go-w ~%s    # Fix home dir permissions (most likely cause)" % user)
+    if not d.authorized_keys_ok and ak_perms != "missing":
+        click.echo("    chmod 600 ~%s/.ssh/authorized_keys" % user)
+    if not d.ssh_dir_ok and ssh_perms != "missing":
+        click.echo("    chmod 700 ~%s/.ssh" % user)
+    if not d.authorized_keys_file_ok:
+        click.echo("    Check sshd_config: keys may need to go in %s" % ak_file)
+    if not d.pubkey_setting_ok:
+        click.echo("    Enable PubkeyAuthentication in /etc/ssh/sshd_config and restart sshd")
+    if d.cross_user and not d.key_installed:
+        click.echo(render_identity_text("    Re-run '{app_command} setup ssh' to install your public key"))
+
+    if dropin_ak:
+        click.echo("    ** Drop-in override detected: AuthorizedKeysFile = %s" % dropin_ak)
+        click.echo("       Your key may need to go in that location instead of ~/.ssh/authorized_keys")
+        click.echo("       Check files in /etc/ssh/sshd_config.d/ on the remote host")
+    if dropin_pubkey and "no" in dropin_pubkey.lower():
+        click.echo("    ** Drop-in override DISABLES pubkey auth: %s" % dropin_pubkey)
+        click.echo("       Check files in /etc/ssh/sshd_config.d/ on the remote host")
+    if dropin_accepted:
+        click.echo("    ** Drop-in restricts accepted key algorithms: %s" % dropin_accepted)
+        click.echo("       Ensure your key type is in the allowed list")
+    if dropin_allow_users:
+        click.echo("    ** Drop-in restricts AllowUsers: %s — verify '%s' is listed" % (dropin_allow_users, user))
+    if dropin_allow_groups:
+        click.echo("    ** Drop-in restricts AllowGroups: %s — verify '%s' is in a listed group" % (dropin_allow_groups, user))
+
+    if d.key_mismatch:
+        click.echo("    ** KEY MISMATCH: SSH is offering '%s'" % d.offered_key_path)
+        click.echo(render_identity_text("       but {app_command} detected '%s' as the local key." % local_pubkey_source))
+        click.echo("       Check your ~/.ssh/config IdentityFile settings.")
+
+    # Everything looks correct but it still fails: point at the verbose output.
+    if d.standard_checks_pass:
+        click.echo("    All standard checks passed but pubkey auth still fails.")
+        click.echo("    The SSH debug output above may reveal the cause.")
+        click.echo("    Common hidden causes:")
+        click.echo("      - ~/.ssh/config IdentityFile points to a non-standard key")
+        click.echo("        (the mesh may have installed a different key than SSH uses)")
+        click.echo("      - sshd_config 'Include' loading a drop-in that overrides settings")
+        click.echo("      - SELinux/AppArmor blocking access to authorized_keys")
+        click.echo("      - authorized_keys owned by wrong user (must be owned by %s)" % user)
+        click.echo("      - Host key changed (check ~/.ssh/known_hosts on control machine)")
+    click.echo()
 
 
 @setup.command("ssh")
