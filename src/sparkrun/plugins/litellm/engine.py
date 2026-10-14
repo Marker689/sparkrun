@@ -408,12 +408,7 @@ class ProxyEngine(GatewaySupervisor):
             proc = subprocess.Popen(cmd, env=env)
             self._save_state(proc.pid)
             if autodiscover_kwargs:
-                ad_pid = self.start_autodiscover(
-                    proxy_pid=proc.pid,
-                    **autodiscover_kwargs,
-                )
-                if ad_pid:
-                    self.update_autodiscover_pid(ad_pid)
+                self._start_autodiscover_or_abort(proc.pid, autodiscover_kwargs, child=proc)
             # Follows the gateway across the daemon's managed restarts and
             # owns the cleanup (see GatewaySupervisor.supervise_foreground).
             return self.supervise_foreground(proc)
@@ -425,16 +420,33 @@ class ProxyEngine(GatewaySupervisor):
             self._save_state(pid)
 
             if autodiscover_kwargs:
-                ad_pid = self.start_autodiscover(
-                    proxy_pid=pid,
-                    **autodiscover_kwargs,
-                )
-                if ad_pid:
-                    self.update_autodiscover_pid(ad_pid)
+                self._start_autodiscover_or_abort(pid, autodiscover_kwargs)
 
             logger.info("Proxy started (PID %d) on %s:%d", pid, self.host, self.port)
             logger.info("Log: %s", self.log_path)
             return 0
+
+    def _start_autodiscover_or_abort(self, pid: int, autodiscover_kwargs: dict, *, child: subprocess.Popen | None = None) -> None:
+        """Start discovery for the gateway just spawned, or stop that gateway.
+
+        A start that fails here would otherwise leave a recorded, running
+        gateway behind an error, which a service unit restarts into the same
+        failure.
+        """
+        try:
+            ad_pid = self.start_autodiscover(proxy_pid=pid, **autodiscover_kwargs)
+        except BaseException:
+            logger.error("Auto-discover could not start; stopping the gateway just started (PID %d)", pid)
+            self.stop()
+            if child is not None:
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+            raise
+        if ad_pid:
+            self.update_autodiscover_pid(ad_pid)
 
     def _build_command(self, config_path: Path | None = None) -> list[str] | None:
         """Build the ``uvx litellm`` argv. Returns None when uvx is missing."""

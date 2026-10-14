@@ -10,12 +10,19 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import logging
 from pathlib import Path
 import time
 import uuid
 
 from sparkrun.core.process_identity import alive, process_identity
 from sparkrun.utils.fs import atomic_private_write, file_lock
+
+logger = logging.getLogger(__name__)
+
+# A claim no worker has attached to within this window was abandoned between
+# ``prepare`` and ``attach`` (the spawner died, or the worker never started).
+UNATTACHED_CLAIM_TIMEOUT_S = 120.0
 
 
 class DiscoveryOwnershipError(RuntimeError):
@@ -43,11 +50,18 @@ class DiscoverySession:
         atomic_private_write(self.path, json.dumps(value))
 
     def prepare(self, descriptor):
-        """Claim an immutable scope; active/uncertain owners are never replaced."""
+        """Claim an immutable scope; a live owner is never replaced.
+
+        A dead owner is: the record outlives a SIGKILL, OOM or power loss, and
+        nothing else clears it, so refusing would block every later start (and
+        restart-loop a service unit) until someone ran ``proxy stop`` by hand.
+        """
         with self.lock():
             previous = self.read()
             if previous and previous["state"] not in {"stopped", "disabled"}:
-                raise DiscoveryOwnershipError("Discovery already has an owner; stop it before replacing its scope")
+                if not _abandoned(previous):
+                    raise DiscoveryOwnershipError("Discovery already has an owner; stop it before replacing its scope")
+                logger.warning("Reclaiming discovery session %s from an owner that is no longer running", previous.get("generation"))
             record = {
                 "generation": uuid.uuid4().hex,
                 "descriptor": descriptor,
@@ -133,6 +147,24 @@ class DiscoverySession:
         }
 
 
+def _abandoned(record) -> bool:
+    """True when no process can still be acting on this claim."""
+    if record.get("process"):
+        return not alive(record["process"])
+    return time.time() - float(record.get("created") or 0) > UNATTACHED_CLAIM_TIMEOUT_S
+
+
+def _discovery_cluster(sctx, name):
+    """The saved cluster to sweep through, or ``None`` when it no longer resolves."""
+    if not name:
+        return None
+    try:
+        return sctx.cluster_manager.get(name)
+    except Exception:
+        logger.warning("Could not load discovery cluster %r; sweeping its hosts without it", name, exc_info=True)
+        return None
+
+
 def session_for(sctx):
     from sparkrun.api.proxy._ops import _running_engine
 
@@ -147,29 +179,31 @@ def run_session(session, generation, sctx, *, cancelled, wait, job_id=None):
     from sparkrun.core.operation import CURRENT
 
     session.attach(generation, job_id=job_id)
-    descriptor = session.matching(generation)["descriptor"]
-    grace = _EndpointRemovalGrace(descriptor["removal_grace_sweeps"])
-    seeds = descriptor.get("initial_endpoints", [])
-    if seeds:
-        from sparkrun import api
-        from sparkrun.proxy.discovery import DiscoveredEndpoint
-
-        credentials = {job.cluster_id: job.metadata.get("api_key") for job in api.list_jobs(sctx=sctx)}
-        initial = []
-        for seed in seeds:
-            seed = dict(seed)
-            required = seed.pop("credential_required", False)
-            credential = credentials.get(seed["cluster_id"])
-            if required and not credential:
-                raise ValueError("Initial endpoint credentials unavailable in workload metadata")
-            initial.append(DiscoveredEndpoint(**seed, api_key=credential))
-        grace.reconcile(initial)
-    state = GatewayState(session.directory)
-    cluster = sctx.cluster_manager.get(descriptor["cluster"]) if descriptor.get("cluster") else None
-    interval = max(1, int(descriptor["interval"]))
-    failures = 0
-    previous_event = None
+    # Everything after the claim runs under the ``finally`` that releases it:
+    # a missing seed credential or a deleted cluster must not strand it.
     try:
+        descriptor = session.matching(generation)["descriptor"]
+        grace = _EndpointRemovalGrace(descriptor["removal_grace_sweeps"])
+        seeds = descriptor.get("initial_endpoints", [])
+        if seeds:
+            from sparkrun import api
+            from sparkrun.proxy.discovery import DiscoveredEndpoint
+
+            credentials = {job.cluster_id: job.metadata.get("api_key") for job in api.list_jobs(sctx=sctx)}
+            initial = []
+            for seed in seeds:
+                seed = dict(seed)
+                required = seed.pop("credential_required", False)
+                credential = credentials.get(seed["cluster_id"])
+                if required and not credential:
+                    raise ValueError("Initial endpoint credentials unavailable in workload metadata")
+                initial.append(DiscoveredEndpoint(**seed, api_key=credential))
+            grace.reconcile(initial)
+        state = GatewayState(session.directory)
+        cluster = _discovery_cluster(sctx, descriptor.get("cluster"))
+        interval = max(1, int(descriptor["interval"]))
+        failures = 0
+        previous_event = None
         while not cancelled():
             try:
                 session.matching(generation)
