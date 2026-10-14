@@ -560,3 +560,28 @@ def test_invalid_source_compatibility_is_reported_without_crashing(tmp_path):
     result = evaluate_plugin_compatibility(metadata_for_plugin(plugin), HostSnapshot("0.4.0"))
     assert result.status == "unknown"
     assert "Invalid Sparkrun compatibility metadata" in "; ".join(result.reasons)
+
+
+def test_disabled_provider_of_the_selected_gateway_is_still_reported(monkeypatch, tmp_path):
+    """Disabled plugins are hidden from diagnostics, except the one fact that matters:
+    the configured gateway's provider is off."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+
+    from sparkrun.cli import main
+
+    plugins = [
+        SimpleNamespace(name="gwplug", enabled=False),
+        SimpleNamespace(name="other", enabled=False),
+    ]
+    monkeypatch.setattr("sparkrun.core.plugin_inventory.list_plugins", lambda config: plugins)
+    declarations = {"gwplug": {"features": {"gateway.mygw": {}}}, "other": {"features": {}}}
+    monkeypatch.setattr("sparkrun.core.plugin_lifecycle.plugin_details", lambda p: {"declarations": declarations[p.name]})
+    monkeypatch.setattr("sparkrun.proxy.config.ProxyConfig.gateway", property(lambda self: "mygw"))
+    result = CliRunner().invoke(main, ["plugins", "list"])
+    assert result.exit_code == 0, result.output
+    assert "2 disabled plugin(s) hidden" in result.output
+    assert "gwplug:\n    Selected gateway: mygw (plugin disabled)" in result.output
+    assert "other:" not in result.output
+    assert "Unavailable: plugin disabled" not in result.output

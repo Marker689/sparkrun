@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from functools import wraps
+import logging
 import sys
 
 import click
 
 from sparkrun.core.plugin_manifest import PluginError
 from ._common import json_option, print_json
+
+logger = logging.getLogger(__name__)
 
 
 def management_config(ctx):
@@ -177,17 +180,26 @@ def plugins_list(ctx, output_json, include_all, check):
 
     config = management_config(ctx)
     host = HostSnapshot.current()
+    from sparkrun.core.plugin_lifecycle import plugin_details
+    from sparkrun.core.plugin_policy import plugin_state
+    from sparkrun.proxy.config import ProxyConfig
+
+    selected = ProxyConfig(config.config_path.parent / "proxy.yaml").gateway
     rows = []
     feature_labels = []
     hidden = 0
+    # The one disabled-plugin fact worth showing even when the plugin is hidden:
+    # the configured gateway cannot start while its provider is off.
+    disabled_gateway_providers = []
     for plugin in list_plugins(config):
-        if not include_all and not plugin.enabled:
-            hidden += 1
-            continue
+        if not plugin.enabled:
+            if selected and _declares_gateway(plugin, selected, plugin_details):
+                disabled_gateway_providers.append(plugin.name)
+            if not include_all:
+                hidden += 1
+                continue
         row = plugin.to_dict()
         row["managed"] = plugin.managed
-        from sparkrun.core.plugin_lifecycle import plugin_details
-        from sparkrun.core.plugin_policy import plugin_state
 
         features_available = True
         try:
@@ -207,9 +219,6 @@ def plugins_list(ctx, output_json, include_all, check):
         row["state_source"] = state.source
         row["blocked_reason"] = state.reason
         row["selected_gateway"] = None
-        from sparkrun.proxy.config import ProxyConfig
-
-        selected = ProxyConfig(config.config_path.parent / "proxy.yaml").gateway
         if selected and "gateway." + selected in row["features"]:
             row["selected_gateway"] = selected
         row["compatibility"] = evaluate_plugin_compatibility(metadata_for_plugin(plugin), host).to_dict()
@@ -235,6 +244,7 @@ def plugins_list(ctx, output_json, include_all, check):
         click.echo("No enabled plugins found." if hidden else "No plugins found.")
         if hidden_note:
             click.echo(hidden_note)
+        _echo_disabled_gateway_providers(disabled_gateway_providers, selected, heading=True)
         return
     header = ("NAME", "VERSION", "SOURCE", "STATE", "COMPATIBILITY", "FEATURES")
     table: list[tuple[str, ...]] = [header]
@@ -271,6 +281,7 @@ def plugins_list(ctx, output_json, include_all, check):
     ]
     if diagnostics:
         click.echo("\nPlugin diagnostics:")
+    _echo_disabled_gateway_providers(disabled_gateway_providers, selected, heading=not diagnostics)
     for row in diagnostics:
         click.echo("  %s:" % row["name"])
         if row.get("blocked_reason"):
@@ -285,6 +296,27 @@ def plugins_list(ctx, output_json, include_all, check):
                 click.echo("      - %s" % reason)
         if row.get("load_check"):
             click.echo("    Load check: %s" % row["load_check"])
+
+
+def _echo_disabled_gateway_providers(names, gateway, *, heading: bool) -> None:
+    """Report disabled plugins that provide the configured gateway (it cannot start)."""
+    if not names:
+        return
+    if heading:
+        click.echo("\nPlugin diagnostics:")
+    for name in names:
+        click.echo("  %s:" % name)
+        click.echo("    Selected gateway: %s (plugin disabled)" % gateway)
+
+
+def _declares_gateway(plugin, gateway: str, plugin_details) -> bool:
+    """Whether *plugin* declares the ``gateway.<gateway>`` capability flag."""
+    try:
+        details = plugin_details(plugin)
+    except (PluginError, OSError, ValueError):
+        logger.debug("Could not read declarations of disabled plugin %s", plugin.name, exc_info=True)
+        return False
+    return "gateway." + gateway in details["declarations"].get("features", {})
 
 
 @plugins.command("add", short_help="Install a plugin from a Git repository.")

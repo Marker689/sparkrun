@@ -12,6 +12,19 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Removed the hidden, long-deprecated `recipe update` command; use `registry update
+  [NAME]`, or `update` for the application.
+- `plugins list` and `setup features list` show only enabled plugins and flags by default
+  (text and `--json`), with a hint counting what was hidden; `--all` lists everything.
+  Disabled plugins no longer appear under "Plugin diagnostics", except one providing the
+  configured gateway.
+- Job log/stop hints, job labels and the `cluster monitor` TUI use the application
+  profile's command and resource prefix instead of a hard-coded `sparkrun`.
+- `proxy ui --json` and `setup version --json` use the shared JSON output.
+- The deprecated `eugr-vllm` runtime no longer warns at launch; `recipe validate` and the
+  launch summary report it.
+- Package metadata lists macOS and Windows as supported operating systems.
+
 - `sparkrun.plugins` is the single documented import surface for plugin authors; other
   module paths are internal. `register_daemon_op`, `register_daemon_route` and
   `registered_daemon_ops` are no longer exported there (use `register_plugin_daemon_op` /
@@ -111,7 +124,6 @@ first tagged release containing them, regardless of their original commit date.
   forward telemetry environment overrides to systemd workers. See
   [the daemon guide](docs/DAEMON.md) for limits and recovery.
 
-
 - `sparkrun setup wizard` no longer re-prompts for an SSH mesh and CX7
   configuration that already work. A mesh every leg of which passes is skipped.
   A CX7 phase whose checks pass runs the read-only cluster plan without asking:
@@ -167,16 +179,6 @@ first tagged release containing them, regardless of their original commit date.
   heterogeneous delegated launches, without changing positional dry-run arguments
   or offline behavior (#304).
 
-- Fixed model distribution transferring no weights when a host's HF cache uses
-  huggingface_hub's shared blob store (1.32 and later, on by default): both
-  transfer paths now pass `--copy-unsafe-links`, materialising the blob links
-  that leave the model directory while keeping the in-tree snapshot links as
-  links, with one copy per repo blob on the destination. Weight-existence
-  checks reject dangling links, and GGUF weights/projectors are filtered before
-  fallback or precision selection. Re-sync repairs previously broken targets
-  without deleting the cache. These presence checks do not establish complete
-  snapshots or read permissions; cross-repo deduplication remains source-side
-  (#299, #300).
 - Honor explicit vLLM `kv_cache_memory_bytes` as a per-GPU allocation, separate
   from context demand. Hybrid linear/MLA caches report unknown context capacity
   instead of applying MLA sizing to every layer (#297).
@@ -267,7 +269,6 @@ system, gateway registry, and execution-strategy extension points shipped in
 - Added cached recipe catalogs, registry/capacity operations, and richer proxy
   endpoint metadata for controller clients, including named clusters, recipe
   revisions, and native runtime APIs. Recipe plugins can register passive items.
-- Added `setup plugins list` and JSON output for plugin/feature inventory.
 
 ### Changed
 
@@ -285,9 +286,6 @@ system, gateway registry, and execution-strategy extension points shipped in
 - Docker defaults to a bundled seccomp profile allowing io_uring. Controller-local
   custom profiles travel with generated launch commands to every node; explicit
   policy choices remain supported. vLLM no longer supplies `OMP_NUM_THREADS=4`.
-- RDMA `perftest` is enabled on every feature channel. NCCL and `all` suites now
-  have their own `cli.setup.rdma_test.nccl` gate, enabled by default only on alpha;
-  help and API refusal follow the same suite-availability rules.
 - Hardened native executor ownership, process-group, and PID persistence
   contracts, including rollback after failed record writes. Managed native
   launch requires detached mode and anchored control paths.
@@ -299,6 +297,10 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- Tests: the suite no longer reads or writes the developer's `~/.sparkrun-runtime` (a
+  test-only lease root, inherited by subprocesses and inert outside pytest), daemon tests
+  kill the detached workers they spawn, and a log-reader cancellation test no longer races
+  the killed child's exit.
 - One plugin identity conflict or a malformed `integrations:` no longer fails
   initialization for every command; the offending plugins are skipped and recorded, and
   launches that need them are refused.
@@ -429,7 +431,6 @@ system, gateway registry, and execution-strategy extension points shipped in
   or explicit trust.
 - Public recipe planning and execution wrap known recipe-decoding/resolution
   failures in `SparkrunError`, retaining their cause and preserving interrupts.
-- Repaired tab-broken shell continuations, including recipe hook commands.
 - Status reports without an explicit context use the application's configured
   cache for pending operations and job metadata. Intent matching respects the
   requested hosts and their order when given a wider status snapshot.
