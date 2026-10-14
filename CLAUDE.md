@@ -1377,6 +1377,12 @@ Six rules:
   choices stay out of the fingerprint and intent id — the same rule that keeps
   serve flags out of `generate_intent_id`.
 
+A strategy or command that starts workload processes **outside** `api.run`
+never reaches the `before_start` barrier; it calls
+`api.replace_intent_deployments(plan)` itself, immediately before its processes
+start (strict by default, own `workload_id` included). A temporary workload that
+must not share the real deployment's id gets one from `api.fresh_workload_id(plan)`.
+
 The activation path writes job metadata itself and must write **all** of it
 (cluster, ssh_user, fingerprint, owner): `save_job_metadata` rewrites the file
 wholesale, so an omission is an erasure whose symptom — a teardown that
@@ -2047,6 +2053,11 @@ Three mechanisms, deliberately separate:
   to it. The flag registry has **no** notion of mutually-exclusive flags —
   nothing stops a user enabling two, so resolution refuses to guess (mirrors
   `_default_executor_name`).
+
+`api.discovery_snapshot(metadata_only=True)` is the gateway's all-jobs discovery:
+no status sweep, still HTTP-probed. `recipe_name` is added in the api layer, not in
+`DiscoverySnapshot.to_dict`, because that projection is also the strictly-decoded
+`workloads.*` endpoint contract.
 
 "Unregistered" and "disabled" are deliberately distinct errors: a name can be
 known to the flag registry while its plugin failed to load, and telling that

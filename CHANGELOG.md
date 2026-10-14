@@ -12,6 +12,15 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Public seams for integrations: `api.wait_ready(workload_id=...)` waits on a recorded
+  workload; `api.recipe_protocols()` / `api.RecipeProtocols`; `api.discovery_snapshot(
+  metadata_only=True)` (also on the daemon `discovery.snapshot` op), whose endpoints now
+  include `recipe_name`; `Recipe.from_state()`; `sparkrun.application.child_environment`.
+  Experimental: `api.replace_intent_deployments()` and `api.fresh_workload_id()`, for
+  processes started outside `api.run`. `sparkrun.plugins` also exports the
+  execution-strategy types, `BuilderPlugin`, `Recipe`, `SparkrunContext`, `HostHardware`,
+  the host-session seam, workload identity and config/timing/gateway helpers.
+
 - `update` and `setup update` are one implementation: both accept
   `--no-update-registries`, skip the self-upgrade on non-uv installs (still updating
   plugins and registries), and exit non-zero when the core upgrade fails (`update` used to
