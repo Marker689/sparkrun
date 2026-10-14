@@ -1106,6 +1106,47 @@ def _current_umask() -> int:
     return mask
 
 
+def _document_bool(raw: dict, key: str, default: bool) -> bool:
+    """Read a hand-editable boolean; ``"false"`` must not read as true.
+
+    An unrecognised value keeps the field's default, which for ``trusted`` is
+    the safe answer.
+    """
+    value = raw.get(key, default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "yes", "on", "1"):
+        return True
+    if text in ("false", "no", "off", "0"):
+        return False
+    logger.warning("Registry %r: unrecognised %s value %r; using %s", raw.get("name"), key, value, default)
+    return default
+
+
+def _entry_from_document(raw: dict) -> RegistryEntry:
+    """Build one entry from registries.yaml, raising RegistryError for anything unusable."""
+    for key in ("name", "url", "subpath"):
+        if not isinstance(raw.get(key), str):
+            raise RegistryError("entry %r has no string %r" % (raw.get("name"), key))
+    optional = {}
+    for key in ("description", "tuning_subpath", "benchmark_subpath", "mods_subpath"):
+        value = raw.get(key) or ""
+        if not isinstance(value, str):
+            raise RegistryError("entry %r: %r must be a string" % (raw["name"], key))
+        optional[key] = value
+    return RegistryEntry(
+        name=raw["name"],
+        url=raw["url"],
+        subpath=raw["subpath"],
+        enabled=_document_bool(raw, "enabled", True),
+        visible=_document_bool(raw, "visible", True),
+        trusted=_document_bool(raw, "trusted", False),
+        format=str(raw.get("format") or DEFAULT_RECIPE_FORMAT),
+        **optional,
+    )
+
+
 class RegistryManager:
     """Manages recipe registries with git-based syncing.
 
@@ -1384,7 +1425,7 @@ class RegistryManager:
             return []
         return [url for url in sources if url in pending]
 
-    def _default_registries(self, *, allow_discovery: bool = True) -> list[RegistryEntry]:
+    def _default_registries(self, *, allow_discovery: bool = True, persist: bool = True) -> list[RegistryEntry]:
         """Return the default registry list.
 
         On first run (no ``registries.yaml``), attempts manifest-based
@@ -1398,6 +1439,8 @@ class RegistryManager:
         to ``registries.yaml`` so subsequent loads read from file.
 
         Automatic discovery is attempted once per manager to bound slow calls.
+        ``persist=False`` never writes, for the fallback over a file that exists
+        but could not be read: replacing it would erase the user's registries.
         Explicit update retries unfinished sources. With ``allow_discovery=False``,
         return profile fallbacks and plugin declarations without consuming an attempt.
         """
@@ -1426,7 +1469,7 @@ class RegistryManager:
         # Persist so subsequent _load_registries() reads from file.  The overlay
         # is applied *after* this, so a declared registry is never written into
         # a fresh registries.yaml either.
-        if discovered:
+        if discovered and persist:
             self._save_registries(combined, pending_bootstrap_urls=list(self._bootstrap_failures))
 
         return self._apply_plugin_overlay(combined)
@@ -1512,22 +1555,16 @@ class RegistryManager:
         if not isinstance(data, dict):
             raise RegistryError("Registry configuration must be a mapping")
         registries = data.get("registries", [])
+        if not isinstance(registries, list):
+            raise RegistryError("'registries' must be a list")
         entries: list[RegistryEntry] = []
         for r in registries:
-            entry = RegistryEntry(
-                name=r["name"],
-                url=r["url"],
-                subpath=r["subpath"],
-                description=r.get("description", ""),
-                enabled=r.get("enabled", True),
-                visible=r.get("visible", True),
-                tuning_subpath=r.get("tuning_subpath", ""),
-                benchmark_subpath=r.get("benchmark_subpath", ""),
-                mods_subpath=r.get("mods_subpath", ""),
-                trusted=r.get("trusted", False),
-                format=str(r.get("format") or DEFAULT_RECIPE_FORMAT),
-            )
+            # A non-mapping item means the document itself is malformed (not a
+            # completed inventory with one bad entry), so it fails the whole load.
+            if not isinstance(r, dict):
+                raise RegistryError("registry entry is not a mapping: %r" % (r,))
             try:
+                entry = _entry_from_document(r)
                 assert_safe_registry_entry(entry)
             except RegistryError as e:
                 logger.warning("Skipping unusable registry entry in %s: %s", self._registries_path, e)
@@ -1783,8 +1820,33 @@ class RegistryManager:
             # user's file and outlive the plugin.
             return self._apply_plugin_overlay(filtered)
         except Exception as e:
-            logger.warning("Failed to load registries.yaml: %s", e)
-            return self._default_registries(allow_discovery=allow_discovery)
+            backup = self._backup_unreadable_registries()
+            logger.warning(
+                "Failed to load %s (%s); using the default registries for this run. %s",
+                self._registries_path,
+                e,
+                "A copy was saved to %s." % backup if backup else "The file is left as it is.",
+            )
+            return self._default_registries(allow_discovery=allow_discovery, persist=False)
+
+    def _backup_unreadable_registries(self) -> Path | None:
+        """Copy an unreadable registries.yaml aside before anything can replace it.
+
+        The fallback itself never writes, but a later mutating command saves
+        whatever it loaded — the defaults — over the file.  The copy keeps the
+        user's entries recoverable.  Best effort: a failed copy is logged and
+        the fallback still proceeds.
+        """
+        backup = self._registries_path.with_name(self._registries_path.name + ".unreadable")
+        try:
+            content = self._registries_path.read_bytes()
+            if not backup.exists() or backup.read_bytes() != content:
+                backup.write_bytes(content)
+                os.chmod(backup, 0o600)
+            return backup
+        except OSError as exc:
+            logger.warning("Could not back up unreadable %s: %s", self._registries_path, exc)
+            return None
 
     def _save_registries(
         self, entries: list[RegistryEntry], *, suppressed: list[str] | None = None, pending_bootstrap_urls: list[str] | None = None
