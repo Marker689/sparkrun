@@ -433,9 +433,8 @@ with `declared_hash` added for declared inputs. See the
 ### Workload IDs: `workload_id`
 
 `api.stop`, `api.logs` and `api.open_log_target` all take the workload's id as
-`workload_id` (the value of `RunResult.cluster_id`). `api.stop(cluster_id=...)`
-still works for one release and emits a `DeprecationWarning`; passing both
-spellings with different values raises `ValueError`. `api.stop(..., dry_run=True)`
+`workload_id` (the value of `RunResult.cluster_id`). The 0.3.x
+`api.stop(cluster_id=...)` keyword is removed. `api.stop(..., dry_run=True)`
 resolves the target, hosts and executor without tearing anything down and returns
 a `StopResult` with `dry_run=True`.
 

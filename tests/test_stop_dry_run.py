@@ -1,12 +1,9 @@
 """``stop --dry-run`` previews a teardown; ``workload_id`` is the canonical stop id."""
 
-from unittest.mock import patch
-
 import pytest
 from click.testing import CliRunner
 
 from sparkrun import api
-from sparkrun.orchestration.ssh import RemoteResult
 
 
 def _no_teardown(*args, **kwargs):
@@ -26,17 +23,9 @@ def test_api_stop_dry_run_resolves_without_teardown(tmp_path, monkeypatch, idle_
     assert result.cluster_id == "sparkrun_previewonly"
 
 
-def test_api_stop_cluster_id_is_deprecated_alias(tmp_path, idle_occupancy):
-    fake = RemoteResult(host="h1", returncode=0, stdout="", stderr="")
-    with patch("sparkrun.orchestration.ssh.run_remote_script", return_value=fake):
-        with pytest.warns(DeprecationWarning, match="workload_id"):
-            result = api.stop(cluster_id="sparkrun_legacyspelling", hosts=("h1",), cache_dir=str(tmp_path))
-    assert result.cluster_id == "sparkrun_legacyspelling"
-
-
-def test_api_stop_rejects_conflicting_ids(tmp_path):
-    with pytest.raises(ValueError, match="only workload_id"):
-        api.stop(workload_id="sparkrun_a", cluster_id="sparkrun_b", hosts=("h1",), cache_dir=str(tmp_path))
+def test_api_stop_has_no_cluster_id_keyword():
+    with pytest.raises(TypeError):
+        api.stop(cluster_id="sparkrun_legacyspelling", hosts=("h1",))
 
 
 def test_cli_stop_target_dry_run_does_not_stop(monkeypatch):

@@ -259,8 +259,8 @@ system, gateway registry, and execution-strategy extension points shipped in
 ### Fixed
 
 - `sparkrun stop <target> --dry-run` no longer tears the workload down. `api.stop`
-  gains `dry_run` and takes `workload_id` (matching `api.logs`); `cluster_id=`
-  still works with a `DeprecationWarning`.
+  gains `dry_run` and takes `workload_id` (matching `api.logs`); the
+  `cluster_id=` keyword is removed.
 - Security: a recipe's container image reference could run shell commands on every
   target host through the image sync and distribution scripts. Image references are
   now validated and never re-expanded by the shell.

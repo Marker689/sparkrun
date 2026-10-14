@@ -137,7 +137,7 @@ def test_auth_scopes_body_limits_and_ownership(binding):
         assert client.get("/v1/ops", headers=headers).status_code == 200
         assert client.post("/v1/ops/workloads.stop_matching", headers=headers, json={}).status_code == 403
         headers = {"Authorization": "Bearer " + operator}
-        response = client.post("/v1/ops/workloads.stop_matching", headers=headers, json={"cluster_id": "example"})
+        response = client.post("/v1/ops/workloads.stop_matching", headers=headers, json={"workload_id": "example"})
         assert response.status_code == 202, response.text
         job = response.json()["job_id"]
         assert "nonce" not in client.get("/v1/jobs/" + job, headers=headers).json()

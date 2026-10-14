@@ -308,7 +308,7 @@ own namespaces and routing-policy fields.
 | `workloads.status` | `/v1/workloads/status` | job / read | none | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 | `workloads.stop` | `/v1/workloads/stop` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 | `workloads.stop_all` | `/v1/workloads/stop_all` | job / operate | auto | `hosts!: string[]`, `cluster: string`, `dry_run: boolean` |
-| `workloads.stop_matching` | `/v1/workloads/stop_matching` | job / operate | auto | `cluster_id: string`, `recipe: string`, `hosts: string[]`, `cluster: string`, `overrides: object` |
+| `workloads.stop_matching` | `/v1/workloads/stop_matching` | job / operate | auto | `workload_id: string`, `recipe: string`, `hosts: string[]`, `cluster: string`, `overrides: object` |
 | `workloads.wake` | `/v1/workloads/wake` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
 
 ## Bundled Kubernetes plugin

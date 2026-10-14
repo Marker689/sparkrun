@@ -43,7 +43,7 @@ SPECS = [
     ("cluster.report", "status_report", "job", "read", "hosts cluster executor", "hosts"),
     ("workloads.find_intent", "find_running_intent", "job", "read", "intent_id hosts cluster", "intent_id hosts"),
     ("catalog.search", "search_recipes", "query", "read", "query registry runtime include_hidden include_local unique_names", ""),
-    ("workloads.stop_matching", "stop", "job", "operate", "cluster_id recipe hosts cluster overrides", ""),
+    ("workloads.stop_matching", "stop", "job", "operate", "workload_id recipe hosts cluster overrides", ""),
     ("workloads.stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", "hosts"),
     ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster cluster_ids", ""),
     (
