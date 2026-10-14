@@ -154,7 +154,7 @@ class RunOptions:
 
     # Additional launcher passthroughs (CLI-shaped knobs threaded into
     # ``launch_inference`` for parity with the existing CLI command).
-    cluster_id_override: str | None = None
+    workload_id_override: str | None = None
     """Override the deterministic cluster ID (static container name)."""
     transfer_interface: str | None = None
     """Network interface used for resource transfers (e.g. ``cx7`` / ``mgmt``)."""
@@ -225,7 +225,7 @@ class RunPlan:
     deterministic (greedy) placement token and the superseded-deployment
     sweep are derived from the *candidates*, so that ``stop`` / ``status``
     — which only know the cluster's full host list — compute the same
-    cluster_id the launch used."""
+    workload_id the launch used."""
     host_list: tuple[str, ...]
     """Hosts the workload will actually run on (the scheduler's
     ``hosts_used``, after solo / ``max_nodes`` constraints)."""
@@ -254,7 +254,7 @@ class RunPlan:
     """Token disambiguating this launch from other instances of the intent.
     Derived from candidate hosts and any executor destination key under a
     deterministic scheduler, random under a status-aware one."""
-    cluster_id: str = ""
+    workload_id: str = ""
     """``sparkrun_<intent_id>_<placement_token>`` — the id the launch will
     use, so a renderer can show it (and ``--ensure`` can look it up) before
     anything starts."""
@@ -388,7 +388,7 @@ class ResolvedLaunchSpec:
     format: int
     kind: str
     recipe: str
-    cluster_id: str
+    workload_id: str
     runtime: str
     engine: str
     model: str
@@ -414,7 +414,7 @@ class RunResult:
     empty/zero defaults; the new plan's fingerprint and timeline are not reused.
     """
 
-    cluster_id: str
+    workload_id: str
     host_list: tuple[str, ...]
     """Hosts actually used (after scheduling / solo / max_nodes constraints)."""
     placement: "RankAssignment | None"
@@ -464,18 +464,18 @@ class RunResult:
     that need the raw orchestration object (CLI ``post_launch_lifecycle``,
     crash diagnostics).  External callers should treat this as private."""
     intent_id: str = ""
-    """Deterministic hex prefix of :attr:`cluster_id`.  Same value
+    """Deterministic hex prefix of :attr:`workload_id`.  Same value
     across every run of the same recipe + parallelism + port — useful
     for status / stop / logs discovery without re-running the
     scheduler.  Empty string only when the caller supplied a
-    non-canonical ``cluster_id_override``."""
+    non-canonical ``workload_id_override``."""
     placement_token: str = ""
     """Random hex token disambiguating this specific launch from other
     instances of the same intent.  Empty string only when the caller
-    supplied a non-canonical ``cluster_id_override``."""
+    supplied a non-canonical ``workload_id_override``."""
     already_running: bool = False
     """``True`` when :attr:`RunOptions.ensure` found this intent already
-    serving, so nothing was launched.  :attr:`cluster_id` / :attr:`host_list`
+    serving, so nothing was launched.  :attr:`workload_id` / :attr:`host_list`
     then describe the **pre-existing** deployment, and
     :attr:`launch_result` is ``None`` (there was no launch)."""
     recipe_fingerprint: str = ""
@@ -498,7 +498,7 @@ class RunResult:
 class StopResult:
     """Outputs of :func:`sparkrun.api.stop`."""
 
-    cluster_id: str
+    workload_id: str
     hosts_targeted: tuple[str, ...]
     """Hosts the stop command was issued against."""
     containers_removed: int
@@ -574,25 +574,25 @@ class JobInfo:
 
     Reflects the on-disk job metadata schema in
     ``~/.cache/sparkrun/jobs/``.  Fields beyond the canonical
-    cluster_id / recipe / hosts are exposed verbatim under
+    workload_id / recipe / hosts are exposed verbatim under
     :attr:`metadata` for callers that need them.
     """
 
-    cluster_id: str
+    workload_id: str
     recipe: str | None = None
     runtime: str | None = None
     hosts: tuple[str, ...] = ()
     started_at: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     intent_id: str | None = None
-    """Deterministic hex prefix of the cluster_id.  ``None`` indicates
+    """Deterministic hex prefix of the workload_id.  ``None`` indicates
     a job metadata file whose contents do not parse as a canonical
-    sparkrun cluster_id (corrupted YAML, hand-edited, or written by an
+    sparkrun workload_id (corrupted YAML, hand-edited, or written by an
     incompatible tool)."""
     placement_token: str | None = None
     """Random hex suffix unique to this launch.  ``None`` indicates a
     job metadata file whose contents do not parse as a canonical
-    sparkrun cluster_id (data-quality issue)."""
+    sparkrun workload_id (data-quality issue)."""
 
 
 @dataclass(frozen=True)

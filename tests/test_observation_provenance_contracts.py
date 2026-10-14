@@ -25,10 +25,10 @@ def test_host_launch_preserves_unobserved_live_native_metadata(lifecycle_env, mo
     native = run(env.options, sctx=env.sctx)
     for path in env.sctx.config.cache_dir.glob("jobs/*.yaml"):
         data = yaml.safe_load(path.read_text())
-        if data["cluster_id"] == native.cluster_id:
+        if data["cluster_id"] == native.workload_id:
             data["started_at"] = time.time() - 31 * 86400
             path.write_text(yaml.safe_dump(data))
-    assert load_job_metadata(native.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    assert load_job_metadata(native.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     assert env.objects[env.target]
     env.sctx.config.set("jobs.autoprune", True)
 
@@ -46,8 +46,8 @@ def test_host_launch_preserves_unobserved_live_native_metadata(lifecycle_env, mo
     docker = run(replace(env.options, executor="docker", executor_config={}), sctx=env.sctx)
     assert docker.rc == 0
     assert env.objects[env.target], "the native workload is still live"
-    assert load_job_metadata(native.cluster_id, cache_dir=str(env.sctx.config.cache_dir)) is not None
-    assert api.stop(workload_id=native.cluster_id, sctx=env.sctx).success
+    assert load_job_metadata(native.workload_id, cache_dir=str(env.sctx.config.cache_dir)) is not None
+    assert api.stop(workload_id=native.workload_id, sctx=env.sctx).success
 
 
 def test_completion_rejects_other_native_destination_snapshot(lifecycle_env):
@@ -60,14 +60,14 @@ def test_completion_rejects_other_native_destination_snapshot(lifecycle_env):
     other_options = replace(env.options, executor_config={"kubectl_path": "/fake/kubectl", "k8s_namespace": "second-ns"})
     other_plan = plan(other_options, sctx=env.sctx)
     second = run(other_options, sctx=env.sctx, plan=other_plan)
-    assert first.cluster_id != second.cluster_id
+    assert first.workload_id != second.workload_id
     first_plan = plan(env.options, sctx=env.sctx)
     api.status(["localhost"], cluster=first_plan.cluster, sctx=env.sctx)
     calls = len(env.calls)
     snapshot = _completion_running(other_plan.cluster)
     assert len(env.calls) > calls, "completion must query the second namespace"
-    job = next(job for job in api.list_jobs(sctx=env.sctx) if job.cluster_id == second.cluster_id)
-    assert snapshot.cluster_ids == frozenset({second.cluster_id})
+    job = next(job for job in api.list_jobs(sctx=env.sctx) if job.workload_id == second.workload_id)
+    assert snapshot.cluster_ids == frozenset({second.workload_id})
     assert _job_is_live(job, snapshot, {"localhost"})
     assert env.objects[(env.kubeconfig, "launch-context", "second-ns")]
 
@@ -151,8 +151,8 @@ def test_native_prune_removes_only_confirmed_absent_destination(lifecycle_env):
     status = api.status(["localhost"], cluster=scoped, sctx=env.sctx)
     assert not status.running_cluster_ids()
     _prune_stale_job_metadata(env.sctx.config, observed_running=status.observation, keep=(), sctx=env.sctx)
-    assert load_job_metadata(first.cluster_id, sctx=env.sctx) is None
-    assert load_job_metadata(second.cluster_id, sctx=env.sctx) is not None
+    assert load_job_metadata(first.workload_id, sctx=env.sctx) is None
+    assert load_job_metadata(second.workload_id, sctx=env.sctx) is not None
 
 
 def test_discovered_native_target_survives_defaults_and_missing_metadata(lifecycle_env):
@@ -163,7 +163,7 @@ def test_discovered_native_target_survives_defaults_and_missing_metadata(lifecyc
     env = lifecycle_env
     launched = run(env.options, sctx=env.sctx)
     discovered = api.status_report(["localhost"], cluster=plan(env.options, sctx=env.sctx).cluster, sctx=env.sctx)
-    remove_job_metadata(launched.cluster_id, sctx=env.sctx)
+    remove_job_metadata(launched.workload_id, sctx=env.sctx)
     env.sctx.config.set("k8s", {"kubeconfig": "/other", "context": "other", "namespace": "other"})
     result = api.stop_all(["localhost"], discovered=discovered, sctx=env.sctx)
     assert result.success and result.jobs_stopped == 1
@@ -365,7 +365,7 @@ def test_unscoped_native_discovery_requires_target_or_saved_metadata(lifecycle_e
     launched = run(env.options, sctx=env.sctx)
     discovered = api.status_report(["localhost"], cluster=plan(env.options, sctx=env.sctx).cluster, sctx=env.sctx)
     discovered.coverage = ()  # legacy/manual snapshot with no destination evidence
-    remove_job_metadata(launched.cluster_id, sctx=env.sctx)
+    remove_job_metadata(launched.workload_id, sctx=env.sctx)
     env.sctx.config.set("k8s", {"context": "other", "namespace": "other"})
     result = api.stop_all(["localhost"], discovered=discovered, sctx=env.sctx)
     assert not result.success and result.jobs_stopped == 0

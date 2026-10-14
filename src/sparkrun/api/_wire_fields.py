@@ -1,4 +1,9 @@
-"""Reviewed DTO field allowlists; adding a Python model field never exports it implicitly."""
+"""Reviewed DTO field allowlists; adding a Python model field never exports it implicitly.
+
+An entry is an attribute name, or ``(wire_key, attribute)`` when the wire name
+differs. Core and executor types keep ``cluster_id`` in Python; the public wire
+calls the same value ``workload_id``.
+"""
 
 from dataclasses import fields as _dataclass_fields
 from sparkrun.models.cache_reports import CacheEntry, CacheReport
@@ -71,7 +76,7 @@ DTO_FIELDS = {
         "results",
         "outputs",
         "run_result",
-        "cluster_id",
+        "workload_id",
         "host_list",
         "container_image",
         "container_image_sha",
@@ -109,7 +114,7 @@ DTO_FIELDS = {
         "init_port",
         "executor",
         "rootful",
-        "cluster_id_override",
+        "workload_id_override",
         "transfer_interface",
         "local_cache_dir",
         "sync_tuning",
@@ -129,7 +134,7 @@ DTO_FIELDS = {
         "scheduler_defaulted",
         "intent_id",
         "placement_token",
-        "cluster_id",
+        "workload_id",
         "host_hardware",
         "override_resolution",
         "offline",
@@ -147,7 +152,7 @@ DTO_FIELDS = {
     "sparkrun.api._models.ResolvedLaunchSpec": [
         "format",
         "kind",
-        "cluster_id",
+        "workload_id",
         "engine",
         "model",
         "model_revision",
@@ -159,7 +164,7 @@ DTO_FIELDS = {
         "execution",
     ],
     "sparkrun.api._models.RunResult": [
-        "cluster_id",
+        "workload_id",
         "host_list",
         "placement",
         "executor",
@@ -180,7 +185,7 @@ DTO_FIELDS = {
         "runtime",
         "scheduler",
     ],
-    "sparkrun.api._models.StopResult": ["cluster_id", "hosts_targeted", "containers_removed", "errors", "hosts_failed"],
+    "sparkrun.api._models.StopResult": ["workload_id", "hosts_targeted", "containers_removed", "errors", "hosts_failed"],
     "sparkrun.api._models.StopAllResult": [
         "discovered",
         "jobs_stopped",
@@ -190,7 +195,7 @@ DTO_FIELDS = {
         "discovery_errors",
         "dry_run",
     ],
-    "sparkrun.api._models.JobInfo": ["cluster_id", "hosts", "started_at", "metadata", "intent_id", "placement_token", "recipe", "runtime"],
+    "sparkrun.api._models.JobInfo": ["workload_id", "hosts", "started_at", "metadata", "intent_id", "placement_token", "recipe", "runtime"],
     "sparkrun.api._models.RecipeSummary": [
         "name",
         "file",
@@ -208,7 +213,7 @@ DTO_FIELDS = {
         "host",
         "port",
         "models",
-        "cluster_id",
+        "workload_id",
         "healthy",
         "cluster_name",
         "recipe_revision",
@@ -376,8 +381,8 @@ DTO_FIELDS = {
         "provider_ref",
         "offline",
     ],
-    "sparkrun.core.cluster_manager.ClusterGroup": ["cluster_id", "members", "meta"],
-    "sparkrun.core.cluster_manager.ClusterSoloEntry": ["cluster_id", "host", "name", "status", "image", "meta"],
+    "sparkrun.core.cluster_manager.ClusterGroup": [("workload_id", "cluster_id"), "members", "meta"],
+    "sparkrun.core.cluster_manager.ClusterSoloEntry": [("workload_id", "cluster_id"), "host", "name", "status", "image", "meta"],
     "sparkrun.core.cluster_manager.ClusterStatusResult": [
         "groups",
         "solo_entries",
@@ -452,7 +457,7 @@ DTO_FIELDS = {
     "sparkrun.core.monitoring.MonitorFrame": ["hosts", "queried_at"],
     "sparkrun.core.launcher.LaunchResult": [
         "rc",
-        "cluster_id",
+        ("workload_id", "cluster_id"),
         "host_list",
         "is_solo",
         "overrides",
@@ -517,7 +522,7 @@ DTO_FIELDS = {
     "sparkrun.models.artifacts.ValidatedModelBinding": ["model", "host", "cache_root", "manifest", "report", "snapshot_override"],
     "sparkrun.models.preparation.PreparedModel": ["manifest", "bindings"],
     "sparkrun.proxy.discovery.DiscoveredEndpoint": [
-        "cluster_id",
+        ("workload_id", "cluster_id"),
         "model",
         "served_model_name",
         "host",
@@ -573,7 +578,7 @@ DTO_FIELDS = {
     "sparkrun.core.hardware_assessment.HardwareAssessment": ["hosts", "detected", "assumed", "warnings", "errors"],
     "sparkrun.core.cluster_status.ContainerDetail": ["name", "role", "status", "image", "executor", "allocations"],
     "sparkrun.core.cluster_status.RunningWorkload": [
-        "cluster_id",
+        ("workload_id", "cluster_id"),
         "intent_id",
         "recipe_name",
         "runtime_name",
@@ -589,7 +594,7 @@ DTO_FIELDS = {
     "sparkrun.core.cluster_status.HostOccupancy": ["host", "workloads", "used_slots", "free_slots", "free_memory_gb", "gpus"],
     "sparkrun.core.cluster_status.ClusterStatus": ["hosts", "queried_at", "executor", "errors", "coverage"],
     "sparkrun.core.status_observation.ExecutorCoverage": ["target", "status_scope", "requested_hosts", "hosts", "ssh_user", "ssh_kwargs"],
-    "sparkrun.core.status_observation.RunningSnapshot": ["cluster_ids", "coverage"],
+    "sparkrun.core.status_observation.RunningSnapshot": [("workload_ids", "cluster_ids"), "coverage"],
     "sparkrun.core.allocations.GpuAllocation": ["rank", "gpu_index", "util_fraction", "memory_gb"],
     "sparkrun.plugins.k8s.orchestration.inventory.NodeInfo": [
         "name",

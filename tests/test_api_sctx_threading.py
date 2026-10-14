@@ -289,7 +289,7 @@ def test_list_jobs_uses_sctx_cache_dir_when_no_explicit_arg(tmp_path: Path):
         config = _StubConfig()
 
     result = api.list_jobs(sctx=_StubSctx())  # type: ignore[arg-type]
-    cluster_ids = {j.cluster_id for j in result}
+    cluster_ids = {j.workload_id for j in result}
     assert "sparkrun_aaaaaaaaaaaa" in cluster_ids
 
 
@@ -322,7 +322,7 @@ def test_list_jobs_explicit_cache_dir_wins_over_sctx(tmp_path: Path):
         config = _StubConfig()
 
     result = api.list_jobs(cache_dir=str(explicit_cache), sctx=_StubSctx())  # type: ignore[arg-type]
-    cluster_ids = {j.cluster_id for j in result}
+    cluster_ids = {j.workload_id for j in result}
     assert "sparkrun_bbbbbbbbbbbb" in cluster_ids
 
 

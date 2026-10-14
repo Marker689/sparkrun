@@ -83,7 +83,10 @@ def to_wire(value, *, depth=0) -> Any:
         return to_wire(value.export(), depth=depth + 1)
     if name not in DTO_FIELDS:
         raise WireEncodingError(f"No public wire codec registered for {name}")
-    result = {key: to_wire(getattr(value, key), depth=depth + 1) for key in DTO_FIELDS[name]}
+    result = {}
+    for entry in DTO_FIELDS[name]:
+        key, attribute = entry if isinstance(entry, tuple) else (entry, entry)
+        result[key] = to_wire(getattr(value, attribute), depth=depth + 1)
     if name.endswith((".RunPlan", ".BuildPlan")):
         result["recipe"] = value.recipe.name
         result["runtime"] = value.runtime.runtime_name

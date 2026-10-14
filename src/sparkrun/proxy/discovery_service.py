@@ -189,7 +189,7 @@ def run_session(session, generation, sctx, *, cancelled, wait, job_id=None):
             from sparkrun import api
             from sparkrun.proxy.discovery import DiscoveredEndpoint
 
-            credentials = {job.cluster_id: job.metadata.get("api_key") for job in api.list_jobs(sctx=sctx)}
+            credentials = {job.workload_id: job.metadata.get("api_key") for job in api.list_jobs(sctx=sctx)}
             initial = []
             for seed in seeds:
                 seed = dict(seed)

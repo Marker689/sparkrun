@@ -579,7 +579,7 @@ class ClusterStatusResult:
 
         for entry in self.solo_entries:
             out["solo_entries"].append(
-                {"cluster_id": entry.cluster_id, "meta": entry.meta, "host": entry.host, "status": entry.status, "image": entry.image}
+                {"workload_id": entry.cluster_id, "meta": entry.meta, "host": entry.host, "status": entry.status, "image": entry.image}
             )
 
         return out

@@ -60,9 +60,9 @@ def test_native_plan_run_manifest_and_lifecycle_reference(native_env, monkeypatc
     result = run(options, sctx=env.sctx, plan=planned)
     manifest = yaml.safe_load(env.submitted[0].manifests_yaml)
     name = manifest["metadata"]["name"]
-    assert result.cluster_id == planned.cluster_id != name
-    assert name == result.metadata["k8s_jobset"] == native_jobset_name(planned.cluster_id, "gb10")
-    assert manifest["metadata"]["annotations"]["sparkrun.cluster_id"] == planned.cluster_id
+    assert result.workload_id == planned.workload_id != name
+    assert name == result.metadata["k8s_jobset"] == native_jobset_name(planned.workload_id, "gb10")
+    assert manifest["metadata"]["annotations"]["sparkrun.cluster_id"] == planned.workload_id
     assert manifest["metadata"]["annotations"]["sparkrun.recipe_fingerprint"] == planned.recipe_fingerprint
     pod = manifest["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
     master = next(e["value"] for e in pod["containers"][0]["env"] if e["name"] == "MASTER_ADDR")
@@ -141,7 +141,7 @@ def test_handler_reuse_preserves_existing_metadata(run_env, monkeypatch, fingerp
     planned = plan(options, sctx=env.sctx)
     old_id = generate_cluster_id(planned.intent_id, "c" * 12)
     old = api.RunResult(
-        cluster_id=old_id,
+        workload_id=old_id,
         host_list=("localhost",),
         placement=None,
         scheduler="greedy",

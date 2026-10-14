@@ -58,7 +58,7 @@ def test_guarded_stop_and_selector_stop_keep_distinct_contracts():
     register_core_ops()
     guarded = get_daemon_op("workloads.stop")
     selected = get_daemon_op("workloads.stop_matching")
-    assert guarded.request_schema["required"] == ["recipe", "recipe_revision", "cluster_id"]
+    assert guarded.request_schema["required"] == ["recipe", "recipe_revision", "workload_id"]
     assert selected.request_schema["required"] == []
     assert guarded.result_schema != selected.result_schema
     assert get_daemon_op("cluster.observe").result_schema != get_daemon_op("cluster.report").result_schema

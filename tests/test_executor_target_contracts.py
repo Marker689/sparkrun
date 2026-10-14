@@ -38,11 +38,11 @@ def test_native_ensure_uses_requested_target(lifecycle_env, dimension):
     second_options, second_target = _other_target(env, options, dimension)
     env.calls.clear()
     result = run(replace(second_options, ensure=True), sctx=env.sctx)
-    assert not result.already_running and result.cluster_id != first.cluster_id
+    assert not result.already_running and result.workload_id != first.workload_id
     assert env.objects[env.target] and env.objects[second_target]
     assert env.calls and all(target == second_target for target, args in env.calls)
     reused = run(replace(second_options, ensure=True), sctx=env.sctx)
-    assert reused.already_running and reused.cluster_id == result.cluster_id
+    assert reused.already_running and reused.workload_id == result.workload_id
 
 
 @pytest.mark.parametrize("dimension", ["namespace", "context", "kubeconfig"])
@@ -52,29 +52,29 @@ def test_native_targets_have_independent_ids_and_lifecycle(lifecycle_env, dimens
     first = run(options, sctx=env.sctx)
     second_options, second_target = _other_target(env, options, dimension)
     second = run(second_options, sctx=env.sctx)
-    assert first.cluster_id != second.cluster_id
+    assert first.workload_id != second.workload_id
     assert env.objects[env.target] and env.objects[second_target]
-    saved = load_job_metadata(first.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    saved = load_job_metadata(first.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     assert (
         saved["executor_config"]["kubeconfig"],
         saved["executor_config"]["k8s_context"],
         saved["executor_config"]["k8s_namespace"],
     ) == env.target
     env.calls.clear()
-    stopped = stop(workload_id=first.cluster_id, sctx=replace(env.sctx, timing=None))
+    stopped = stop(workload_id=first.workload_id, sctx=replace(env.sctx, timing=None))
     assert stopped.success and stopped.containers_removed == 1
     assert not env.objects[env.target] and env.objects[second_target]
-    assert load_job_metadata(second.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
-    assert stop(workload_id=second.cluster_id, sctx=replace(env.sctx, timing=None)).success
+    assert load_job_metadata(second.workload_id, cache_dir=str(env.sctx.config.cache_dir))
+    assert stop(workload_id=second.workload_id, sctx=replace(env.sctx, timing=None)).success
     assert not env.objects[second_target]
-    assert load_job_metadata(first.cluster_id, cache_dir=str(env.sctx.config.cache_dir)) is None
+    assert load_job_metadata(first.workload_id, cache_dir=str(env.sctx.config.cache_dir)) is None
 
 
 @pytest.mark.parametrize("failure", ["policy", "runtime_prepare", "distribution", "replacement"])
 def test_failed_preparation_preserves_live_metadata(lifecycle_env, monkeypatch, tmp_path, failure):
     env = lifecycle_env
     first = run(_options(env), sctx=env.sctx)
-    before = load_job_metadata(first.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    before = load_job_metadata(first.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     assert before["native_resource"] and before["executor"] == "k8s"
     monkeypatch.setattr(env.launch.runtime, "prepare", lambda *a, **kw: None)
     launched = Mock(return_value=0)
@@ -91,7 +91,7 @@ def test_failed_preparation_preserves_live_metadata(lifecycle_env, monkeypatch, 
         solo=True,
         executor="docker",
         trust=True,
-        cluster_id_override=first.cluster_id,
+        workload_id_override=first.workload_id,
         executor_config={"security_opt": ["seccomp=" + str(tmp_path / "missing-policy.json")]} if failure == "policy" else None,
         sync_tuning=False,
     )
@@ -112,7 +112,7 @@ def test_failed_preparation_preserves_live_metadata(lifecycle_env, monkeypatch, 
         replaced.assert_called_once()
     else:
         replaced.assert_not_called()
-    after = load_job_metadata(first.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    after = load_job_metadata(first.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     assert after == before
     assert env.objects[env.target]
 
@@ -124,7 +124,7 @@ def test_plan_pins_default_context_before_configuration_changes(lifecycle_env):
     env.current_context = "changed-context"
     env.sctx.config.set("k8s", {"kubeconfig": "/different", "context": "changed-context", "namespace": "different"})
     result = run(env.options, sctx=env.sctx, plan=planned)
-    assert result.cluster_id == planned.cluster_id
+    assert result.workload_id == planned.workload_id
     assert env.objects[env.target]
     assert all(target == env.target for target, args in env.calls if args[0] in {"get", "apply"})
 
@@ -173,7 +173,7 @@ def test_effective_target_precedence_reaches_occupancy_and_launch(lifecycle_env,
 
     monkeypatch.setattr("sparkrun.api._hosts.resolve_effective_hosts", placement)
     second = run(replace(options, ensure=True), sctx=env.sctx)
-    assert not second.already_running and first.cluster_id != second.cluster_id
+    assert not second.already_running and first.workload_id != second.workload_id
     assert seen == ["other-namespace"]
     assert env.objects[(env.kubeconfig, "launch-context", "other-namespace")]
 
@@ -182,7 +182,7 @@ def test_connection_binary_does_not_change_destination_identity(lifecycle_env):
     env = lifecycle_env
     first = plan(env.options, sctx=env.sctx)
     second = plan(replace(env.options, executor_config={"kubectl_path": "/another/kubectl"}), sctx=env.sctx)
-    assert first.cluster_id == second.cluster_id
+    assert first.workload_id == second.workload_id
     assert first.cluster.executor_config["kubectl_path"] == "/fake/kubectl"
     assert second.cluster.executor_config["kubectl_path"] == "/another/kubectl"
     with pytest.raises(TypeError):
@@ -201,13 +201,13 @@ def test_cli_early_ensure_observes_recipe_target(lifecycle_env, monkeypatch):
     first = run(env.options, sctx=env.sctx)
     env.recipe.executor_config = {"k8s_namespace": "other-namespace"}
     second = run(env.options, sctx=env.sctx)
-    assert second.cluster_id != first.cluster_id
+    assert second.workload_id != first.workload_id
     monkeypatch.setattr("sparkrun.cli._run._get_context", lambda ctx: env.sctx)
     monkeypatch.setattr("sparkrun.cli._run._load_recipe", lambda *a, **kw: (env.recipe, None, None))
     monkeypatch.setattr(api, "plan", Mock(side_effect=AssertionError("ensure should return before placement")))
     result = CliRunner().invoke(main, ["run", "test", "--hosts", "localhost", "--ensure", "--no-ready-wait"])
     assert result.exit_code == 0, (result.output, result.exception)
-    assert "Job already running (cluster_id: %s)" % second.cluster_id in result.output
+    assert "Job already running (cluster_id: %s)" % second.workload_id in result.output
     api.plan.assert_not_called()
 
 
@@ -220,11 +220,11 @@ def test_recipe_lifecycle_discovery_uses_recipe_destination(lifecycle_env, monke
     sources = Mock(return_value=[])
     monkeypatch.setattr("sparkrun.plugins.k8s.executor.K8sExecutor.native_log_sources", sources)
     assert list(api.logs(recipe=env.recipe, hosts=("localhost",), sctx=env.sctx)) == []
-    assert sources.call_args.args[0] == second.cluster_id
+    assert sources.call_args.args[0] == second.workload_id
     stopped = stop(recipe=env.recipe, hosts=("localhost",), sctx=env.sctx)
-    assert stopped.success and stopped.cluster_id == second.cluster_id
+    assert stopped.success and stopped.workload_id == second.workload_id
     assert env.objects[env.target]
-    assert load_job_metadata(first.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    assert load_job_metadata(first.workload_id, cache_dir=str(env.sctx.config.cache_dir))
 
 
 @pytest.mark.parametrize("interrupt", [False, True])
@@ -253,7 +253,7 @@ def test_normal_submission_records_effective_executor_and_preserves_ip_maps(life
     planned = plan(options, sctx=env.sctx)
 
     def submit(**kwargs):
-        saved = load_job_metadata(planned.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+        saved = load_job_metadata(planned.workload_id, cache_dir=str(env.sctx.config.cache_dir))
         assert saved["executor"] == "docker" and saved["executor_config"]["shm_size"] == "7g"
         assert saved["ib_ip_map"] == {"localhost": "ib-address"}
         assert saved["mgmt_ip_map"] == {"localhost": "mgmt-address"}
@@ -267,7 +267,7 @@ def test_normal_submission_records_effective_executor_and_preserves_ip_maps(life
             run(options, sctx=env.sctx, plan=planned)
     else:
         assert run(options, sctx=env.sctx, plan=planned).rc == 0
-    saved = load_job_metadata(planned.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    saved = load_job_metadata(planned.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     assert saved["executor"] == "docker" and saved["executor_config"]["shm_size"] == "7g"
     assert saved["ib_ip_map"] == {"localhost": "ib-address"} and saved["mgmt_ip_map"] == {"localhost": "mgmt-address"}
     if not interrupt:

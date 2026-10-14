@@ -78,7 +78,7 @@ def lifecycle_env(run_env, monkeypatch, tmp_path):
 
 
 def _record(env, result):
-    return load_job_metadata(result.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    return load_job_metadata(result.workload_id, cache_dir=str(env.sctx.config.cache_dir))
 
 
 @pytest.mark.parametrize("target_source", ["settings", "cluster", "recipe", "caller", "current-context"])
@@ -110,7 +110,7 @@ def test_native_run_stop_by_id_recovers_exact_target_after_context_change(lifecy
     env.sctx.config.set("k8s", {"kubeconfig": "/different/config", "context": "other", "namespace": "other"})
     env.current_context = "other"
     restarted = replace(env.sctx, timing=None)
-    stopped = stop(workload_id=result.cluster_id, sctx=restarted)
+    stopped = stop(workload_id=result.workload_id, sctx=restarted)
     assert stopped.success and stopped.containers_removed == 1
     assert not env.objects[env.target] and _record(env, result) is None
     assert all(target == env.target for target, args in env.calls if args[0] == "delete")
@@ -127,7 +127,7 @@ def test_native_stop_failure_keeps_metadata_and_resource(lifecycle_env, failure)
         resource["metadata"]["annotations"]["sparkrun.cluster_id"] = "another-workload"
     else:
         env.fail_delete, env.survive_delete = failure == "delete", failure == "confirmation"
-    stopped = stop(workload_id=result.cluster_id, sctx=env.sctx)
+    stopped = stop(workload_id=result.workload_id, sctx=env.sctx)
     assert not stopped.success and stopped.errors and stopped.hosts_failed == ("localhost",)
     assert _record(env, result) is not None and env.objects[env.target]
     if failure in {"owner", "identity"}:
@@ -138,7 +138,7 @@ def test_native_stop_is_idempotent_for_absent_controller(lifecycle_env):
     env = lifecycle_env
     result = run(env.options, sctx=env.sctx)
     env.objects[env.target].clear()
-    stopped = stop(workload_id=result.cluster_id, sctx=env.sctx)
+    stopped = stop(workload_id=result.workload_id, sctx=env.sctx)
     assert stopped.success and stopped.containers_removed == 0
     assert _record(env, result) is None
 
@@ -148,15 +148,15 @@ def test_native_status_ensure_and_replacement_share_portable_identity(lifecycle_
     first = run(env.options, sctx=env.sctx)
     assert first.rc == 0
     status = api.status(["localhost"], executor="k8s", sctx=env.sctx)
-    assert status.running_cluster_ids() == (first.cluster_id,) and not status.errors
+    assert status.running_cluster_ids() == (first.workload_id,) and not status.errors
     reused = run(replace(env.options, ensure=True), sctx=env.sctx)
-    assert reused.already_running and reused.cluster_id == first.cluster_id and reused.timeline is None
+    assert reused.already_running and reused.workload_id == first.workload_id and reused.timeline is None
     assert reused.recipe_fingerprint == first.recipe_fingerprint
     assert sum(args[0] == "apply" for _, args in env.calls) == 1
     second_plan = plan(env.options, sctx=env.sctx)
     # Deterministic placement reuses the ID; native replacement must still
     # delete its controller before submitting the replacement.
-    assert second_plan.cluster_id == first.cluster_id
+    assert second_plan.workload_id == first.workload_id
     replacement = run(env.options, sctx=env.sctx, plan=second_plan)
     assert replacement.rc == 0 and not replacement.already_running
     operations = [args[0] for _, args in env.calls if args[0] in {"apply", "delete"}]
@@ -179,12 +179,12 @@ def test_native_benchmark_cleanup_and_lost_metadata_recovery(lifecycle_env):
 
     env = lifecycle_env
     result = run(env.options, sctx=env.sctx)
-    _stop_inference(list(result.host_list), result.cluster_id, False, sctx=env.sctx, strict=True)
+    _stop_inference(list(result.host_list), result.workload_id, False, sctx=env.sctx, strict=True)
     assert not env.objects[env.target] and _record(env, result) is None
     result = run(env.options, sctx=env.sctx)
-    remove_job_metadata(result.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+    remove_job_metadata(result.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     cluster = ClusterDefinition(name="k8s", hosts=["localhost"], executor="k8s")
-    stopped = stop(workload_id=result.cluster_id, hosts=result.host_list, cluster=cluster, sctx=env.sctx)
+    stopped = stop(workload_id=result.workload_id, hosts=result.host_list, cluster=cluster, sctx=env.sctx)
     assert stopped.success and stopped.containers_removed == 1 and not env.objects[env.target]
 
 
@@ -195,7 +195,7 @@ def test_ambiguous_submission_remains_stoppable(lifecycle_env):
     with pytest.raises(KeyboardInterrupt):
         run(env.options, sctx=env.sctx, plan=planned)
     assert env.objects[env.target]
-    assert stop(workload_id=planned.cluster_id, sctx=env.sctx).success
+    assert stop(workload_id=planned.workload_id, sctx=env.sctx).success
     assert not env.objects[env.target]
 
 
@@ -205,9 +205,9 @@ def test_native_replacement_handles_new_placement_id(lifecycle_env):
     env = lifecycle_env
     first = run(env.options, sctx=env.sctx)
     planned = plan(env.options, sctx=env.sctx)
-    planned = replace(planned, placement_token="c" * 12, cluster_id=generate_cluster_id(planned.intent_id, "c" * 12))
+    planned = replace(planned, placement_token="c" * 12, workload_id=generate_cluster_id(planned.intent_id, "c" * 12))
     second = run(env.options, sctx=env.sctx, plan=planned)
-    assert first.cluster_id != second.cluster_id
+    assert first.workload_id != second.workload_id
     assert _record(env, first) is None and _record(env, second) is not None
     assert len(env.objects[env.target]) == 1
 
@@ -228,7 +228,7 @@ def test_native_status_filters_other_application_and_host_scope(lifecycle_env):
     env.objects[env.target]["disjoint"] = disjoint
     snapshot = api.status(["localhost"], executor="k8s", sctx=env.sctx)
     assert not snapshot.errors and len(snapshot.hosts[0].workloads) == 1
-    assert snapshot.running_cluster_ids() == (launched.cluster_id,)
+    assert snapshot.running_cluster_ids() == (launched.workload_id,)
 
 
 def test_native_status_failure_is_not_reported_as_empty_cluster(lifecycle_env, monkeypatch):
@@ -260,7 +260,7 @@ def test_common_logs_resolve_saved_native_destination_without_guessing_pod_names
 
     monkeypatch.setattr("sparkrun.plugins.k8s.orchestration.logs._query_json", query)
     with pytest.raises(api.SparkrunError, match="pending, queued"):
-        api.logs(workload_id=result.cluster_id, sctx=env.sctx)
+        api.logs(workload_id=result.workload_id, sctx=env.sctx)
     assert seen and all(destination == env.target for destination in seen)
     assert _record(env, result) is not None
     assert not any("logs" in args for _, args in env.calls)
@@ -272,7 +272,7 @@ def test_native_stop_all_uses_controller_teardown(lifecycle_env, lost_metadata, 
     env = lifecycle_env
     launched = run(env.options, sctx=env.sctx)
     if lost_metadata:
-        remove_job_metadata(launched.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
+        remove_job_metadata(launched.workload_id, cache_dir=str(env.sctx.config.cache_dir))
     env.fail_delete = fail_delete
     cluster = ClusterDefinition(name="native", hosts=["localhost"], executor="k8s")
     preview = api.stop_all(["localhost"], cluster=cluster, dry_run=True, sctx=env.sctx)
@@ -292,7 +292,7 @@ def test_invalid_native_stop_receipt_preserves_metadata(lifecycle_env, monkeypat
     env = lifecycle_env
     result = run(env.options, sctx=env.sctx)
     monkeypatch.setattr("sparkrun.plugins.k8s.executor.K8sExecutor.stop_workload", lambda *args, **kwargs: count)
-    stopped = stop(workload_id=result.cluster_id, sctx=env.sctx)
+    stopped = stop(workload_id=result.workload_id, sctx=env.sctx)
     assert not stopped.success and stopped.errors
     assert _record(env, result) is not None
 
@@ -311,4 +311,4 @@ def test_stop_prepares_provider_transport_before_native_teardown(lifecycle_env, 
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(K8sExecutor, "stop_workload", stop_workload)
-    assert stop(workload_id=result.cluster_id, sctx=env.sctx).success
+    assert stop(workload_id=result.workload_id, sctx=env.sctx).success

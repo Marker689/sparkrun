@@ -21,7 +21,7 @@ def _plan(sctx, cluster, *, recipe=None):
         host_list=("localhost",),
         is_solo=True,
         placement=None,
-        cluster_id="review",
+        workload_id="review",
         scheduler="greedy",
     )
 
@@ -173,7 +173,7 @@ def test_handler_controls_replacement_after_preparation(monkeypatch, dry_run, fa
     replacement = Mock(side_effect=lambda **kw: (calls.append("replace"), set()))
     monkeypatch.setattr("sparkrun.api._run._evict_superseded_deployments", replacement)
     expected = RunResult(
-        cluster_id=plan.cluster_id,
+        workload_id=plan.workload_id,
         host_list=plan.host_list,
         placement=plan.placement,
         scheduler=plan.scheduler,
@@ -206,7 +206,7 @@ def test_handler_controls_replacement_after_preparation(monkeypatch, dry_run, fa
         assert "submit" not in calls
     else:
         result = run(options, sctx=sctx, plan=plan)
-        assert result.cluster_id == expected.cluster_id and result.host_list == expected.host_list
+        assert result.workload_id == expected.workload_id and result.host_list == expected.host_list
         assert result.timeline is not None
         assert calls == (["validation", "staging"] if dry_run else ["validation", "staging", "replace", "submit"])
         assert replacement.call_count == (0 if dry_run else 1)
@@ -232,7 +232,7 @@ def test_k8s_invalid_launch_keeps_previous_deployment(monkeypatch, dry_run, fail
         is_solo=failure != "topology",
         intent_id=intent,
         placement_token="b" * 12,
-        cluster_id="sparkrun_%s_%s" % (intent, "b" * 12),
+        workload_id="sparkrun_%s_%s" % (intent, "b" * 12),
     )
     monkeypatch.setattr("sparkrun.core.run_handlers.registered_run_handlers", lambda _: {"k8s": RunHandler("k8s", run_k8s)})
     monkeypatch.setattr("sparkrun.orchestration.executor.resolve_executor_name", lambda **kw: "k8s")

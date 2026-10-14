@@ -60,7 +60,7 @@ def discover_endpoints(*, sctx=None):
     return discover(sctx=sctx, ssh_kwargs=build_ssh_kwargs(sctx.config))
 
 
-def discovery_snapshot(*, hosts=None, cluster=None, cluster_ids=None, sctx=None):
+def discovery_snapshot(*, hosts=None, cluster=None, workload_ids=None, sctx=None):
     """Public credential-free endpoint observation with explicit live coverage."""
     from sparkrun.proxy.discovery import discover_snapshot
     from sparkrun.orchestration.primitives import build_ssh_kwargs
@@ -77,7 +77,7 @@ def discovery_snapshot(*, hosts=None, cluster=None, cluster_ids=None, sctx=None)
         host_list=selected,
         host_filter=selected or None,
         cluster_def=definition,
-        cluster_ids=set(cluster_ids) if cluster_ids is not None else None,
+        cluster_ids=set(workload_ids) if workload_ids is not None else None,
         ssh_kwargs=ssh,
         sctx=sctx,
     ).to_dict()

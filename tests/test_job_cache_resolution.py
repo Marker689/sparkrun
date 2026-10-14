@@ -35,7 +35,7 @@ def test_implicit_context_finds_configured_jobs(job, monkeypatch, initialized, o
     _, root, cluster_id, _ = job
     context = initialize() if initialized else None
     if operation == "list_jobs":
-        assert [j.cluster_id for j in api.list_jobs()] == [cluster_id]
+        assert [j.workload_id for j in api.list_jobs()] == [cluster_id]
         if context is not None:
             assert api.list_jobs() == api.list_jobs(sctx=context)
     else:
@@ -67,7 +67,7 @@ def test_passive_metadata_remains_available_after_plugin_failure(job, monkeypatc
     monkeypatch.setattr(bootstrap, "_register_plugins", Mock(side_effect=RuntimeError("broken plugin")))
     with pytest.raises(RuntimeError, match="broken plugin"):
         initialize()
-    assert [j.cluster_id for j in api.list_jobs()] == [cluster_id]
+    assert [j.workload_id for j in api.list_jobs()] == [cluster_id]
     assert job_metadata.load_job_metadata(cluster_id)["hosts"] == ["fixture-host"]
     job_metadata.remove_job_metadata(cluster_id)
     assert not path.exists()

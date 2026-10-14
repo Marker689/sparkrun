@@ -80,7 +80,7 @@ def list_jobs(
 
     # Stable order: most-recent first, untimed jobs last.
     def _sort_key(j: JobInfo):
-        return (j.started_at is None, -(j.started_at or 0.0), j.cluster_id)
+        return (j.started_at is None, -(j.started_at or 0.0), j.workload_id)
 
     entries.sort(key=_sort_key)
     return entries
@@ -175,7 +175,7 @@ def _job_info_from_file(meta_path: Path) -> JobInfo | None:
             pass
 
     return JobInfo(
-        cluster_id=str(cluster_id),
+        workload_id=str(cluster_id),
         intent_id=intent_id,
         placement_token=placement_token,
         recipe=data.get("recipe"),

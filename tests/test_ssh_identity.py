@@ -76,8 +76,8 @@ def test_plan_pins_implicit_alias_user_and_preserves_key_rotation(run_env, monke
 
     monkeypatch.setattr("sparkrun.core.launcher.launch_inference", launch)
     assert run(options, sctx=env.sctx, plan=planned).rc == 0
-    assert seen == [("alice", "/rotated/key", planned.cluster_id)]
-    assert plan(replace(options, cluster=cluster), sctx=env.sctx).cluster_id != planned.cluster_id
+    assert seen == [("alice", "/rotated/key", planned.workload_id)]
+    assert plan(replace(options, cluster=cluster), sctx=env.sctx).workload_id != planned.workload_id
     assert env.sctx.config.ssh_user is None
 
 

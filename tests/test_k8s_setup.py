@@ -1422,7 +1422,7 @@ def test_run_k8s_solo_homogeneous(tmp_path, monkeypatch):
             host_list=tuple(["s0"]),
             placement=None,
             is_solo=True,
-            cluster_id="intent-token",
+            workload_id="intent-token",
             intent_id="intent",
             placement_token="token",
             scheduler="greedy",
@@ -1462,7 +1462,7 @@ def test_run_k8s_rejects_multinode(tmp_path, monkeypatch):
                 host_list=tuple(["s0", "s1"]),
                 placement=_P(),
                 is_solo=False,
-                cluster_id="c",
+                workload_id="c",
                 intent_id="i",
                 placement_token="t",
                 scheduler="greedy",
@@ -1489,7 +1489,7 @@ def test_run_k8s_rejects_hybrid_cluster(tmp_path, monkeypatch):
                 host_list=tuple(["s0"]),
                 placement=None,
                 is_solo=True,
-                cluster_id="c",
+                workload_id="c",
                 intent_id="i",
                 placement_token="t",
                 scheduler="greedy",
@@ -1525,7 +1525,7 @@ def test_api_run_branches_to_k8s_when_flag_on(tmp_path, monkeypatch):
     monkeypatch.setattr("sparkrun.orchestration.executor.resolve_executor_name", lambda **k: "k8s")
 
     sentinel = api.RunResult(
-        cluster_id="native-result",
+        workload_id="native-result",
         host_list=("s0",),
         placement=None,
         scheduler="greedy",
@@ -1546,7 +1546,7 @@ def test_api_run_branches_to_k8s_when_flag_on(tmp_path, monkeypatch):
 
     sctx = _sctx(tmp_path)
     out = api.run(api.RunOptions(recipe=_FakeRecipe(), hosts=("s0",), solo=True, dry_run=True, executor="k8s"), sctx=sctx)
-    assert out.cluster_id == sentinel.cluster_id and out.rc == 42 and called.get("hit")
+    assert out.workload_id == sentinel.workload_id and out.rc == 42 and called.get("hit")
     assert out.timeline is not None and out.recipe_fingerprint
 
 

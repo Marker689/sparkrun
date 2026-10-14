@@ -113,7 +113,7 @@ def _resolve(match_or_exc, *, solo=False, hosts=None, emitter=None):
 
 def test_adopts_the_running_deployments_hosts_and_cluster_id():
     """The reported bug: benchmark the host serving the workload, not the cluster."""
-    match = IntentMatch(intent_id="abc", cluster_id="sparkrun_abc_def456", hosts=(_RUNNING_HOST,))
+    match = IntentMatch(intent_id="abc", workload_id="sparkrun_abc_def456", hosts=(_RUNNING_HOST,))
     (hosts, is_solo, cluster_id), _ = _resolve(match)
 
     assert hosts == [_RUNNING_HOST]
@@ -126,14 +126,14 @@ def test_lookup_sees_the_full_candidate_list():
 
     Narrowing before the lookup is how ``--ensure`` used to miss jobs entirely.
     """
-    match = IntentMatch(intent_id="abc", cluster_id="sparkrun_abc_def456", hosts=(_RUNNING_HOST,))
+    match = IntentMatch(intent_id="abc", workload_id="sparkrun_abc_def456", hosts=(_RUNNING_HOST,))
     _, seen = _resolve(match)
 
     assert seen["hosts"] == _HOSTS
 
 
 def test_multi_host_deployment_is_not_reported_as_solo():
-    match = IntentMatch(intent_id="abc", cluster_id="sparkrun_abc_def456", hosts=tuple(_HOSTS[:2]))
+    match = IntentMatch(intent_id="abc", workload_id="sparkrun_abc_def456", hosts=tuple(_HOSTS[:2]))
     (hosts, is_solo, _cid), _ = _resolve(match)
 
     assert hosts == _HOSTS[:2]
@@ -172,7 +172,7 @@ def test_fallback_still_honours_solo():
 def test_several_matching_deployments_are_reported():
     match = IntentMatch(
         intent_id="abc",
-        cluster_id="sparkrun_abc_def456",
+        workload_id="sparkrun_abc_def456",
         hosts=(_RUNNING_HOST,),
         other_cluster_ids=("sparkrun_abc_999999",),
     )

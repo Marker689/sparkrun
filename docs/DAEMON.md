@@ -262,7 +262,7 @@ Storage has not been migrated wholesale to SQLite:
 | Workload metadata (recipe, hosts, deployment identity) | `<cache-root>/jobs/*.yaml` | Existing shared workload APIs, including daemon calls |
 | Configuration, cluster definitions, benchmark state | Existing YAML/JSON files | Existing core APIs |
 
-A daemon `job_id` identifies an operation invocation. A workload `cluster_id`
+A daemon `job_id` identifies an operation invocation. A `workload_id`
 identifies the deployment produced or affected by an operation. For example,
 a daemon `workloads.run` job may finish successfully while the deployed inference service
 keeps running; its result includes the workload identity. `daemon jobs list`
@@ -697,7 +697,7 @@ use its private token file and the controller URL (or `--socket` in place of `--
 ```bash
 sparkrun daemon --url http://127.0.0.1:8376 --token-file /private/sparkroute.token \
   call workloads.reconcile --data \
-  '{"recipe":"@registry/recipe","recipe_revision":"REVISION","cluster_id":"WORKLOAD_ID","acknowledge_effects":true}' --wait
+  '{"recipe":"@registry/recipe","recipe_revision":"REVISION","workload_id":"WORKLOAD_ID","acknowledge_effects":true}' --wait
 ```
 
 Reconciliation checks complete placement evidence and matching live identity; it

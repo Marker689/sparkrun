@@ -218,7 +218,7 @@ def test_stop_by_cluster_id_connects_as_the_launching_cluster(tmp_path: Path):
         ssh_user=CLUSTER_USER,
     )
 
-    ssh_kwargs = _stop_capturing_ssh(tmp_path, cluster_id=CLUSTER_ID)
+    ssh_kwargs = _stop_capturing_ssh(tmp_path, workload_id=CLUSTER_ID)
     assert ssh_kwargs.get("ssh_user") == CLUSTER_USER
 
 
@@ -232,7 +232,7 @@ def test_stop_by_cluster_id_uses_recorded_user_when_the_cluster_is_gone(tmp_path
         ssh_user=CLUSTER_USER,
     )
 
-    ssh_kwargs = _stop_capturing_ssh(tmp_path, cluster_id=CLUSTER_ID)
+    ssh_kwargs = _stop_capturing_ssh(tmp_path, workload_id=CLUSTER_ID)
     assert ssh_kwargs.get("ssh_user") == CLUSTER_USER
 
 
@@ -242,7 +242,7 @@ def test_stop_with_explicit_hosts_still_recovers_the_job_cluster(tmp_path: Path)
     mgr.create("lab", ["h1", "h2"], user=CLUSTER_USER)
     save_job_metadata(CLUSTER_ID, _recipe(), ["h1", "h2"], cache_dir=str(tmp_path), cluster_name="lab", ssh_user=CLUSTER_USER)
 
-    ssh_kwargs = _stop_capturing_ssh(tmp_path, cluster_id=CLUSTER_ID, hosts=("h1",))
+    ssh_kwargs = _stop_capturing_ssh(tmp_path, workload_id=CLUSTER_ID, hosts=("h1",))
     assert ssh_kwargs.get("ssh_user") == CLUSTER_USER
 
 
@@ -290,5 +290,5 @@ def test_stop_never_raises_on_metadata_without_a_cluster(tmp_path: Path, recorde
     """Pre-fix metadata (no ``cluster`` key) still stops, exactly as before."""
     save_job_metadata(CLUSTER_ID, _recipe(), ["h1"], cache_dir=str(tmp_path), ssh_user=recorded_user)
 
-    ssh_kwargs = _stop_capturing_ssh(tmp_path, cluster_id=CLUSTER_ID)
+    ssh_kwargs = _stop_capturing_ssh(tmp_path, workload_id=CLUSTER_ID)
     assert ssh_kwargs.get("ssh_user") == recorded_user

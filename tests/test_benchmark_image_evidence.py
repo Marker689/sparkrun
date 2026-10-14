@@ -22,7 +22,7 @@ def test_measurement_accepts_only_consistent_image_evidence(scheduled_env, monke
 
     env = scheduled_env
     cid = derive_cluster_id(env.recipe, ["localhost"])
-    env.launch.cluster_id = env.run.return_value.cluster_id = cid
+    env.launch.cluster_id = env.run.return_value.workload_id = cid
     monkeypatch.setattr("sparkrun.api._benchmark._resolve_running_deployment", lambda *a, **kw: (["localhost"], True, cid))
     original = "original/image@sha256:" + "a" * 64 if case == "digest_alias" else env.launch.container_image
     env.launch.container_image = original

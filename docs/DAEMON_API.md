@@ -76,7 +76,7 @@ admitted identity. Integration cutover drains those jobs before revoking credent
 
 `workloads.run` and `workloads.ensure_ready` use this manager for new workload
 ownership. The shared workload row (inventory, lifecycle control and the
-`workload` field of ensure-ready) reports deployed `cluster_id`, revision, owner,
+`workload` field of ensure-ready) reports deployed `workload_id`, revision, owner,
 `owned` relative to this manager, provider, permitted actions, and recorded state.
 `ensure_ready` separately returns a verified endpoint, original `observed_at` and
 `adopted`. Adoption never rewrites an existing owner. A different manager may route
@@ -221,7 +221,7 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `discovery.snapshot` | `/v1/discovery/snapshot` | job / read | auto | `hosts: string[]`, `cluster: string`, `cluster_ids: string[]` |
+| `discovery.snapshot` | `/v1/discovery/snapshot` | job / read | auto | `hosts: string[]`, `cluster: string`, `workload_ids: string[]` |
 
 ### model_cache
 
@@ -265,7 +265,7 @@ own namespaces and routing-policy fields.
 | --- | --- | --- | --- | --- |
 | `recipes.build` | `/v1/recipes/build` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `dry_run: boolean`, `trust: boolean`, `rebuild: boolean`, `executor: string`, `executor_config: object`, `cache_dir: string`, `local_cache_dir: string`, `transfer_mode: string`, `transfer_interface: string`, `topology: string`, `sync_tuning: boolean`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `builder_context: object` |
 | `recipes.plan_build` | `/v1/recipes/plan_build` | job / read | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `dry_run: boolean`, `trust: boolean`, `rebuild: boolean`, `executor: string`, `executor_config: object`, `cache_dir: string`, `local_cache_dir: string`, `transfer_mode: string`, `transfer_interface: string`, `topology: string`, `sync_tuning: boolean`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `builder_context: object` |
-| `recipes.realize` | `/v1/recipes/realize` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
+| `recipes.realize` | `/v1/recipes/realize` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `workload_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
 | `recipes.validate` | `/v1/recipes/validate` | job / read | auto | `recipe!: string`, `overrides: object` |
 
 ### setup
@@ -294,22 +294,22 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `workloads.endpoints` | `/v1/workloads/endpoints` | job / read | none | `recipe_revision: string`, `cluster_candidates: string[]`, `cluster_id: string` |
+| `workloads.endpoints` | `/v1/workloads/endpoints` | job / read | none | `recipe_revision: string`, `cluster_candidates: string[]`, `workload_id: string` |
 | `workloads.ensure_ready` | `/v1/workloads/ensure_ready` | job / operate | controller | `recipe!: string`, `recipe_revision: string`, `cluster_candidates: string[]`, `overrides: object`, `timeout: number` |
 | `workloads.find_intent` | `/v1/workloads/find_intent` | job / read | auto | `intent_id!: string`, `hosts!: string[]`, `cluster: string` |
 | `workloads.inventory` | `/v1/workloads/inventory` | job / read | none | `{}` |
 | `workloads.list` | `/v1/workloads/list` | query / read | auto | `limit: integer` |
-| `workloads.materialize` | `/v1/workloads/materialize` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
-| `workloads.plan` | `/v1/workloads/plan` | job / read | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
+| `workloads.materialize` | `/v1/workloads/materialize` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `workload_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
+| `workloads.plan` | `/v1/workloads/plan` | job / read | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `workload_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string` |
 | `workloads.plugins` | `/v1/workloads/plugins` | job / read | none | `{}` |
-| `workloads.reconcile` | `/v1/workloads/reconcile` | job / admin | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string`, `acknowledge_effects!: boolean` |
-| `workloads.run` | `/v1/workloads/run` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `cluster_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string`, `collect_diagnostics: boolean`, `confirm: boolean`, `wait_ready: boolean`, `post_launch: boolean` |
-| `workloads.sleep` | `/v1/workloads/sleep` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
-| `workloads.status` | `/v1/workloads/status` | job / read | none | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
-| `workloads.stop` | `/v1/workloads/stop` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
+| `workloads.reconcile` | `/v1/workloads/reconcile` | job / admin | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `workload_id!: string`, `acknowledge_effects!: boolean` |
+| `workloads.run` | `/v1/workloads/run` | job / operate | auto | `recipe!: string`, `hosts: string[]`, `cluster: string`, `overrides: object`, `strategy_options: object`, `solo: boolean`, `dry_run: boolean`, `trust: boolean`, `ensure: boolean`, `scheduler: string`, `transfer_mode: string`, `cache_dir: string`, `offline: boolean`, `runtime_cache: boolean`, `auto_port: boolean`, `ray_port: integer`, `dashboard_port: integer`, `dashboard: boolean`, `init_port: integer`, `executor: string`, `executor_config: object`, `rootful: boolean`, `workload_id_override: string`, `transfer_interface: string`, `local_cache_dir: string`, `sync_tuning: boolean`, `extra_docker_opts: string[]`, `topology: string`, `preserve_model_perms: boolean`, `skip_model_fan_out: boolean`, `recipe_ref: string`, `collect_diagnostics: boolean`, `confirm: boolean`, `wait_ready: boolean`, `post_launch: boolean` |
+| `workloads.sleep` | `/v1/workloads/sleep` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `workload_id!: string` |
+| `workloads.status` | `/v1/workloads/status` | job / read | none | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `workload_id!: string` |
+| `workloads.stop` | `/v1/workloads/stop` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `workload_id!: string` |
 | `workloads.stop_all` | `/v1/workloads/stop_all` | job / operate | auto | `hosts!: string[]`, `cluster: string`, `dry_run: boolean` |
 | `workloads.stop_matching` | `/v1/workloads/stop_matching` | job / operate | auto | `workload_id: string`, `recipe: string`, `hosts: string[]`, `cluster: string`, `overrides: object` |
-| `workloads.wake` | `/v1/workloads/wake` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `cluster_id!: string` |
+| `workloads.wake` | `/v1/workloads/wake` | job / operate | controller | `recipe!: string`, `recipe_revision!: string`, `cluster_candidates: string[]`, `overrides: object`, `workload_id!: string` |
 
 ## Bundled Kubernetes plugin
 
@@ -337,8 +337,8 @@ Requires the external SparkRoute plugin and `gateway.sparkroute`; it is not bund
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
 | `plugins.sparkroute.endpoints.discover` | `/v1/plugins/sparkroute/ops/endpoints/discover` | job / read | none | `binding: object` |
-| `plugins.sparkroute.endpoints.metadata` | `/v1/plugins/sparkroute/ops/endpoints/metadata` | query / read | none | `cluster_id!: string`, `recipe_revision!: string`, `served_models!: string[]` |
-| `plugins.sparkroute.endpoints.status` | `/v1/plugins/sparkroute/ops/endpoints/status` | job / read | none | `binding!: object`, `cluster_id!: string` |
+| `plugins.sparkroute.endpoints.metadata` | `/v1/plugins/sparkroute/ops/endpoints/metadata` | query / read | none | `workload_id!: string`, `recipe_revision!: string`, `served_models!: string[]` |
+| `plugins.sparkroute.endpoints.status` | `/v1/plugins/sparkroute/ops/endpoints/status` | job / read | none | `binding!: object`, `workload_id!: string` |
 
 <!-- END GENERATED DAEMON OPERATIONS -->
 
@@ -347,7 +347,7 @@ Requires the external SparkRoute plugin and `gateway.sparkroute`; it is not bund
 | Family | Final result / meaning |
 | --- | --- |
 | Catalog | Bounded recipe listings/facets, registry or cluster arrays, recipe details with stable `source_kind`, normalized overrides, revision, plugin items and issues; refresh/capacity/import mutations have their own schemas. |
-| Planning/execution | Explicit Plan/Run/Build/Benchmark DTOs. Workload `cluster_id` is distinct from the daemon `job_id`. A serialized plan is a preview, not a resumable execution handle. |
+| Planning/execution | Explicit Plan/Run/Build/Benchmark DTOs. Workload `workload_id` is distinct from the daemon `job_id`. A serialized plan is a preview, not a resumable execution handle. |
 | Generic workloads | `ensure_ready`: ready state, exact workload ID, credential-free endpoint, original observation timestamp, adoption flag and shared workload row. Guarded stop: offline state/IDs; selector/all teardown retain their separate Stop/StopAll DTOs. Inventory: recorded state/providers/actions. Control: the same workload row after provider observation/action. Reconcile: ID/state/receipt count. |
 | Discovery | `discovery.snapshot` and `workloads.endpoints`: sweep ID/time, live/metadata mode, hosts/coverage/errors/completeness, safe endpoints. A partial or metadata-only sweep is not authoritative absence. |
 | Proxy | State/models/start/stop/sync/alias/service DTOs; status includes discovery owner/backend/job/scope/health. `proxy.discovery.ensure` returns an existing/new watch job ID, not that watch's result. |

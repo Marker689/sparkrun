@@ -287,7 +287,7 @@ class BenchmarkResult:
     """Structured launch result when this invocation launched inference;
     ``None`` for skip-run, resume-by-ID, and calls that did not launch."""
 
-    cluster_id: str = ""
+    workload_id: str = ""
     """sparkrun cluster id for the inference workload used in this benchmark."""
     host_list: tuple[str, ...] = ()
     """Hosts that participated in the benchmark."""

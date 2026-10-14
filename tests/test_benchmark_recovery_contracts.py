@@ -390,7 +390,7 @@ def test_public_launch_failure_precedes_benchmark_work(bench_env, private_rc, dr
     env = bench_env
     env.launch.rc = private_rc or 0
     env.run.return_value = RunResult(
-        cluster_id="test-job",
+        workload_id="test-job",
         host_list=("localhost",),
         placement=None,
         scheduler="test",
@@ -423,7 +423,7 @@ def test_successful_handle_free_launch_still_benchmarks(bench_env):
 
     env = bench_env
     env.run.return_value = RunResult(
-        cluster_id="test-job",
+        workload_id="test-job",
         host_list=("localhost",),
         placement=None,
         scheduler="test",

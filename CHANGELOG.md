@@ -12,6 +12,18 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- The workload identifier is named `workload_id` across the public API and the
+  daemon wire (it was `cluster_id`; the value is unchanged). Renamed: `RunResult`,
+  `RunPlan`, `ResolvedLaunchSpec`, `StopResult`, `JobInfo`, `BenchmarkResult`,
+  `IntentMatch` and `ProxyEndpoint` `.workload_id`; `RunOptions.workload_id_override`;
+  `AmbiguousWorkload.workload_ids`; `api.stop`/`api.discovery_snapshot`/`api.workloads`
+  parameters and returned dicts; every daemon request field and response key,
+  `cluster status --json` solo entries, and monitor JSON. Workload lifecycle
+  providers return `{"workload_id", "state"}`. Core and executor types
+  (`RunningWorkload`, `LaunchResult`, `ClusterStatus`), job metadata files, the
+  recipe `{cluster_id}` template variable and benchmark export metadata keep
+  `cluster_id`. No aliases are kept.
+
 - Namespace plugin daemon operations as `plugins.<id>.<local-name>` and HTTP
   endpoints under `/v1/plugins/<id>/ops/...`, with custom JSON adapters under
   `/routes/...`. Bind ownership during plugin loading, reject duplicate source

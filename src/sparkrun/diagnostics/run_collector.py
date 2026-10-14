@@ -203,10 +203,10 @@ class RunDiagnosticsCollector:
             logger.debug("Timeline emission failed", exc_info=True)
 
     def emit_launch_result(self, result) -> None:
-        """Emit ``run_launch_result`` from a LaunchResult."""
+        """Emit ``run_launch_result`` from the ``RunResult`` ``api.run`` returned."""
         data = {
             "rc": getattr(result, "rc", -1),
-            "workload_id": getattr(result, "cluster_id", ""),
+            "workload_id": getattr(result, "workload_id", ""),
             "runtime_info": getattr(result, "runtime_info", {}),
             "nccl_env": getattr(result, "nccl_env", None),
         }

@@ -69,7 +69,7 @@ class ProxyEndpoint:
     port: int
     models: tuple[str, ...]
     runtime: str = ""
-    cluster_id: str = ""
+    workload_id: str = ""
     healthy: bool = True
     cluster_name: str | None = None
     recipe_revision: str = ""
@@ -1161,7 +1161,7 @@ def _to_endpoint(ep: "DiscoveredEndpoint") -> ProxyEndpoint:
         port=ep.port,
         models=tuple(ep.actual_models or ([ep.model] if ep.model else ())),
         runtime=ep.runtime,
-        cluster_id=ep.cluster_id,
+        workload_id=ep.cluster_id,
         healthy=ep.healthy,
         cluster_name=getattr(ep, "cluster_name", None),
         recipe_revision=getattr(ep, "recipe_revision", ""),

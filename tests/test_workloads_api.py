@@ -17,18 +17,18 @@ def workflow(tmp_path, monkeypatch):
     ctx = NS(config=NS(config_path=tmp_path / "config.yaml"), timing=None, progress=None, operation=OperationState())
     recipe = NS(post_exec=[], post_commands=[], defaults={"port": 8000})
     binding = w.WorkloadBinding("recipe", "revision", ("lab",))
-    job = NS(cluster_id="work", hosts=["one"], metadata={"recipe_fingerprint": "revision", "owner": "gateway", "cluster": "lab"})
+    job = NS(workload_id="work", hosts=["one"], metadata={"recipe_fingerprint": "revision", "owner": "gateway", "cluster": "lab"})
     monkeypatch.setattr(w, "resolve_binding", lambda *a, **kw: (recipe, "revision", {}))
     monkeypatch.setattr(api, "list_jobs", lambda **kw: [])
     monkeypatch.setattr(w, "_ready", lambda *a, **kw: None)
-    monkeypatch.setattr(api, "plan", Mock(return_value=NS(cluster_id="work", host_list=["one"], cluster=NS(name="lab"), recipe=recipe)))
+    monkeypatch.setattr(api, "plan", Mock(return_value=NS(workload_id="work", host_list=["one"], cluster=NS(name="lab"), recipe=recipe)))
     monkeypatch.setattr(api, "wait_ready", Mock(return_value=NS(ready=True)))
     monkeypatch.setattr(api, "post_launch", Mock(return_value={"stopped": False}))
     return ctx, recipe, binding, job
 
 
 def endpoint(owner="gateway"):
-    return {"cluster_id": "work", "owner": owner, "observed_at": 123.5, "actual_models": ["served"]}
+    return {"workload_id": "work", "owner": owner, "observed_at": 123.5, "actual_models": ["served"]}
 
 
 def test_healthy_external_adoption_never_launches_or_takes_ownership(workflow, monkeypatch):
@@ -59,7 +59,7 @@ def test_placement_record_precedes_launch_and_survives_interruption(workflow, mo
 
     def launch(*args, **kwargs):
         rows = w.Receipts(ctx).placements("revision", "gateway")
-        assert rows[0]["placement"]["cluster_id"] == "work"
+        assert rows[0]["placement"]["workload_id"] == "work"
         assert rows[0]["phase"] == "launch_started"
         raise InterruptedError("lost caller")
 
@@ -72,7 +72,7 @@ def test_placement_record_precedes_launch_and_survives_interruption(workflow, mo
 def test_readiness_and_hooks_share_launch_context_and_actual_timestamp(workflow, monkeypatch):
     ctx, recipe, binding, _ = workflow
     recipe.post_exec = ["effect"]
-    result = NS(rc=0, recipe_fingerprint="revision", cluster_id="work", launch_result=object())
+    result = NS(rc=0, recipe_fingerprint="revision", workload_id="work", launch_result=object())
     monkeypatch.setattr(api, "run", Mock(return_value=result))
     calls = 0
 
@@ -118,7 +118,7 @@ def test_deadline_does_not_reset_after_launch(workflow, monkeypatch):
 
     def launch(*args, **kwargs):
         clock[0] += 1
-        return NS(rc=0, cluster_id="work", recipe_fingerprint="revision", launch_result=object())
+        return NS(rc=0, workload_id="work", recipe_fingerprint="revision", launch_result=object())
 
     monkeypatch.setattr(api, "run", launch)
     with pytest.raises(w.WorkloadError, match="readiness budget"):
@@ -130,7 +130,7 @@ def test_provider_must_match_exact_returned_identity(workflow, monkeypatch):
     ctx, _, binding, job = workflow
     monkeypatch.setattr(api, "list_jobs", lambda **kw: [job])
     monkeypatch.setattr(
-        w, "lifecycle_provider", lambda job: NS(name="fixture", control=lambda *a, **kw: {"cluster_id": "other", "state": "running"})
+        w, "lifecycle_provider", lambda job: NS(name="fixture", control=lambda *a, **kw: {"workload_id": "other", "state": "running"})
     )
     with pytest.raises(w.WorkloadError, match="different or invalid"):
         w.control(binding, "work", "wake", owner="gateway", sctx=ctx)
@@ -177,7 +177,7 @@ def test_readiness_inventory_and_control_share_ownership_dto(workflow, monkeypat
     ctx, _, binding, job = workflow
     job.metadata["owner"] = owner
     monkeypatch.setattr(api, "list_jobs", lambda **kw: [job])
-    provider = NS(name="coldsnap", control=Mock(return_value={"cluster_id": "work", "state": "running"}))
+    provider = NS(name="coldsnap", control=Mock(return_value={"workload_id": "work", "state": "running"}))
     monkeypatch.setattr(w, "lifecycle_provider", lambda job: provider)
     monkeypatch.setattr(w, "_ready", lambda *a, **kw: {**endpoint(owner), "recipe_revision": "revision"})
     ready = w.ensure_ready(binding, owner="gateway", sctx=ctx)
@@ -209,6 +209,6 @@ def test_shared_workload_results_match_published_contracts(workflow, monkeypatch
     ready = w.ensure_ready(binding, owner="gateway", sctx=ctx)
     validate(ready, RESULT_SCHEMAS["workloads.ensure_ready"])
     validate(w.inventory(owner="gateway", sctx=ctx), RESULT_SCHEMAS["workloads.inventory"])
-    provider = NS(name="coldsnap", control=lambda *a, **kw: {"cluster_id": "work", "state": "running"})
+    provider = NS(name="coldsnap", control=lambda *a, **kw: {"workload_id": "work", "state": "running"})
     monkeypatch.setattr(w, "lifecycle_provider", lambda job: provider)
     validate(w.control(binding, "work", "status", owner="gateway", sctx=ctx), RESULT_SCHEMAS["workloads.control"])

@@ -305,12 +305,12 @@ def plan(options: RunOptions, *, sctx: "SparkrunContext | None" = None) -> RunPl
         placement_token = derive_placement_token_from_hosts(hosts, destination=destination.placement_key())
     else:
         placement_token = generate_placement_token()
-    cluster_id_for_launch = options.cluster_id_override or generate_cluster_id(intent_id, placement_token)
+    cluster_id_for_launch = options.workload_id_override or generate_cluster_id(intent_id, placement_token)
     # Recover intent + token from the override when one was supplied so
     # the result still carries accurate metadata.
-    if options.cluster_id_override:
+    if options.workload_id_override:
         try:
-            parsed_intent, parsed_token = parse_cluster_id(options.cluster_id_override)
+            parsed_intent, parsed_token = parse_cluster_id(options.workload_id_override)
             intent_id = parsed_intent
             placement_token = parsed_token
         except ValueError:
@@ -334,7 +334,7 @@ def plan(options: RunOptions, *, sctx: "SparkrunContext | None" = None) -> RunPl
         scheduler_defaulted=_scheduler_defaulted,
         intent_id=intent_id,
         placement_token=placement_token,
-        cluster_id=cluster_id_for_launch,
+        workload_id=cluster_id_for_launch,
         recipe_fingerprint=recipe_fingerprint,
         executor_target=executor_target,
         override_resolution=override_resolution,
@@ -577,7 +577,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
     placement = plan.placement
     effective_scheduler = plan.scheduler_selector
     intent_id = plan.intent_id
-    cluster_id_for_launch = plan.cluster_id
+    cluster_id_for_launch = plan.workload_id
 
     # ``ensure``: don't launch a duplicate of a workload that's already
     # serving.  Matched on the *intent*, so the answer doesn't depend on which
@@ -591,7 +591,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
 
         match = find_running_intent(intent_id, hosts, cluster=cluster_def, sctx=sctx)
         if match is not None:
-            logger.info("ensure: intent %s already running as %s; skipping launch", intent_id, match.cluster_id)
+            logger.info("ensure: intent %s already running as %s; skipping launch", intent_id, match.workload_id)
             return _already_running_result(match, plan=plan, options=options, started_at=started_at, sctx=sctx)
 
     # Library execution must not fall through to the legacy TTY hook prompts.
@@ -816,7 +816,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
         metadata["runtime_info"] = dict(result.runtime_info)
 
     run_result = RunResult(
-        cluster_id=result.cluster_id,
+        workload_id=result.cluster_id,
         host_list=tuple(result.host_list),
         placement=placement,
         scheduler=plan.scheduler or _resolve_scheduler_name(effective_scheduler, sctx),
@@ -839,7 +839,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
     _prune_stale_job_metadata(
         config,
         observed_running=observed_running,
-        keep=(run_result.cluster_id,),
+        keep=(run_result.workload_id,),
         sctx=sctx,
     )
 
@@ -861,7 +861,7 @@ def _complete_run_result(result: RunResult, *, plan: RunPlan, options: RunOption
     if not isinstance(result, RunResult):
         raise TypeError("Run handlers must return RunResult")
     try:
-        intent_id, placement_token = parse_cluster_id(result.cluster_id)
+        intent_id, placement_token = parse_cluster_id(result.workload_id)
     except ValueError:
         intent_id, placement_token = (
             (result.intent_id, result.placement_token) if result.already_running else (plan.intent_id, plan.placement_token)
@@ -938,15 +938,15 @@ def _already_running_result(match, *, plan: RunPlan, options: RunOptions, starte
     from sparkrun.orchestration.job_metadata import parse_cluster_id
 
     try:
-        _, matched_token = parse_cluster_id(match.cluster_id)
+        _, matched_token = parse_cluster_id(match.workload_id)
     except ValueError:
         matched_token = ""
 
     from sparkrun.orchestration.job_metadata import load_job_metadata
 
-    saved = load_job_metadata(match.cluster_id, cache_dir=str(sctx.config.cache_dir)) or {}
+    saved = load_job_metadata(match.workload_id, cache_dir=str(sctx.config.cache_dir)) or {}
     return RunResult(
-        cluster_id=match.cluster_id,
+        workload_id=match.workload_id,
         intent_id=match.intent_id,
         placement_token=matched_token,
         host_list=tuple(match.hosts),

@@ -294,6 +294,6 @@ def test_public_log_identifier_is_workload_id():
         assert "workload_id" in inspect.signature(function).parameters
         assert "cluster_id" not in inspect.signature(function).parameters
         with pytest.raises(TypeError, match="cluster_id"):
-            function(cluster_id="unreleased-name")
+            function(**{"cluster_id": "unreleased-name"})
     assert "workload_id" in api.LogTarget.__dataclass_fields__
     assert "cluster_id" not in api.LogTarget.__dataclass_fields__

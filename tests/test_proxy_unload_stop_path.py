@@ -20,7 +20,7 @@ def unload_env(tmp_path, monkeypatch):
     manager.set_default("lab")
     recipe = tmp_path / "model.yaml"
     recipe.write_text('sparkrun_version: "2"\nmodel: test/model\nruntime: sglang\ncontainer: test/image:latest\n')
-    stop = Mock(return_value=api.StopResult(cluster_id="job", hosts_targeted=("10.0.4.30",), containers_removed=1))
+    stop = Mock(return_value=api.StopResult(workload_id="job", hosts_targeted=("10.0.4.30",), containers_removed=1))
     status = Mock(return_value=SimpleNamespace(running=True))
     unregister = Mock(return_value=SimpleNamespace(removed=1))
     monkeypatch.setattr(api, "stop", stop)
@@ -71,7 +71,7 @@ def test_unload_keeps_registration_when_stop_cannot_resolve(unload_env, error):
 
 
 def test_unload_keeps_registration_when_teardown_fails(unload_env):
-    unload_env.stop.return_value = api.StopResult(cluster_id="job", hosts_targeted=("h1",), containers_removed=0, hosts_failed=("h1",))
+    unload_env.stop.return_value = api.StopResult(workload_id="job", hosts_targeted=("h1",), containers_removed=0, hosts_failed=("h1",))
     result = invoke(unload_env)
     assert result.exit_code == 1
     assert "NOT fully stopped" in result.output

@@ -178,7 +178,7 @@ def test_run_dry_run_returns_run_result_without_ssh(reuse_hardware):
         assert kwargs["placement"] is original.plan.placement
         assert kwargs["execution_context"].plan.cluster is kwargs["cluster"]
         assert kwargs["execution_context"].sctx is kwargs["sctx"]
-        assert kwargs["execution_context"].plan.cluster_id == original.plan.cluster_id
+        assert kwargs["execution_context"].plan.workload_id == original.plan.workload_id
         evidence = result.metadata["hardware_evidence"]["h1"]
         assert evidence["accelerators"][0]["capacity_verification"] == "estimated"
         assert evidence["drivers"]["nvidia"]["version"] == "610.43.02"
@@ -187,7 +187,7 @@ def test_run_dry_run_returns_run_result_without_ssh(reuse_hardware):
         assert "hardware_evidence" not in result.metadata
 
     assert isinstance(result, api.RunResult)
-    assert result.cluster_id == "sparkrun_fakefakefake"
+    assert result.workload_id == "sparkrun_fakefakefake"
     assert result.dry_run is True
     assert result.runtime == "vllm"
     assert result.is_solo is True
@@ -283,7 +283,7 @@ def test_stop_with_hosts_skips_metadata_lookup(tmp_path, idle_occupancy):
             cache_dir=str(tmp_path),
         )
     assert isinstance(result, api.StopResult)
-    assert result.cluster_id == "sparkrun_explicithost"
+    assert result.workload_id == "sparkrun_explicithost"
     assert result.hosts_targeted == ("h1",)
 
 

@@ -71,7 +71,7 @@ def test_describe_job_full():
     """recipe + runtime + hosts all present → all three in the description."""
     from sparkrun.api._models import JobInfo
 
-    job = JobInfo(cluster_id="sparkrun_abc", recipe="my-recipe", runtime="vllm", hosts=("h1", "h2"))
+    job = JobInfo(workload_id="sparkrun_abc", recipe="my-recipe", runtime="vllm", hosts=("h1", "h2"))
     desc = _describe_job(job)
     assert "my-recipe" in desc
     assert "vllm" in desc
@@ -82,7 +82,7 @@ def test_describe_job_empty():
     """No recipe / runtime / hosts → empty string (no crash)."""
     from sparkrun.api._models import JobInfo
 
-    job = JobInfo(cluster_id="sparkrun_abc")
+    job = JobInfo(workload_id="sparkrun_abc")
     assert _describe_job(job) == ""
 
 
@@ -90,7 +90,7 @@ def test_describe_job_partial():
     """Only recipe set → just the recipe."""
     from sparkrun.api._models import JobInfo
 
-    job = JobInfo(cluster_id="sparkrun_abc", recipe="my-recipe")
+    job = JobInfo(workload_id="sparkrun_abc", recipe="my-recipe")
     assert _describe_job(job) == "my-recipe"
 
 

@@ -130,7 +130,7 @@ def test_benchmark_translates_internal_result_to_api_result():
     assert result.success is True
     assert result.benchmark_id == "bench_test123"
     assert result.framework == "llama-benchy"
-    assert result.cluster_id == "sparkrun_intent_abc"
+    assert result.workload_id == "sparkrun_intent_abc"
     assert result.host_list == ("host-1",)
     assert result.container_image_sha == "sha256:deadbeef"
     assert result.container_image_sha_pinned is True

@@ -427,7 +427,7 @@ def test_api_stop_recipe_path_raises_ambiguous_on_multiple_matches(tmp_path, int
 
     with pytest.raises(api.AmbiguousWorkload) as exc_info:
         api.stop(recipe=intent_recipe, hosts=("h1",), cache_dir=str(tmp_path))
-    assert set(exc_info.value.cluster_ids) == {cid_a, cid_b}
+    assert set(exc_info.value.workload_ids) == {cid_a, cid_b}
 
 
 def test_api_stop_recipe_path_succeeds_on_single_match(tmp_path, intent_recipe, monkeypatch, docker_discovery_only):
@@ -457,7 +457,7 @@ def test_api_stop_recipe_path_succeeds_on_single_match(tmp_path, intent_recipe, 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", fake_cleanup)
 
     result = api.stop(recipe=intent_recipe, hosts=("h1",), cache_dir=str(tmp_path))
-    assert result.cluster_id == cid
+    assert result.workload_id == cid
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +468,8 @@ def test_api_stop_recipe_path_succeeds_on_single_match(tmp_path, intent_recipe, 
 def test_ambiguous_workload_carries_cluster_ids():
     import sparkrun.api as api
 
-    err = api.AmbiguousWorkload("multiple matches", cluster_ids=["a", "b"])
-    assert err.cluster_ids == ("a", "b")
+    err = api.AmbiguousWorkload("multiple matches", workload_ids=["a", "b"])
+    assert err.workload_ids == ("a", "b")
 
 
 # --------------------------------------------------------------------------
@@ -587,7 +587,7 @@ class TestStartedAt:
         for cid in ("sparkrun_aaaaaaaaaaaaaaaa_111111111111", "sparkrun_ffffffffffffffff_222222222222"):
             save_job_metadata(cid, self._recipe(), ["h1"], cache_dir=str(tmp_path))
 
-        ordered = [j.cluster_id for j in list_jobs(cache_dir=str(tmp_path))]
+        ordered = [j.workload_id for j in list_jobs(cache_dir=str(tmp_path))]
         assert ordered[0].startswith("sparkrun_ffff"), "newest launch must sort first, not the alphabetical winner"
 
 
@@ -662,7 +662,7 @@ class TestStartedAtBackfill:
             "cluster_id: sparkrun_bbbbbbbbbbbbbbbb_222222222222\nstarted_at: 1700000000.0\nhosts: [h1]\n",
             mtime=1_500_000_000.0,  # mtime is older, but the record is newer
         )
-        ordered = [j.cluster_id for j in list_jobs(cache_dir=str(tmp_path))]
+        ordered = [j.workload_id for j in list_jobs(cache_dir=str(tmp_path))]
         assert ordered == [
             "sparkrun_bbbbbbbbbbbbbbbb_222222222222",
             "sparkrun_aaaaaaaaaaaaaaaa_111111111111",

@@ -111,9 +111,9 @@ def test_plan_preserves_principal_when_launch_default_changes(run_env, monkeypat
 
     monkeypatch.setattr("sparkrun.core.launcher.launch_inference", launch)
     result = run(options, sctx=env.sctx, plan=alice)
-    assert alice.cluster_id != bob.cluster_id
-    assert calls == [("alice", alice.cluster_id)]
-    assert result.cluster_id == alice.cluster_id
+    assert alice.workload_id != bob.workload_id
+    assert calls == [("alice", alice.workload_id)]
+    assert result.workload_id == alice.workload_id
 
 
 def test_equivalent_api_image_evidence_survives_baseline_recording(scheduled_env, monkeypatch):
@@ -215,7 +215,7 @@ def test_new_local_launch_without_explicit_user_is_recoverable(run_env, monkeypa
         v=env.sctx.variables,
         cluster=planned.cluster,
         executor_config=options.executor_overrides(),
-        cluster_id_override=planned.cluster_id,
+        cluster_id_override=planned.workload_id,
         is_solo=True,
         dry_run=False,
         sync_tuning=False,

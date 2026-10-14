@@ -428,7 +428,7 @@ def test_list_jobs_returns_job_info_entries(tmp_path: Path):
 
     jobs = api.list_jobs(cache_dir=tmp_path)
     assert len(jobs) == 2
-    cluster_ids = {j.cluster_id for j in jobs}
+    cluster_ids = {j.workload_id for j in jobs}
     assert cluster_ids == {"sparkrun_aaaaaaaaaaaa", "sparkrun_bbbbbbbbbbbb"}
 
 
@@ -457,9 +457,9 @@ def test_list_jobs_backfills_missing_started_at_from_mtime(tmp_path: Path):
 
     jobs = api.list_jobs(cache_dir=tmp_path)
     assert len(jobs) == 2
-    assert jobs[0].cluster_id == "sparkrun_notime000000"
+    assert jobs[0].workload_id == "sparkrun_notime000000"
     assert jobs[0].started_at is not None
-    assert jobs[1].cluster_id == "sparkrun_withtime0000"
+    assert jobs[1].workload_id == "sparkrun_withtime0000"
 
 
 def test_resolve_started_at_returns_none_when_unstattable(tmp_path: Path):
@@ -483,7 +483,7 @@ def test_list_jobs_untimed_entries_come_last(tmp_path: Path):
     with patch("sparkrun.api._jobs._resolve_started_at", side_effect=_fake):
         jobs = api.list_jobs(cache_dir=tmp_path)
 
-    assert [j.cluster_id for j in jobs] == ["sparkrun_withtime0000", "sparkrun_notime000000"]
+    assert [j.workload_id for j in jobs] == ["sparkrun_withtime0000", "sparkrun_notime000000"]
     assert jobs[1].started_at is None
 
 
@@ -510,10 +510,10 @@ def test_list_jobs_skips_unparseable_files(tmp_path: Path):
     (jobs_dir / "corrupt.yaml").write_text("this is :: not valid: yaml: [[[")
 
     jobs = api.list_jobs(cache_dir=tmp_path)
-    cluster_ids = {j.cluster_id for j in jobs}
+    cluster_ids = {j.workload_id for j in jobs}
     assert "sparkrun_validvalidvali" in cluster_ids
     # The corrupt file's entry is absent rather than crashing the call.
-    assert all(j.cluster_id != "sparkrun_corrupt" for j in jobs)
+    assert all(j.workload_id != "sparkrun_corrupt" for j in jobs)
 
 
 def test_list_jobs_metadata_field_exposes_raw_yaml(tmp_path: Path):
@@ -538,7 +538,7 @@ def test_job_info_from_file_recovers_cluster_id_from_filename(tmp_path: Path):
     p.write_text(yaml.safe_dump({"recipe": "x", "runtime": "y"}))
     info = _job_info_from_file(p)
     assert info is not None
-    assert info.cluster_id == "sparkrun_recoveredfromname"
+    assert info.workload_id == "sparkrun_recoveredfromname"
 
 
 # --------------------------------------------------------------------------

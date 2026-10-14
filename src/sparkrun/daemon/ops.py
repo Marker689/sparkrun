@@ -45,7 +45,7 @@ SPECS = [
     ("catalog.search", "search_recipes", "query", "read", "query registry runtime include_hidden include_local unique_names", ""),
     ("workloads.stop_matching", "stop", "job", "operate", "workload_id recipe hosts cluster overrides", ""),
     ("workloads.stop_all", "stop_all", "job", "operate", "hosts cluster dry_run", "hosts"),
-    ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster cluster_ids", ""),
+    ("discovery.snapshot", "discovery_snapshot", "job", "read", "hosts cluster workload_ids", ""),
     (
         "benchmarks.resume",
         "resume_benchmark",
@@ -124,7 +124,7 @@ DESCRIPTIONS = {
 
 
 OPTION_FIELDS = {
-    "RunOptions": "recipe hosts cluster overrides strategy_options solo dry_run trust ensure scheduler transfer_mode cache_dir offline runtime_cache auto_port ray_port dashboard_port dashboard init_port executor executor_config rootful cluster_id_override transfer_interface local_cache_dir sync_tuning extra_docker_opts topology preserve_model_perms skip_model_fan_out recipe_ref",
+    "RunOptions": "recipe hosts cluster overrides strategy_options solo dry_run trust ensure scheduler transfer_mode cache_dir offline runtime_cache auto_port ray_port dashboard_port dashboard init_port executor executor_config rootful workload_id_override transfer_interface local_cache_dir sync_tuning extra_docker_opts topology preserve_model_perms skip_model_fan_out recipe_ref",
     "BuildOptions": "recipe hosts cluster overrides dry_run trust rebuild executor executor_config cache_dir local_cache_dir transfer_mode transfer_interface topology sync_tuning preserve_model_perms skip_model_fan_out builder_context",
     "BenchmarkOptions": "recipe category framework profile bench_args hosts cluster overrides resume skip_run no_stop exit_on_first_fail timeout api_key_env integrations output_file export_files solo dry_run scheduler rootful trust offline sync_tuning extra_docker_opts",
     "ProxyStartOptions": "host port gateway host_filter cluster clear_cluster auto_discover discovery_backend discover_interval discover_removal_grace_sweeps restart persist dry_run",
@@ -212,7 +212,7 @@ def invoke_options(target, model, arguments, sctx, prompt=unavailable_prompt):
             raise InterruptedError("Launch declined")
         result = api.run(options, sctx=sctx, plan=plan)
         if result.rc:
-            raise api.SparkrunError(f"Launch {result.cluster_id} failed with exit code {result.rc}")
+            raise api.SparkrunError(f"Launch {result.workload_id} failed with exit code {result.rc}")
         if not options.dry_run and not result.already_running and result.launch_result is not None:
             readiness = api.wait_ready(result, sctx=sctx) if ready else None
             if readiness is not None and not readiness.ready:

@@ -106,7 +106,7 @@ def test_api_recovery_across_entry_directories_preserves_destination(tmp_path, m
         path.write_text(yaml.safe_dump(metadata))
         monkeypatch.chdir(entry_b)
         status = api.status(["localhost"], cluster=cluster, sctx=sctx)
-        job = next(job for job in api.list_jobs(sctx=sctx) if job.cluster_id == cid)
+        job = next(job for job in api.list_jobs(sctx=sctx) if job.workload_id == cid)
         assert bool(status.observation_errors) is legacy
         assert not status.observation.confirms_absent(job)
         sctx.config.set("jobs.autoprune", True)

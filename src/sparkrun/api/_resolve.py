@@ -474,7 +474,7 @@ def discover_cluster_id_by_intent(
     if len(matches) > 1:
         raise AmbiguousWorkload(
             "Multiple workloads match this recipe/intent on hosts %s: %s. Re-invoke with an explicit cluster_id." % (target_hosts, matches),
-            cluster_ids=matches,
+            workload_ids=matches,
         )
     return matches[0]
 

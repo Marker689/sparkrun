@@ -542,7 +542,7 @@ def _fake_run_result(rc: int = 0):
 
     rr = mock.MagicMock()
     rr.rc = rc
-    rr.cluster_id = launch.cluster_id
+    rr.workload_id = launch.cluster_id
     rr.launch_result = launch
     rr.timeline = timeline
     rr.already_running = False
@@ -972,7 +972,7 @@ def test_ensure_uses_recorded_head_and_port(run_env, monkeypatch, partial):
 
     hosts = [_HOST, "10.0.4.31"]
     match = IntentMatch(
-        intent_id="test", cluster_id="sparkrun_0123456789abcdef_aabbccddeeff", hosts=tuple(hosts[1:] if partial else reversed(hosts))
+        intent_id="test", workload_id="sparkrun_0123456789abcdef_aabbccddeeff", hosts=tuple(hosts[1:] if partial else reversed(hosts))
     )
     monkeypatch.setattr("sparkrun.api.find_running_intent", lambda *a, **kw: match)
     monkeypatch.setattr("sparkrun.orchestration.job_metadata.load_job_metadata", lambda *a, **kw: {"hosts": hosts, "port": 32100})

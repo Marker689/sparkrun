@@ -174,7 +174,7 @@ def serialize_activity(activity: HostActivity) -> dict:
     Shape: ``{host, error, sample, workloads, used_slots, free_slots}`` where
     ``sample`` is the telemetry :class:`MonitorSample` dict (or ``None``) and
     ``workloads`` carries the occupancy (all executors), each
-    ``{cluster_id, recipe, runtime, ranks_on_host, containers:[{name,role,status,image}]}``.
+    ``{workload_id, recipe, runtime, ranks_on_host, containers:[{name,role,status,image}]}``.
     ``error`` folds the telemetry and status errors.
     """
     import dataclasses
@@ -183,7 +183,7 @@ def serialize_activity(activity: HostActivity) -> dict:
     for w in activity.workloads:
         workloads.append(
             {
-                "cluster_id": w.cluster_id,
+                "workload_id": w.cluster_id,
                 "recipe": w.recipe_name,
                 "runtime": w.runtime_name,
                 "ranks_on_host": w.ranks_on_host,

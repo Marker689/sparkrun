@@ -84,7 +84,7 @@ def test_plan_separates_candidates_from_targets(recipe, idle_cluster, v):
     assert list(plan.host_list) == ["h3", "h4"]
     assert plan.scheduler == "occupancy-sparse"
     assert plan.scheduler_defaulted is False
-    assert plan.cluster_id.startswith("sparkrun_")
+    assert plan.workload_id.startswith("sparkrun_")
     assert plan.notes  # "N nodes required, using N of M hosts"
 
 
@@ -110,7 +110,7 @@ def test_run_with_plan_does_not_replace(recipe, idle_cluster, v):
     with mock.patch("sparkrun.api._hosts.resolve_effective_hosts") as replace:
         with mock.patch("sparkrun.core.launcher.launch_inference") as launch:
             launch.return_value = mock.MagicMock(
-                cluster_id=plan.cluster_id,
+                cluster_id=plan.workload_id,
                 host_list=list(plan.host_list),
                 rc=0,
                 is_solo=False,
@@ -157,7 +157,7 @@ def test_run_ensure_skips_launch_when_intent_is_up(recipe, idle_cluster, v):
 
     match = IntentMatch(
         intent_id="0123456789abcdef",
-        cluster_id="sparkrun_0123456789abcdef_aabbccddeeff",
+        workload_id="sparkrun_0123456789abcdef_aabbccddeeff",
         hosts=("h3", "h4"),
         recipe="test-recipe",
         runtime="sglang",
@@ -169,7 +169,7 @@ def test_run_ensure_skips_launch_when_intent_is_up(recipe, idle_cluster, v):
 
     launch.assert_not_called()
     assert result.already_running is True
-    assert result.cluster_id == match.cluster_id
+    assert result.workload_id == match.workload_id
     assert result.host_list == ("h3", "h4")
     assert result.launch_result is None
     assert result.rc == 0
@@ -210,7 +210,7 @@ def test_plan_prepares_transport_once(recipe, idle_cluster, v):
 
         with mock.patch("sparkrun.core.launcher.launch_inference") as launch:
             launch.return_value = mock.MagicMock(
-                cluster_id=plan.cluster_id,
+                cluster_id=plan.workload_id,
                 host_list=list(plan.host_list),
                 rc=0,
                 is_solo=False,
@@ -290,7 +290,7 @@ def test_live_hardware_precedes_placement_and_is_reused_by_normal_launch(recipe,
 
     with mock.patch("sparkrun.core.launcher.launch_inference") as launch:
         launch.return_value = mock.MagicMock(
-            cluster_id=plan.cluster_id,
+            cluster_id=plan.workload_id,
             host_list=list(plan.host_list),
             rc=0,
             is_solo=False,

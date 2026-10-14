@@ -55,7 +55,7 @@ def test_saved_job_lifecycle_keeps_effective_principal(bench_env, monkeypatch, u
         cluster_id=cid, cache_dir=str(env.sctx.config.cache_dir), ssh_kwargs={"ssh_options": ["-F", "/dev/null"]}
     ).running
     assert check_job_running(cluster_id=cid, cache_dir=str(env.sctx.config.cache_dir), ssh_kwargs={"ssh_options": options}).running
-    result = stop(cluster_id=cid, sctx=env.sctx)
+    result = stop(workload_id=cid, sctx=env.sctx)
     assert result.success and result.containers_removed == 1 and not alive
     assert load_job_metadata(cid, sctx=env.sctx) is None
     assert calls and all(call[1:] == ("alice@review-worker", "alice") for call in calls)
@@ -101,7 +101,7 @@ def test_local_status_path_contract(bench_env, monkeypatch, tmp_path, mode):
     monkeypatch.setattr("sparkrun.orchestration.ssh.run_remote_scripts_parallel", remote)
     cluster = ClusterDefinition(name="review", hosts=["localhost"], user=_local_user(), executor="local", executor_config=config)
     status = api.status(["localhost"], cluster=cluster, sctx=env.sctx)
-    job = next(job for job in api.list_jobs(sctx=env.sctx) if job.cluster_id == cid)
+    job = next(job for job in api.list_jobs(sctx=env.sctx) if job.workload_id == cid)
     absent = status.observation.confirms_absent(job)
     os.kill(int(pid_path.read_text()), 0)  # real live process, real PID-file format
     assert not absent and not status.observation_errors
@@ -170,7 +170,7 @@ def test_fixed_file_history_cannot_be_pruned_by_directory_discovery(bench_env, m
     )
     snapshot = api.status(["localhost"], cluster=cluster, sctx=env.sctx)
     assert bool(snapshot.observation_errors) is legacy_cluster_config
-    job = next(job for job in api.list_jobs(sctx=env.sctx) if job.cluster_id == cid)
+    job = next(job for job in api.list_jobs(sctx=env.sctx) if job.workload_id == cid)
     assert not snapshot.observation.confirms_absent(job)
     env.sctx.config.set("jobs.autoprune", True)
     _prune_stale_job_metadata(env.sctx.config, observed_running=snapshot.observation, keep=(), sctx=env.sctx)

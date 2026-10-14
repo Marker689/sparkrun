@@ -62,7 +62,7 @@ class Receipts:
     def placements(self, revision, owner):
         with self.connect() as db:
             rows = db.execute("SELECT * FROM activations WHERE revision=? AND owner=? ORDER BY updated DESC", (revision, owner)).fetchall()
-        return [{**dict(row), "placement": json.loads(row["placement"])} for row in rows]
+        return [{**dict(row), "placement": _placement(row["placement"])} for row in rows]
 
     def save(self, identifier, revision, owner, placement, phase):
         with self.connect() as db:
@@ -75,9 +75,9 @@ class Receipts:
         with self.connect() as db:
             rows = db.execute("SELECT placement,phase FROM activations").fetchall()
         return {
-            p["cluster_id"]
+            p["workload_id"]
             for row in rows
-            if (p := json.loads(row["placement"]))
+            if (p := _placement(row["placement"]))
             and row["phase"] not in {"ready", "stopped"}
             and (row["phase"] == "hooks_started" or p.get("post_launch_required"))
         }
@@ -88,6 +88,14 @@ class Receipts:
                 db.execute("INSERT OR REPLACE INTO lifecycle VALUES(?,?,?)", (identifier, value, time.time()))
             row = db.execute("SELECT state FROM lifecycle WHERE id=?", (identifier,)).fetchone()
             return row[0] if row else None
+
+
+def _placement(raw):
+    """Decode a stored placement; receipts written before the rename say ``cluster_id``."""
+    placement = json.loads(raw)
+    if "workload_id" not in placement and "cluster_id" in placement:
+        placement["workload_id"] = placement.pop("cluster_id")
+    return placement
 
 
 def resolve_binding(binding, *, sctx=None):
@@ -126,7 +134,7 @@ def _matches(job, revision, clusters=()):
     return metadata.get("recipe_fingerprint") == revision and (not clusters or metadata.get("cluster") in clusters)
 
 
-def endpoints(*, recipe_revision="", cluster_candidates=(), cluster_id="", sctx=None):
+def endpoints(*, recipe_revision="", cluster_candidates=(), workload_id="", sctx=None):
     """Return live, credential-free endpoint observations filtered before probing."""
     from sparkrun import api
     from sparkrun.proxy.discovery import discover_snapshot
@@ -134,11 +142,11 @@ def endpoints(*, recipe_revision="", cluster_candidates=(), cluster_id="", sctx=
     sctx = resolve_sctx(sctx)
     jobs = api.list_jobs(sctx=sctx)
     allowed = {
-        j.cluster_id
+        j.workload_id
         for j in jobs
         if (not recipe_revision or _matches(j, recipe_revision, cluster_candidates))
         and (not cluster_candidates or j.metadata.get("cluster") in cluster_candidates)
-        and (not cluster_id or j.cluster_id == cluster_id)
+        and (not workload_id or j.workload_id == workload_id)
     }
     journal = Receipts(sctx)
     allowed = {identifier for identifier in allowed if journal.state(identifier) in (None, "running")} - journal.blocked_endpoints()
@@ -157,21 +165,21 @@ def inventory(*, owner="", sctx=None):
     receipts = Receipts(sctx)
     result = []
     for job in api.list_jobs(sctx=sctx)[:256]:
-        result.append(_workload_row(job.cluster_id, job.metadata or {}, lifecycle_provider(job), owner, receipts))
+        result.append(_workload_row(job.workload_id, job.metadata or {}, lifecycle_provider(job), owner, receipts))
     return {"workloads": result, "providers": [{"name": p.name, "version": p.version} for p in registered_workload_lifecycles()]}
 
 
-def _workload_row(cluster_id, metadata, provider, owner, receipts):
+def _workload_row(workload_id, metadata, provider, owner, receipts):
     owned = bool(owner and metadata.get("owner") == owner)
     return {
-        "cluster_id": cluster_id,
+        "workload_id": workload_id,
         "cluster_name": metadata.get("cluster"),
         "recipe_revision": str(metadata.get("recipe_fingerprint") or ""),
         "owner": str(metadata.get("owner") or ""),
         "owned": owned,
         "provider": provider.name if provider else None,
         "actions": (["status", "sleep", "wake"] if owned else ["status"]) if provider else [],
-        "state": receipts.state(cluster_id) or str(metadata.get("runtime_info", {}).get("lifecycle_state") or "unknown"),
+        "state": receipts.state(workload_id) or str(metadata.get("runtime_info", {}).get("lifecycle_state") or "unknown"),
         "observation": "recorded",
     }
 
@@ -179,8 +187,8 @@ def _workload_row(cluster_id, metadata, provider, owner, receipts):
 def _ready_result(endpoint, *, adopted, owner, sctx):
     from sparkrun import api
 
-    identifier = endpoint["cluster_id"]
-    job = next((job for job in api.list_jobs(sctx=sctx) if job.cluster_id == identifier), None)
+    identifier = endpoint["workload_id"]
+    job = next((job for job in api.list_jobs(sctx=sctx) if job.workload_id == identifier), None)
     metadata = (
         (job.metadata or {})
         if job
@@ -192,7 +200,7 @@ def _ready_result(endpoint, *, adopted, owner, sctx):
     )
     return {
         "state": "ready",
-        "cluster_id": identifier,
+        "workload_id": identifier,
         "endpoint": {key: value for key, value in endpoint.items() if key != "observed_at"},
         "observed_at": endpoint["observed_at"],
         "adopted": adopted,
@@ -200,12 +208,12 @@ def _ready_result(endpoint, *, adopted, owner, sctx):
     }
 
 
-def _exact_job(binding, cluster_id, owner, sctx, *, mutation):
+def _exact_job(binding, workload_id, owner, sctx, *, mutation):
     from sparkrun import api
 
-    if not cluster_id or not binding.recipe_revision:
+    if not workload_id or not binding.recipe_revision:
         raise WorkloadError("workload_identity_required", "Exact workload ID and recipe revision are required")
-    job = next((job for job in api.list_jobs(sctx=sctx) if job.cluster_id == cluster_id), None)
+    job = next((job for job in api.list_jobs(sctx=sctx) if job.workload_id == workload_id), None)
     if job is None or not _matches(job, binding.recipe_revision, binding.cluster_candidates):
         raise WorkloadError("workload_mismatch", "Workload does not match this recipe revision and cluster selection")
     if mutation and (not owner or job.metadata.get("owner") != owner):
@@ -213,46 +221,46 @@ def _exact_job(binding, cluster_id, owner, sctx, *, mutation):
     return job
 
 
-def control(binding: WorkloadBinding, cluster_id: str, action: str, *, owner: str, sctx=None):
+def control(binding: WorkloadBinding, workload_id: str, action: str, *, owner: str, sctx=None):
     """Guard and execute a provider operation for an exact persisted workload."""
     if action not in {"status", "sleep", "wake"}:
         raise ValueError("Unsupported workload action")
     sctx = resolve_sctx(sctx)
     mutation = action != "status"
     with operation_scope(sctx), reserve_resources(sctx.config.config_path.parent, {"*"}):
-        job = _exact_job(binding, cluster_id, owner, sctx, mutation=mutation)
+        job = _exact_job(binding, workload_id, owner, sctx, mutation=mutation)
         provider = lifecycle_provider(job)
         if provider is None:
             raise WorkloadError("lifecycle_unavailable", "No enabled lifecycle provider supports this workload")
         receipts = Receipts(sctx)
         if mutation:
-            receipts.state(cluster_id, "sleeping_pending" if action == "sleep" else "waking")
+            receipts.state(workload_id, "sleeping_pending" if action == "sleep" else "waking")
         result = provider.control(action, job, sctx=sctx)
-        if result.get("cluster_id") != cluster_id or not isinstance(result.get("state"), str):
+        if result.get("workload_id") != workload_id or not isinstance(result.get("state"), str):
             raise WorkloadError("lifecycle_identity_mismatch", "Provider returned a different or invalid workload identity")
-        receipts.state(cluster_id, result["state"])
-        return _workload_row(cluster_id, job.metadata or {}, provider, owner, receipts)
+        receipts.state(workload_id, result["state"])
+        return _workload_row(workload_id, job.metadata or {}, provider, owner, receipts)
 
 
-def stop(binding: WorkloadBinding, cluster_id: str, *, owner: str, sctx=None):
+def stop(binding: WorkloadBinding, workload_id: str, *, owner: str, sctx=None):
     from sparkrun import api
 
     sctx = resolve_sctx(sctx)
     with operation_scope(sctx), reserve_resources(sctx.config.config_path.parent, {"*"}):
-        _exact_job(binding, cluster_id, owner, sctx, mutation=True)
-        result = api.stop(workload_id=cluster_id, sctx=sctx)
+        _exact_job(binding, workload_id, owner, sctx, mutation=True)
+        result = api.stop(workload_id=workload_id, sctx=sctx)
         if not result.success:
             raise WorkloadError("stop_failed", "Could not confirm workload teardown", retryable=True)
         receipts = Receipts(sctx)
-        receipts.state(cluster_id, "stopped")
+        receipts.state(workload_id, "stopped")
         for row in receipts.placements(binding.recipe_revision, owner):
-            if row["placement"]["cluster_id"] == cluster_id:
+            if row["placement"]["workload_id"] == workload_id:
                 receipts.save(row["id"], binding.recipe_revision, owner, row["placement"], "stopped")
-        return {"state": "offline", "cluster_ids": [cluster_id]}
+        return {"state": "offline", "workload_ids": [workload_id]}
 
 
-def _ready(binding, revision, sctx, *, cluster_id="", owner=""):
-    observation = endpoints(recipe_revision=revision, cluster_candidates=binding.cluster_candidates, cluster_id=cluster_id, sctx=sctx)
+def _ready(binding, revision, sctx, *, workload_id="", owner=""):
+    observation = endpoints(recipe_revision=revision, cluster_candidates=binding.cluster_candidates, workload_id=workload_id, sctx=sctx)
     found = [{**ep, "observed_at": observation["observed_at"]} for ep in observation["endpoints"]]
     found.sort(key=lambda ep: ep["owner"] != owner)
     return found[0] if found else None
@@ -264,7 +272,7 @@ def _await_existing(binding, recipe, revision, placement, deadline, sctx, operat
     snapshot = api.status(placement["hosts"], cluster=placement.get("cluster"), sctx=sctx)
     if snapshot.observation_errors or set(placement["hosts"]) - {h.host for h in snapshot.hosts}:
         raise WorkloadError("recovery_unavailable", "Previous placement could not be completely observed", retryable=True)
-    if placement["cluster_id"] not in snapshot.running_cluster_ids():
+    if placement["workload_id"] not in snapshot.running_cluster_ids():
         return None
     if (recipe.post_exec or recipe.post_commands) and not placement.get("post_launch_completed"):
         raise WorkloadError(
@@ -272,7 +280,7 @@ def _await_existing(binding, recipe, revision, placement, deadline, sctx, operat
         )
     while time.monotonic() < deadline:
         operation.check()
-        if endpoint := _ready(binding, revision, sctx, cluster_id=placement["cluster_id"]):
+        if endpoint := _ready(binding, revision, sctx, workload_id=placement["workload_id"]):
             return endpoint
         operation.cancel.wait(min(1, max(0, deadline - time.monotonic())))
     raise WorkloadError("readiness_timeout", "Previous workload is still running but not serving the expected model", retryable=True)
@@ -307,14 +315,14 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
         jobs = [j for j in api.list_jobs(sctx=sctx) if _matches(j, revision, binding.cluster_candidates)]
         for job in jobs:
             if lifecycle_provider(job) and job.metadata.get("owner") == owner:
-                result = control(binding, job.cluster_id, "status", owner=owner, sctx=sctx)
+                result = control(binding, job.workload_id, "status", owner=owner, sctx=sctx)
                 if result["state"] in {"sleeping", "warm"}:
-                    control(binding, job.cluster_id, "wake", owner=owner, sctx=sctx)
+                    control(binding, job.workload_id, "wake", owner=owner, sctx=sctx)
         placements = [{**r["placement"], "post_launch_completed": r["phase"] == "ready"} for r in previous]
-        known = {p["cluster_id"] for p in placements}
+        known = {p["workload_id"] for p in placements}
         for job in jobs:
-            if job.cluster_id not in known and job.hosts:
-                placements.append({"cluster_id": job.cluster_id, "cluster": job.metadata.get("cluster"), "hosts": list(job.hosts)})
+            if job.workload_id not in known and job.hosts:
+                placements.append({"workload_id": job.workload_id, "cluster": job.metadata.get("cluster"), "hosts": list(job.hosts)})
         for placement in placements:
             if endpoint := _await_existing(binding, recipe, revision, placement, deadline, sctx, operation):
                 return _ready_result(endpoint, adopted=True, owner=owner, sctx=sctx)
@@ -331,14 +339,14 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
             except api.InsufficientCapacity:
                 continue
             placement = {
-                "cluster_id": plan.cluster_id,
+                "workload_id": plan.workload_id,
                 "hosts": list(plan.host_list),
                 "cluster": plan.cluster.name if plan.cluster else None,
                 "port": plan.recipe.defaults.get("port", 8000),
                 "post_launch_required": bool(recipe.post_exec or recipe.post_commands),
             }
             receipts.save(operation.id, revision, owner, placement, "launch_started")
-            operation.emit("progress", stage="launch", message="Launching workload", cluster_id=plan.cluster_id)
+            operation.emit("progress", stage="launch", message="Launching workload", workload_id=plan.workload_id)
             result = api.run(options, plan=plan, sctx=sctx)
             break
         if result is None:
@@ -364,13 +372,13 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
             receipts.save(operation.id, revision, owner, placement, "hooks_started")
             api.post_launch(result, trust=False, readiness=readiness, sctx=sctx)
         receipts.save(operation.id, revision, owner, placement, "ready")
-        endpoint = _ready(binding, revision, sctx, cluster_id=result.cluster_id, owner=owner)
+        endpoint = _ready(binding, revision, sctx, workload_id=result.workload_id, owner=owner)
         if endpoint is None:
             raise WorkloadError("endpoint_unavailable", "Workload did not publish the expected live model identity", retryable=True)
         return _ready_result(endpoint, adopted=False, owner=owner, sctx=sctx)
 
 
-def reconcile(binding: WorkloadBinding, cluster_id: str, *, owner: str, acknowledge_effects=False, sctx=None):
+def reconcile(binding: WorkloadBinding, workload_id: str, *, owner: str, acknowledge_effects=False, sctx=None):
     """Clear uncertain hooks only after operator acknowledgement and live evidence.
 
     This does not re-run hooks or mutate a remote workload. A complete absent
@@ -384,13 +392,13 @@ def reconcile(binding: WorkloadBinding, cluster_id: str, *, owner: str, acknowle
         raise WorkloadError("acknowledgement_required", "Inspect post-launch effects, then explicitly acknowledge their reconciliation")
     sctx = resolve_sctx(sctx)
     with operation_scope(sctx), reserve_resources(sctx.config.config_path.parent, {"*"}):
-        if not binding.recipe_revision or not cluster_id:
+        if not binding.recipe_revision or not workload_id:
             raise WorkloadError("workload_identity_required", "Exact workload ID and recipe revision are required")
         journal = Receipts(sctx)
         rows = [
             r
             for r in journal.placements(binding.recipe_revision, owner)
-            if r["placement"]["cluster_id"] == cluster_id
+            if r["placement"]["workload_id"] == workload_id
             and (not binding.cluster_candidates or r["placement"].get("cluster") in binding.cluster_candidates)
         ]
         if not rows:
@@ -400,16 +408,16 @@ def reconcile(binding: WorkloadBinding, cluster_id: str, *, owner: str, acknowle
         if status.observation_errors or set(placement["hosts"]) - {h.host for h in status.hosts}:
             raise WorkloadError("recovery_unavailable", "Placement could not be completely observed", retryable=True)
         phase = "stopped"
-        if cluster_id in status.running_cluster_ids():
-            _exact_job(binding, cluster_id, owner, sctx, mutation=True)
-            observed = discover_snapshot(cluster_ids={cluster_id}, sctx=sctx)
+        if workload_id in status.running_cluster_ids():
+            _exact_job(binding, workload_id, owner, sctx, mutation=True)
+            observed = discover_snapshot(cluster_ids={workload_id}, sctx=sctx)
             if not any(ep.healthy and ep.actual_models and ep.recipe_revision == binding.recipe_revision for ep in observed.endpoints):
                 raise WorkloadError("recovery_unavailable", "Workload is running but its live model identity is unverified", retryable=True)
             phase = "ready"
         for row in rows:
             journal.save(row["id"], binding.recipe_revision, owner, row["placement"], phase)
-        journal.state(cluster_id, "running" if phase == "ready" else "stopped")
-        return {"cluster_id": cluster_id, "state": phase, "receipts": len(rows)}
+        journal.state(workload_id, "running" if phase == "ready" else "stopped")
+        return {"workload_id": workload_id, "state": phase, "receipts": len(rows)}
 
 
 __all__ = [

@@ -727,14 +727,14 @@ class TestDiscovery:
 
         jobs = [
             JobInfo(
-                cluster_id=running_meta["cluster_id"],
+                workload_id=running_meta["cluster_id"],
                 recipe=running_meta["recipe"],
                 runtime=running_meta["runtime"],
                 hosts=tuple(running_meta["hosts"]),
                 metadata=running_meta,
             ),
             JobInfo(
-                cluster_id=stale_meta["cluster_id"],
+                workload_id=stale_meta["cluster_id"],
                 recipe=stale_meta["recipe"],
                 runtime=stale_meta["runtime"],
                 hosts=tuple(stale_meta["hosts"]),

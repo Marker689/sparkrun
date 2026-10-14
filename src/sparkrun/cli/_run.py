@@ -539,7 +539,7 @@ def run(
         init_port=init_port,
         executor_config=cli_executor_opts or None,
         rootful=rootful,
-        cluster_id_override=cluster_id_override,
+        workload_id_override=cluster_id_override,
         sync_tuning=not no_sync_tuning,
         extra_docker_opts=tuple(executor_args) if executor_args else None,
         topology=cluster_cfg.topology,
@@ -600,7 +600,7 @@ def run(
             sctx=sctx,
         )
         if _match is not None:
-            click.echo("Job already running (cluster_id: %s)" % _match.cluster_id)
+            click.echo("Job already running (cluster_id: %s)" % _match.workload_id)
             click.echo("  Recipe: %s" % (_match.recipe or recipe.qualified_name or "unknown"))
             click.echo("  Hosts:  %s" % ", ".join(_match.hosts))
             if _match.other_cluster_ids:
@@ -699,7 +699,7 @@ def run(
 
     # region USER FACING STDOUT INFORMATION
 
-    click.echo("Cluster:   %s" % result.cluster_id)
+    click.echo("Cluster:   %s" % run_result.workload_id)
     click.echo()
     click.echo("Serve command:")
     for line in result.serve_command.strip().splitlines():

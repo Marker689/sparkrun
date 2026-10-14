@@ -34,7 +34,7 @@ _DISCOVERY_ENDPOINTS = {
     "items": {
         "type": "object",
         "properties": {
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "model": {"type": "string"},
             "served_model_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
             "host": {"type": "string"},
@@ -51,7 +51,7 @@ _DISCOVERY_ENDPOINTS = {
             "runtime": {"type": "string"},
         },
         "required": [
-            "cluster_id",
+            "workload_id",
             "model",
             "served_model_name",
             "host",
@@ -384,7 +384,7 @@ RESULT_SCHEMAS = {
         "items": {
             "type": "object",
             "properties": {
-                "cluster_id": {"type": "string"},
+                "workload_id": {"type": "string"},
                 "hosts": {"type": "array", "items": {"type": "string"}},
                 "started_at": {"anyOf": [{"type": "number"}, {"type": "null"}]},
                 "metadata": {"type": "object", "additionalProperties": {}},
@@ -393,7 +393,7 @@ RESULT_SCHEMAS = {
                 "recipe": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 "runtime": {"anyOf": [{"type": "string"}, {"type": "null"}]},
             },
-            "required": ["cluster_id", "hosts", "started_at", "metadata", "intent_id", "placement_token", "recipe", "runtime"],
+            "required": ["workload_id", "hosts", "started_at", "metadata", "intent_id", "placement_token", "recipe", "runtime"],
             "additionalProperties": True,
         },
     },
@@ -411,7 +411,7 @@ RESULT_SCHEMAS = {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "cluster_id": {"type": "string"},
+                                    "workload_id": {"type": "string"},
                                     "intent_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                                     "recipe_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                                     "runtime_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -451,7 +451,7 @@ RESULT_SCHEMAS = {
                                     },
                                 },
                                 "required": [
-                                    "cluster_id",
+                                    "workload_id",
                                     "intent_id",
                                     "recipe_name",
                                     "runtime_name",
@@ -481,7 +481,7 @@ RESULT_SCHEMAS = {
                                         "items": {
                                             "type": "object",
                                             "properties": {
-                                                "cluster_id": {"type": "string"},
+                                                "workload_id": {"type": "string"},
                                                 "intent_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                                                 "recipe_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                                                 "runtime_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -521,7 +521,7 @@ RESULT_SCHEMAS = {
                                                 },
                                             },
                                             "required": [
-                                                "cluster_id",
+                                                "workload_id",
                                                 "intent_id",
                                                 "recipe_name",
                                                 "runtime_name",
@@ -592,13 +592,13 @@ RESULT_SCHEMAS = {
     "workloads.stop_matching": {
         "type": "object",
         "properties": {
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "hosts_targeted": {"type": "array", "items": {"type": "string"}},
             "containers_removed": {"type": "integer"},
             "errors": {"type": "array", "items": {"type": "string"}},
             "hosts_failed": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["cluster_id", "hosts_targeted", "containers_removed", "errors", "hosts_failed"],
+        "required": ["workload_id", "hosts_targeted", "containers_removed", "errors", "hosts_failed"],
         "additionalProperties": True,
     },
     "workloads.stop_all": {
@@ -612,11 +612,11 @@ RESULT_SCHEMAS = {
                         "additionalProperties": {
                             "type": "object",
                             "properties": {
-                                "cluster_id": {"type": "string"},
+                                "workload_id": {"type": "string"},
                                 "members": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
                                 "meta": {"type": "object", "additionalProperties": {}},
                             },
-                            "required": ["cluster_id", "members", "meta"],
+                            "required": ["workload_id", "members", "meta"],
                             "additionalProperties": True,
                         },
                     },
@@ -625,14 +625,14 @@ RESULT_SCHEMAS = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "cluster_id": {"type": "string"},
+                                "workload_id": {"type": "string"},
                                 "host": {"type": "string"},
                                 "name": {"type": "string"},
                                 "status": {"type": "string"},
                                 "image": {"type": "string"},
                                 "meta": {"type": "object", "additionalProperties": {}},
                             },
-                            "required": ["cluster_id", "host", "name", "status", "image", "meta"],
+                            "required": ["workload_id", "host", "name", "status", "image", "meta"],
                             "additionalProperties": True,
                         },
                     },
@@ -704,7 +704,7 @@ RESULT_SCHEMAS = {
                     {
                         "type": "object",
                         "properties": {
-                            "cluster_id": {"type": "string"},
+                            "workload_id": {"type": "string"},
                             "host_list": {"type": "array", "items": {"type": "string"}},
                             "placement": {
                                 "anyOf": [
@@ -752,7 +752,7 @@ RESULT_SCHEMAS = {
                             "scheduler": {"type": "string"},
                         },
                         "required": [
-                            "cluster_id",
+                            "workload_id",
                             "host_list",
                             "placement",
                             "executor",
@@ -778,7 +778,7 @@ RESULT_SCHEMAS = {
                     {"type": "null"},
                 ]
             },
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "host_list": {"type": "array", "items": {"type": "string"}},
             "container_image": {"type": "string"},
             "container_image_sha": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -803,7 +803,7 @@ RESULT_SCHEMAS = {
             "results",
             "outputs",
             "run_result",
-            "cluster_id",
+            "workload_id",
             "host_list",
             "container_image",
             "container_image_sha",
@@ -1316,7 +1316,7 @@ RESULT_SCHEMAS = {
     "workloads.run": {
         "type": "object",
         "properties": {
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "host_list": {"type": "array", "items": {"type": "string"}},
             "placement": {
                 "anyOf": [
@@ -1364,7 +1364,7 @@ RESULT_SCHEMAS = {
             "scheduler": {"type": "string"},
         },
         "required": [
-            "cluster_id",
+            "workload_id",
             "host_list",
             "placement",
             "executor",
@@ -1425,7 +1425,7 @@ RESULT_SCHEMAS = {
             "scheduler_defaulted": {"type": "boolean"},
             "intent_id": {"type": "string"},
             "placement_token": {"type": "string"},
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "host_hardware": {"type": "object", "additionalProperties": {}},
             "override_resolution": {},
             "offline": {
@@ -1472,7 +1472,7 @@ RESULT_SCHEMAS = {
             "scheduler_defaulted",
             "intent_id",
             "placement_token",
-            "cluster_id",
+            "workload_id",
             "host_hardware",
             "override_resolution",
             "offline",
@@ -1490,7 +1490,7 @@ RESULT_SCHEMAS = {
         "properties": {
             "format": {"type": "integer"},
             "kind": {"type": "string"},
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "engine": {"type": "string"},
             "model": {"type": "string"},
             "model_revision": {"type": "string"},
@@ -1591,7 +1591,7 @@ RESULT_SCHEMAS = {
         "required": [
             "format",
             "kind",
-            "cluster_id",
+            "workload_id",
             "engine",
             "model",
             "model_revision",
@@ -1646,7 +1646,7 @@ RESULT_SCHEMAS = {
                     "scheduler_defaulted": {"type": "boolean"},
                     "intent_id": {"type": "string"},
                     "placement_token": {"type": "string"},
-                    "cluster_id": {"type": "string"},
+                    "workload_id": {"type": "string"},
                     "host_hardware": {"type": "object", "additionalProperties": {}},
                     "override_resolution": {},
                     "offline": {
@@ -1693,7 +1693,7 @@ RESULT_SCHEMAS = {
                     "scheduler_defaulted",
                     "intent_id",
                     "placement_token",
-                    "cluster_id",
+                    "workload_id",
                     "host_hardware",
                     "override_resolution",
                     "offline",
@@ -1796,7 +1796,7 @@ RESULT_SCHEMAS = {
                     {
                         "type": "object",
                         "properties": {
-                            "cluster_id": {"type": "string"},
+                            "workload_id": {"type": "string"},
                             "host_list": {"type": "array", "items": {"type": "string"}},
                             "placement": {
                                 "anyOf": [
@@ -1844,7 +1844,7 @@ RESULT_SCHEMAS = {
                             "scheduler": {"type": "string"},
                         },
                         "required": [
-                            "cluster_id",
+                            "workload_id",
                             "host_list",
                             "placement",
                             "executor",
@@ -1870,7 +1870,7 @@ RESULT_SCHEMAS = {
                     {"type": "null"},
                 ]
             },
-            "cluster_id": {"type": "string"},
+            "workload_id": {"type": "string"},
             "host_list": {"type": "array", "items": {"type": "string"}},
             "container_image": {"type": "string"},
             "container_image_sha": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -1895,7 +1895,7 @@ RESULT_SCHEMAS = {
             "results",
             "outputs",
             "run_result",
-            "cluster_id",
+            "workload_id",
             "host_list",
             "container_image",
             "container_image_sha",
@@ -1930,7 +1930,7 @@ RESULT_SCHEMAS = {
                         "host": {"type": "string"},
                         "port": {"type": "integer"},
                         "models": {"type": "array", "items": {"type": "string"}},
-                        "cluster_id": {"type": "string"},
+                        "workload_id": {"type": "string"},
                         "healthy": {"type": "boolean"},
                         "cluster_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                         "recipe_revision": {"type": "string"},
@@ -1941,7 +1941,7 @@ RESULT_SCHEMAS = {
                         "host",
                         "port",
                         "models",
-                        "cluster_id",
+                        "workload_id",
                         "healthy",
                         "cluster_name",
                         "recipe_revision",
@@ -3166,7 +3166,7 @@ _workload_strings = {"type": "array", "items": _workload_string}
 _workload_endpoint = RESULT_SCHEMAS["discovery.snapshot"]["properties"]["endpoints"]["items"]
 _workload_row = object_schema(
     {
-        "cluster_id": _workload_string,
+        "workload_id": _workload_string,
         "cluster_name": _workload_nullable,
         "recipe_revision": _workload_string,
         "owner": _workload_string,
@@ -3176,28 +3176,28 @@ _workload_row = object_schema(
         "state": _workload_string,
         "observation": {"enum": ["recorded"], "type": "string"},
     },
-    ["cluster_id", "cluster_name", "recipe_revision", "owner", "owned", "provider", "actions", "state", "observation"],
+    ["workload_id", "cluster_name", "recipe_revision", "owner", "owned", "provider", "actions", "state", "observation"],
 )
 RESULT_SCHEMAS.update(
     {
         "workloads.ensure_ready": object_schema(
             {
                 "state": {"type": "string", "enum": ["ready"]},
-                "cluster_id": _workload_string,
+                "workload_id": _workload_string,
                 "endpoint": _workload_endpoint,
                 "adopted": {"type": "boolean"},
                 "workload": _workload_row,
                 "observed_at": {"type": "number"},
             },
-            ["state", "cluster_id", "endpoint", "adopted", "observed_at", "workload"],
+            ["state", "workload_id", "endpoint", "adopted", "observed_at", "workload"],
         ),
         "workloads.stop": object_schema(
-            {"state": {"type": "string", "enum": ["offline"]}, "cluster_ids": _workload_strings}, ["state", "cluster_ids"]
+            {"state": {"type": "string", "enum": ["offline"]}, "workload_ids": _workload_strings}, ["state", "workload_ids"]
         ),
         "workloads.control": _workload_row,
         "workloads.reconcile": object_schema(
-            {"cluster_id": _workload_string, "state": _workload_string, "receipts": {"type": "integer"}},
-            ["cluster_id", "state", "receipts"],
+            {"workload_id": _workload_string, "state": _workload_string, "receipts": {"type": "integer"}},
+            ["workload_id", "state", "receipts"],
         ),
         "workloads.inventory": object_schema(
             {

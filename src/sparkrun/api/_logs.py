@@ -198,7 +198,7 @@ def open_log_target(
     which placement token the scheduler assigned it.
 
     Args:
-        workload_id: Workload identity returned in ``RunResult.cluster_id``.
+        workload_id: Workload identity returned in ``RunResult.workload_id``.
         recipe: Recipe name or object, when addressing the workload by
             recipe instead of by id.
         hosts: Explicit host list.  Required for the recipe form; for the

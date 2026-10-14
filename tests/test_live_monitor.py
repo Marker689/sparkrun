@@ -254,7 +254,7 @@ def test_serialize_activity_shape():
     assert row["sample"]["gpu_util_pct"] == "5"
     assert row["used_slots"] == 1
     wl = row["workloads"][0]
-    assert wl["cluster_id"] == "sparkrun_deadbeefdeadbeef_aabbccddeeff"
+    assert wl["workload_id"] == "sparkrun_deadbeefdeadbeef_aabbccddeeff"
     assert wl["recipe"] == "qwen3-1.7b-vllm"
     assert wl["containers"][0]["image"] == "(local process)"
 

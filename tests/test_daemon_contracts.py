@@ -324,9 +324,9 @@ def test_run_approval_executes_same_live_plan_and_context(monkeypatch):
 
     plan = SimpleNamespace(recipe=SimpleNamespace(post_exec=[], post_commands=[]))
     context = SimpleNamespace(operation=OperationState())
-    result = SimpleNamespace(rc=0, cluster_id="same-plan", already_running=False, launch_result=None)
+    result = SimpleNamespace(rc=0, workload_id="same-plan", already_running=False, launch_result=None)
     observed = []
-    monkeypatch.setattr(ops, "to_wire", lambda obj: {"display": obj.cluster_id} if obj is result else {"display": "plan"})
+    monkeypatch.setattr(ops, "to_wire", lambda obj: {"display": obj.workload_id} if obj is result else {"display": "plan"})
 
     def resolve(options, *, sctx):
         assert sctx is context

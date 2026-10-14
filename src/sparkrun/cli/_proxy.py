@@ -824,7 +824,7 @@ def unload_cmd(ctx, recipe_name, hosts, hosts_file, cluster_name, dry_run):
         # must still retire the registration when discovery confirms absence.
         click.echo("No running workload found for this recipe; removing its proxy registration.")
     except api.AmbiguousWorkload as exc:
-        click.echo("Error: Multiple workloads match this recipe: %s" % ", ".join(exc.cluster_ids), err=True)
+        click.echo("Error: Multiple workloads match this recipe: %s" % ", ".join(exc.workload_ids), err=True)
         click.echo("Stop the intended workloads by job ID, then retry proxy unload. Proxy registration was kept.", err=True)
         sys.exit(1)
     except api.SparkrunError as exc:

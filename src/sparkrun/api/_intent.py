@@ -35,7 +35,7 @@ class IntentMatch:
     """A running deployment of a given launch intent."""
 
     intent_id: str
-    cluster_id: str
+    workload_id: str
     """The running deployment's full ``sparkrun_<intent>_<placement>`` id."""
     hosts: tuple[str, ...] = ()
     """Hosts carrying at least one of its workloads, in query order."""
@@ -124,7 +124,7 @@ def find_running_intent(
 
     return IntentMatch(
         intent_id=intent_id,
-        cluster_id=cluster_id,
+        workload_id=cluster_id,
         hosts=tuple(match_hosts),
         recipe=getattr(w, "recipe_name", None),
         runtime=getattr(w, "runtime_name", None),

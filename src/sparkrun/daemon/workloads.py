@@ -51,11 +51,11 @@ def register_workload_ops():
         elif name == "endpoints":
             fields.pop("recipe")
             fields.pop("overrides")
-            fields["cluster_id"] = {"type": "string", "maxLength": 1024}
+            fields["workload_id"] = {"type": "string", "maxLength": 1024}
             required = []
         else:
-            fields["cluster_id"] = {"type": "string", "maxLength": 1024}
-            required += ["recipe_revision", "cluster_id"]
+            fields["workload_id"] = {"type": "string", "maxLength": 1024}
+            required += ["recipe_revision", "workload_id"]
             if name == "reconcile":
                 fields["acknowledge_effects"] = {"type": "boolean", "enum": [True]}
                 required.append("acknowledge_effects")

@@ -1010,7 +1010,7 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json, c
             for cid, group_data in out["groups"].items():
                 group_data["label"] = format_job_label(group_data["meta"], cid)
             for entry_data in out["solo_entries"]:
-                entry_data["label"] = format_job_label(entry_data["meta"], entry_data["cluster_id"])
+                entry_data["label"] = format_job_label(entry_data["meta"], entry_data["workload_id"])
             print_json(out)
             return
 
@@ -1021,7 +1021,7 @@ def cluster_status(ctx, hosts, hosts_file, cluster_name, dry_run, output_json, c
         for cid, group_data in out["groups"].items():
             group_data["label"] = format_job_label(group_data["meta"], cid)
         for entry_data in out["solo_entries"]:
-            entry_data["label"] = format_job_label(entry_data["meta"], entry_data["cluster_id"])
+            entry_data["label"] = format_job_label(entry_data["meta"], entry_data["workload_id"])
 
         print_json(out)
         return
@@ -1159,7 +1159,7 @@ def cluster_check_job(ctx, target, hosts, hosts_file, cluster_name, tp_override,
         except Exception:
             jobs = []
         for j in jobs:
-            if j.cluster_id == cid:
+            if j.workload_id == cid:
                 meta = dict(j.metadata)
                 break
         if meta is None:

@@ -312,9 +312,9 @@ def _resolve_running_deployment(
         # rather than silently benchmarking one of several.
         emitter.warning(
             "--skip-run: %d deployments of this workload are running; benchmarking %s"
-            % (len(match.other_cluster_ids) + 1, match.cluster_id)
+            % (len(match.other_cluster_ids) + 1, match.workload_id)
         )
-    return hosts, len(hosts) <= 1, match.cluster_id
+    return hosts, len(hosts) <= 1, match.workload_id
 
 
 # ---------------------------------------------------------------------------
@@ -1064,7 +1064,7 @@ def _execute_benchmark(
                     exit_code=run_result.rc,
                 )
 
-            cluster_id = run_result.cluster_id
+            cluster_id = run_result.workload_id
             bench_result.cluster_id = cluster_id
             if state is not None:
                 state.cluster_id = cluster_id
@@ -2130,7 +2130,7 @@ def _build_result(execution: BenchmarkExecution) -> BenchmarkResult:
         results=deepcopy(execution.results or {}),
         outputs={key: str(value) for key, value in (execution.outputs or {}).items() if value is not None},
         run_result=execution.run_result,
-        cluster_id=execution.cluster_id or "",
+        workload_id=execution.cluster_id or "",
         host_list=tuple(execution.host_list or ()),
         container_image=execution.container_image or "",
         container_image_sha=execution.container_image_sha,

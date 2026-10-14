@@ -34,7 +34,7 @@ def _make_job(
         meta.update(extra_meta)
 
     return JobInfo(
-        cluster_id=cluster_id,
+        workload_id=cluster_id,
         recipe=recipe,
         runtime=runtime,
         hosts=(host,),
@@ -141,7 +141,7 @@ class TestDiscoveryApiIntegration:
             "port": "not-a-number",
         }
         job = JobInfo(
-            cluster_id="sparkrun_X",
+            workload_id="sparkrun_X",
             recipe="test",
             runtime="vllm",
             hosts=("10.0.0.1",),
@@ -224,7 +224,7 @@ def test_named_cluster_and_launch_revision_survive_discovery_and_api_projection(
     job = _make_job("opaque-job", extra_meta={"cluster": "spark-a", "recipe_fingerprint": "abc123abc123"})
     endpoint = _endpoint_from_job(job, ib_to_mgmt={})
     public = _to_endpoint(endpoint)
-    assert endpoint.cluster_id == public.cluster_id == "opaque-job"
+    assert endpoint.cluster_id == public.workload_id == "opaque-job"
     assert endpoint.cluster_name == public.cluster_name == "spark-a"
     assert endpoint.recipe_revision == public.recipe_revision == "abc123abc123"
     legacy = _to_endpoint(_endpoint_from_job(_make_job("old-job"), ib_to_mgmt={}))

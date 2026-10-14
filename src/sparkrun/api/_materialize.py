@@ -344,7 +344,7 @@ def materialize(
         format=2,
         kind="sparkrun-resolved-launch",
         recipe=recipe.qualified_name,
-        cluster_id=plan.cluster_id,
+        workload_id=plan.workload_id,
         runtime=runtime.runtime_name,
         engine=spec_engine,
         model=recipe.model,

@@ -149,10 +149,10 @@ Both return after submission. Use `plugins.k8s.api.logs(name=..., kind="jobset")
 or `kind="job"`, optionally with `follow=True`, to consume structured `LogLine`
 records. Close the iterator when stopping early. `setup k8s launch --follow` and
 `setup k8s run-job --follow` render that iterator in the CLI. Native `run` JobSet
-submission returns without attachment; use `api.logs(workload_id=result.cluster_id)`
-or `api.open_log_target(workload_id=result.cluster_id)` for shared log consumption.
-Native `RunResult.cluster_id` remains the portable workload ID. Use
-`api.stop(workload_id=result.cluster_id)` for shared teardown; the saved native
+submission returns without attachment; use `api.logs(workload_id=result.workload_id)`
+or `api.open_log_target(workload_id=result.workload_id)` for shared log consumption.
+Native `RunResult.workload_id` remains the portable workload ID. Use
+`api.stop(workload_id=result.workload_id)` for shared teardown; the saved native
 resource reference and resolved Kubernetes target survive a new API session and
 changes to defaults. `api.status(..., executor="k8s")` reports submitted JobSets
 for intent discovery and replacement. Use `result.metadata["k8s_jobset"]` for the
@@ -433,8 +433,14 @@ with `declared_hash` added for declared inputs. See the
 ### Workload IDs: `workload_id`
 
 `api.stop`, `api.logs` and `api.open_log_target` all take the workload's id as
-`workload_id` (the value of `RunResult.cluster_id`). The 0.3.x
-`api.stop(cluster_id=...)` keyword is removed. `api.stop(..., dry_run=True)`
+`workload_id`, the same name every result type and the daemon wire use for it
+(`RunResult.workload_id`, `RunPlan.workload_id`, `StopResult.workload_id`,
+`JobInfo.workload_id`, `BenchmarkResult.workload_id`; `RunOptions.workload_id_override`;
+`AmbiguousWorkload.workload_ids`; `api.discovery_snapshot(workload_ids=...)` and the
+`api.workloads` functions and dicts). 0.3.x spelled these `cluster_id`; no alias is
+kept. Core and executor types (`RunningWorkload`, `LaunchResult`, `ClusterStatus`)
+keep `cluster_id` in Python, and the wire renders it as `workload_id`. Workload
+lifecycle providers return `{"workload_id": ..., "state": ...}`. `api.stop(..., dry_run=True)`
 resolves the target, hosts and executor without tearing anything down and returns
 a `StopResult` with `dry_run=True`.
 

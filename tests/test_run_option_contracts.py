@@ -43,7 +43,7 @@ def test_port_override_reaches_plan_command_and_metadata(run_env, monkeypatch, s
 
     def plugin(options, sctx, *, plan, started_at, before_start):
         return api.RunResult(
-            cluster_id=plan.cluster_id,
+            workload_id=plan.workload_id,
             host_list=plan.host_list,
             placement=plan.placement,
             scheduler=plan.scheduler,
@@ -76,7 +76,7 @@ def test_ensure_matches_the_requested_port_only(run_env, monkeypatch, running_po
     running_intent = generate_intent_id(env.recipe, {"port": running_port})
     from sparkrun.api._intent import IntentMatch
 
-    match = IntentMatch(intent_id=running_intent, cluster_id="sparkrun_%s_aaaaaaaaaaaa" % running_intent, hosts=("localhost",))
+    match = IntentMatch(intent_id=running_intent, workload_id="sparkrun_%s_aaaaaaaaaaaa" % running_intent, hosts=("localhost",))
     find = Mock(side_effect=lambda intent, *a, **kw: match if intent == running_intent else None)
     monkeypatch.setattr("sparkrun.api._intent.find_running_intent", find)
     launch = Mock(return_value=env.launch)
@@ -86,7 +86,7 @@ def test_ensure_matches_the_requested_port_only(run_env, monkeypatch, running_po
     assert result.already_running is (running_port == 9001)
     assert launch.call_count == int(running_port != 9001)
     if result.already_running:
-        assert result.cluster_id == match.cluster_id and result.placement_token == "aaaaaaaaaaaa"
+        assert result.workload_id == match.workload_id and result.placement_token == "aaaaaaaaaaaa"
         assert result.timeline is None and result.recipe_fingerprint == ""
         assert result.launch_result is None and result.placement is None
 

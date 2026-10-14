@@ -287,7 +287,7 @@ def test_native_handler_result_needs_no_private_launch_handle(
         assert options.trust is False
         options.recipe.post_commands = ["native handler owns these hooks"]
         return api.RunResult(
-            cluster_id=plan.cluster_id,
+            workload_id=plan.workload_id,
             host_list=plan.host_list,
             placement=plan.placement,
             scheduler=plan.scheduler,

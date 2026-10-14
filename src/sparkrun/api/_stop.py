@@ -53,7 +53,7 @@ def stop(
     When both are provided, ``workload_id`` wins.
 
     Args:
-        workload_id: The workload's id (``RunResult.cluster_id``).
+        workload_id: The workload's id (``RunResult.workload_id``).
         dry_run: Resolve the target, hosts and executor exactly as a real stop
             would, then return without tearing anything down
             (``result.dry_run`` is true, ``containers_removed`` is 0).
@@ -200,7 +200,7 @@ def stop(
 
     if dry_run:
         logger.info("Dry run: would stop %s on %s", cluster_id, ", ".join(target_hosts))
-        return StopResult(cluster_id=cluster_id, hosts_targeted=tuple(target_hosts), containers_removed=0, dry_run=True)
+        return StopResult(workload_id=cluster_id, hosts_targeted=tuple(target_hosts), containers_removed=0, dry_run=True)
 
     try:
         native_removed = executor.stop_workload(cluster_id, metadata=meta)
@@ -209,7 +209,7 @@ def stop(
     except Exception as exc:
         logger.warning("Keeping job metadata for %s — native teardown failed: %s", cluster_id, exc)
         return StopResult(
-            cluster_id=cluster_id,
+            workload_id=cluster_id,
             hosts_targeted=tuple(target_hosts),
             containers_removed=0,
             errors=(str(exc),),
@@ -248,7 +248,7 @@ def stop(
             )
 
     return StopResult(
-        cluster_id=cluster_id,
+        workload_id=cluster_id,
         hosts_targeted=tuple(target_hosts),
         containers_removed=removed_count,
         errors=tuple(errors),

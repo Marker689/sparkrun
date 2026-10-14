@@ -182,8 +182,8 @@ class DiagnosticsCapture(RunDiagnosticsCollector):
 
     def record_plan(self, plan, *, dry_run=False):
         self.emit_recipe(plan.recipe)
-        if not dry_run and plan.cluster_id:
-            self._workloads.add(plan.cluster_id)
+        if not dry_run and plan.workload_id:
+            self._workloads.add(plan.workload_id)
         target = plan.executor_target
         self.collect_target(
             hosts=list(plan.host_list),
@@ -199,14 +199,14 @@ class DiagnosticsCapture(RunDiagnosticsCollector):
         elif name == "run":
             self.emit_launch_result(result)
             self.emit_serve_command(result.serve_command, result.container_image)
-            if result.cluster_id and not dry_run:
-                self._workloads.add(result.cluster_id)
+            if result.workload_id and not dry_run:
+                self._workloads.add(result.workload_id)
         elif name in {"benchmark", "resume_benchmark"}:
             self.writer.emit(
                 "benchmark_result",
                 {
                     "benchmark_id": result.benchmark_id,
-                    "workload_id": result.cluster_id,
+                    "workload_id": result.workload_id,
                     "success": result.success,
                     "state_dir": result.state_dir,
                     "outputs": result.outputs,
@@ -214,8 +214,8 @@ class DiagnosticsCapture(RunDiagnosticsCollector):
             )
             if not result.success:
                 self.emit_error(name, "Benchmark measurement policy was not satisfied")
-            if result.cluster_id and not dry_run:
-                self._workloads.add(result.cluster_id)
+            if result.workload_id and not dry_run:
+                self._workloads.add(result.workload_id)
 
     def finish(self):
         from sparkrun.core.operation import CURRENT

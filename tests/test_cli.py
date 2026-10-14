@@ -1246,7 +1246,7 @@ class TestClusterCommands:
         data = json.loads(result.output)
         assert "solo_entries" in data
         assert "groups" in data
-        assert data["solo_entries"][0]["cluster_id"] == "cid1"
+        assert data["solo_entries"][0]["workload_id"] == "cid1"
 
     def test_top_level_status_json(self, runner, cluster_setup):
         """The top-level `status` alias forwards --json to cluster status."""
@@ -1257,7 +1257,7 @@ class TestClusterCommands:
 
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["solo_entries"][0]["cluster_id"] == "cid1"
+        assert data["solo_entries"][0]["workload_id"] == "cid1"
 
     def test_cluster_create(self, runner, tmp_path, monkeypatch):
         """Test creating a cluster."""
@@ -2219,7 +2219,7 @@ class TestClusterMonitor:
             assert rows["10.0.0.1"]["sample"]["hostname"] == "host1"
             assert rows["10.0.0.1"]["sample"]["cpu_usage_pct"] == "12.3"
             # Occupancy (all executors) now surfaces in --json.
-            assert rows["10.0.0.1"]["workloads"][0]["cluster_id"] == "sparkrun_x"
+            assert rows["10.0.0.1"]["workloads"][0]["workload_id"] == "sparkrun_x"
             assert rows["10.0.0.1"]["used_slots"] == 1
             # Host with an error and no telemetry.
             assert rows["10.0.0.2"]["error"] == "connection refused"

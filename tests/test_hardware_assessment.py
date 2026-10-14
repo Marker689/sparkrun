@@ -168,7 +168,7 @@ def test_run_hands_the_plan_assessment_to_the_launch(recipe, monkeypatch, v, rep
         plan = replace(plan, hardware_reported=True)
     with mock.patch("sparkrun.core.launcher.launch_inference") as launch:
         launch.return_value = mock.MagicMock(
-            cluster_id=plan.cluster_id,
+            cluster_id=plan.workload_id,
             host_list=list(plan.host_list),
             rc=0,
             is_solo=False,

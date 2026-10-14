@@ -116,10 +116,10 @@ def fake_recipe_env(tmp_path: Path, monkeypatch):
     return recipe
 
 
-def _make_fake_run_result(cluster_id: str = "sparkrun_0123456789abcdef_aabbccddeeff"):
+def _make_fake_run_result(workload_id: str = "sparkrun_0123456789abcdef_aabbccddeeff"):
     """Build a fake RunResult with the minimal fields _benchmark.py reads."""
     rr = MagicMock()
-    rr.cluster_id = cluster_id
+    rr.workload_id = workload_id
     rr.intent_id = "0123456789abcdef"
     rr.placement_token = "aabbccddeeff"
     rr.host_list = ("h1",)

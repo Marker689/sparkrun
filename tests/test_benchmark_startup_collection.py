@@ -86,7 +86,7 @@ def bench_env(tmp_path, monkeypatch):
     monkeypatch.setattr("sparkrun.core.validation.validate_for_launch", lambda *a, **kw: ([], False))
     monkeypatch.setattr("sparkrun.api._hosts.resolve_host_list", lambda *a, **kw: ["localhost"])
     monkeypatch.setattr("sparkrun.api.plan", Mock(return_value=SimpleNamespace(host_list=["localhost"], is_solo=True)))
-    run = Mock(return_value=SimpleNamespace(rc=0, launch_result=launch, cluster_id=launch.cluster_id, serve_port=8000, serve_command=""))
+    run = Mock(return_value=SimpleNamespace(rc=0, launch_result=launch, workload_id=launch.cluster_id, serve_port=8000, serve_command=""))
     stop = Mock()
     monkeypatch.setattr("sparkrun.api.run", run)
     monkeypatch.setattr("sparkrun.api.stop", stop)

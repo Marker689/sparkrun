@@ -113,7 +113,7 @@ class RunningSnapshot:
         return any(c.matches_job(job) for c in self.coverage)
 
     def confirms_absent(self, job) -> bool:
-        return job.cluster_id not in self.cluster_ids and any(c.covers_job(job) for c in self.coverage)
+        return job.workload_id not in self.cluster_ids and any(c.covers_job(job) for c in self.coverage)
 
     def to_dict(self):
         return {"version": 2, "cluster_ids": sorted(self.cluster_ids), "coverage": [c.to_dict() for c in self.coverage]}

@@ -107,7 +107,7 @@ class HostsUnreachable(SparkrunError):
 
 
 class JobNotFound(SparkrunError):
-    """No running job matches the given identification (cluster_id / recipe+hosts)."""
+    """No running job matches the given identification (workload_id / recipe+hosts)."""
 
 
 class AmbiguousWorkload(SparkrunError):
@@ -116,13 +116,13 @@ class AmbiguousWorkload(SparkrunError):
     Raised by :func:`sparkrun.api.stop` when the recipe path matches
     more than one running cluster (e.g. two parallel deployments of the
     same recipe on disjoint host sets).  The exception's
-    :attr:`cluster_ids` attribute carries the candidates so callers can
-    re-invoke with an explicit ``cluster_id``.
+    :attr:`workload_ids` attribute carries the candidates so callers can
+    re-invoke with an explicit ``workload_id``.
     """
 
-    def __init__(self, message: str, cluster_ids: list[str] | tuple[str, ...] | None = None) -> None:
+    def __init__(self, message: str, workload_ids: list[str] | tuple[str, ...] | None = None) -> None:
         super().__init__(message)
-        self.cluster_ids: tuple[str, ...] = tuple(cluster_ids or ())
+        self.workload_ids: tuple[str, ...] = tuple(workload_ids or ())
 
 
 class TrustRejected(SparkrunError):

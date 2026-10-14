@@ -948,11 +948,11 @@ def prune_job_metadata(
         # Explicit confirmed teardown uses finalize_workload to release them.
         if (job.metadata or {}).get("model_cache_claims"):
             continue
-        intent = job.intent_id or job.cluster_id
+        intent = job.intent_id or job.workload_id
         rank = seen_per_intent.get(intent, 0)
         seen_per_intent[intent] = rank + 1
 
-        if job.cluster_id in protected:
+        if job.workload_id in protected:
             continue
         # Both conditions must hold to keep — an entry that is recent for its
         # intent but ancient in absolute terms is still ancient.  (Making this
@@ -966,11 +966,11 @@ def prune_job_metadata(
 
         if not dry_run:
             try:
-                remove_job_metadata(job.cluster_id, cache_dir=cache_dir)
+                remove_job_metadata(job.workload_id, cache_dir=cache_dir)
             except Exception:
-                logger.debug("prune_job_metadata: failed to remove %s", job.cluster_id, exc_info=True)
+                logger.debug("prune_job_metadata: failed to remove %s", job.workload_id, exc_info=True)
                 continue
-        removed.append(job.cluster_id)
+        removed.append(job.workload_id)
 
     if removed:
         logger.debug("prune_job_metadata: %s %d job(s)", "would remove" if dry_run else "removed", len(removed))

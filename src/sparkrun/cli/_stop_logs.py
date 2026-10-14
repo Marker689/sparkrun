@@ -117,7 +117,7 @@ def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, po
             "Error: Multiple workloads match this recipe/intent. Re-invoke with an explicit cluster_id (one of):",
             err=True,
         )
-        for cid in e.cluster_ids:
+        for cid in e.workload_ids:
             click.echo("  %s" % cid, err=True)
         sys.exit(1)
     except api.JobNotFound as e:
@@ -129,7 +129,7 @@ def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, po
 
     if result.dry_run:
         click.echo(
-            "[dry-run] Would stop %s on %d host(s): %s" % (result.cluster_id, len(result.hosts_targeted), ", ".join(result.hosts_targeted))
+            "[dry-run] Would stop %s on %d host(s): %s" % (result.workload_id, len(result.hosts_targeted), ", ".join(result.hosts_targeted))
         )
         return
 

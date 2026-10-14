@@ -20,7 +20,7 @@ def test_run_event_reads_quantization_after_recipe_estimate_vram(monkeypatch):
 
     monkeypatch.setattr(recipe, "estimate_vram", _estimate_vram)
     result = api.RunResult(
-        cluster_id="sparkrun_deadbeef_deadbeef",
+        workload_id="sparkrun_deadbeef_deadbeef",
         host_list=("h1",),
         placement=None,
         scheduler="greedy",

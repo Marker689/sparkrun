@@ -59,7 +59,7 @@ def test_retention_dtos_validate_on_wire_and_reject_wrong_origin(tmp_path):
 def test_metadata_age_pruning_preserves_claim_recovery_handles(tmp_path, monkeypatch):
     from sparkrun.orchestration.job_metadata import prune_job_metadata
 
-    job = SimpleNamespace(cluster_id="workload", metadata={"model_cache_claims": [{"claim": "keep"}]})
+    job = SimpleNamespace(workload_id="workload", metadata={"model_cache_claims": [{"claim": "keep"}]})
     monkeypatch.setattr("sparkrun.api._jobs.list_jobs", lambda **kw: [job])
     assert prune_job_metadata(cache_dir=str(tmp_path), max_age_days=1, keep_per_intent=0) == []
 

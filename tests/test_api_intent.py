@@ -41,7 +41,7 @@ def test_matches_regardless_of_placement_token():
     match = api.find_running_intent(_INTENT, _HOSTS, status=snap)
 
     assert match is not None
-    assert match.cluster_id == "sparkrun_%s_ffff00001111" % _INTENT
+    assert match.workload_id == "sparkrun_%s_ffff00001111" % _INTENT
     assert match.hosts == ("h2",)
 
 
@@ -89,7 +89,7 @@ def test_reports_duplicate_deployments_of_one_intent():
 
     match = api.find_running_intent(_INTENT, _HOSTS, status=snap)
 
-    assert match.cluster_id == "sparkrun_%s_bbbb22223333" % _INTENT
+    assert match.workload_id == "sparkrun_%s_bbbb22223333" % _INTENT
     assert match.other_cluster_ids == ("sparkrun_%s_cccc33334444" % _INTENT,)
 
 
@@ -136,7 +136,7 @@ def test_match_respects_requested_hosts_and_order(monkeypatch, prefetched):
     monkeypatch.setattr(api, "status", lambda *a, **kw: snap)
     match = api.find_running_intent(_INTENT, ["h1", "missing", "h2", "h1"], status=snap if prefetched else None)
     assert match is not None
-    assert match.cluster_id == inside.cluster_id
+    assert match.workload_id == inside.cluster_id
     assert match.hosts == ("h1", "h2")
     assert match.other_cluster_ids == (outside.cluster_id,)
 

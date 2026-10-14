@@ -1088,9 +1088,9 @@ def _complete_targets(incomplete: str, ctx=None):
                 seen_recipes.add(recipe)
                 if recipe.startswith(incomplete):
                     items.append(click.shell_completion.CompletionItem(recipe, help=_describe_job(job)))
-                    offered_ids.add(job.cluster_id)
+                    offered_ids.add(job.workload_id)
                     continue
-            cid = job.cluster_id
+            cid = job.workload_id
             digest = cid.removeprefix(resource_name("_"))
             if cid.startswith(incomplete) or digest.startswith(incomplete):
                 items.append(click.shell_completion.CompletionItem(cid, help=_describe_job(job)))
@@ -1225,7 +1225,7 @@ def _job_is_live(job, snapshot, target_hosts: "set[str] | None" = None) -> bool:
     """
     if snapshot is None:
         return True
-    if job.cluster_id in snapshot.cluster_ids:
+    if job.workload_id in snapshot.cluster_ids:
         return True
     hosts = set(job.hosts or ())
     if target_hosts and hosts and not (hosts & target_hosts):

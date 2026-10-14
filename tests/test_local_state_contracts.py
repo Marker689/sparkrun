@@ -58,7 +58,7 @@ def test_unreadable_pid_state_preserves_live_job_metadata(bench_env, monkeypatch
             with pytest.raises(PermissionError):
                 pid.read_text()
         status = api.status(["localhost"], cluster=cluster, sctx=env.sctx)
-        job = next(job for job in api.list_jobs(sctx=env.sctx) if job.cluster_id == cid)
+        job = next(job for job in api.list_jobs(sctx=env.sctx) if job.workload_id == cid)
         assert status.observation_errors
         assert not status.observation.confirms_absent(job)
         assert status.free_slots("localhost") == 0

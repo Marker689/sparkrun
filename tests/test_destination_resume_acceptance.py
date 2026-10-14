@@ -36,16 +36,16 @@ def test_local_destinations_keep_independent_ids_and_lifecycle(run_env, monkeypa
         planned = plan(options, sctx=env.sctx)
         plans.append(planned)
         env.sctx.config.set("ssh.key", "/rotated/key")
-        assert plan(options, sctx=env.sctx).cluster_id == planned.cluster_id
+        assert plan(options, sctx=env.sctx).workload_id == planned.workload_id
         save_job_metadata(
-            planned.cluster_id,
+            planned.workload_id,
             env.recipe,
             ["worker"],
             ssh_user=user,
             executor=LocalExecutor(ExecutorConfig(pid_dir=pid_dir)),
             sctx=env.sctx,
         )
-    assert plans[0].cluster_id != plans[1].cluster_id
+    assert plans[0].workload_id != plans[1].workload_id
     assert len(list(env.sctx.config.cache_dir.glob("jobs/*.yaml"))) == 2
     calls = []
 
@@ -55,10 +55,10 @@ def test_local_destinations_keep_independent_ids_and_lifecycle(run_env, monkeypa
 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", cleanup)
     for user, planned in zip(("alice", "bob"), plans, strict=True):
-        assert load_job_metadata(planned.cluster_id, sctx=env.sctx)["ssh_user"] == user
-        result = stop(cluster_id=planned.cluster_id, sctx=env.sctx)
+        assert load_job_metadata(planned.workload_id, sctx=env.sctx)["ssh_user"] == user
+        result = stop(workload_id=planned.workload_id, sctx=env.sctx)
         assert result.success and calls[-1]["ssh_user"] == user and calls[-1]["ssh_key"] == "/rotated/key"
-        assert load_job_metadata(planned.cluster_id, sctx=env.sctx) is None
+        assert load_job_metadata(planned.workload_id, sctx=env.sctx) is None
 
 
 def test_local_default_principal_has_stable_identity(run_env, monkeypatch):
@@ -68,7 +68,7 @@ def test_local_default_principal_has_stable_identity(run_env, monkeypatch):
     env = run_env
     env.sctx.config.ssh_user = None
     options = api.RunOptions(recipe=env.recipe, hosts=("localhost",), solo=True, scheduler="greedy", executor="local", dry_run=True)
-    assert plan(options, sctx=env.sctx).cluster_id == plan(options, sctx=env.sctx).cluster_id
+    assert plan(options, sctx=env.sctx).workload_id == plan(options, sctx=env.sctx).workload_id
 
 
 @pytest.mark.parametrize("operation", ["stop", "logs", "liveness"])
@@ -99,7 +99,7 @@ def test_saved_local_principal_survives_cluster_edits(local_job, monkeypatch, op
             return {host: RemoteResult(host=host, returncode=0, stdout="sparkrun_removed=1\n", stderr="") for host in grouped}
 
         monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", cleanup)
-        assert stop(cluster_id=f.cid, sctx=env.sctx).success
+        assert stop(workload_id=f.cid, sctx=env.sctx).success
         assert load_job_metadata(f.cid, sctx=env.sctx) is None
     elif operation == "logs":
 
@@ -135,7 +135,7 @@ def test_local_stop_rejects_unknown_or_explicitly_changed_principal(local_job, m
         "sparkrun.orchestration.primitives.cleanup_containers_by_host", lambda *a, **kw: pytest.fail("unverified destination")
     )
     with pytest.raises(api.SparkrunError, match="SSH user.*unknown|SSH user differs"):
-        stop(cluster_id=f.cid, cluster=replace(f.cluster, user="bob"), sctx=f.env.sctx)
+        stop(workload_id=f.cid, cluster=replace(f.cluster, user="bob"), sctx=f.env.sctx)
     assert load_job_metadata(f.cid, sctx=f.env.sctx)
 
 
@@ -174,7 +174,7 @@ def test_docker_failure_is_unknown_through_public_status_and_pruning(bench_env, 
     status = api.status(
         ["worker"], cluster=ClusterDefinition(name="review", hosts=["worker"], executor="docker", user="alice"), sctx=env.sctx
     )
-    job = next(j for j in api.list_jobs(sctx=env.sctx) if j.cluster_id == cid)
+    job = next(j for j in api.list_jobs(sctx=env.sctx) if j.workload_id == cid)
     assert bool(status.observation_errors) is bool(failure)
     assert status.observation.confirms_absent(job) is (failure is None)
     if failure:
@@ -201,7 +201,7 @@ def test_every_resume_path_verifies_effective_measurement_inputs(scheduled_env, 
     from sparkrun.orchestration.job_metadata import derive_cluster_id
 
     cid = derive_cluster_id(env.recipe, ["localhost"])
-    env.launch.cluster_id = env.run.return_value.cluster_id = cid
+    env.launch.cluster_id = env.run.return_value.workload_id = cid
     monkeypatch.setattr("sparkrun.api._benchmark._resolve_running_deployment", lambda *a, **kw: (["localhost"], True, cid))
     digest = "sha256:" + "a" * 64
     env.launch.recipe = Recipe._deserialize(env.recipe.__getstate__())
@@ -331,5 +331,5 @@ def test_transport_refresh_cannot_redirect_a_saved_local_job(local_job, monkeypa
         return {host: RemoteResult(host=host, returncode=0, stdout="sparkrun_removed=1\n", stderr="") for host in grouped}
 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", cleanup)
-    assert stop(cluster_id=f.cid, sctx=f.env.sctx).success
+    assert stop(workload_id=f.cid, sctx=f.env.sctx).success
     assert calls == ["alice"]

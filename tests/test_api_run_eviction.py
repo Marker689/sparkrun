@@ -72,14 +72,14 @@ def _evict(status, cluster, *, target_hosts, stop_results=None, stop_side_effect
 
 
 class _StopOk:
-    def __init__(self, cluster_id):
-        self.cluster_id = cluster_id
+    def __init__(self, workload_id):
+        self.workload_id = workload_id
         self.hosts_failed = ()
 
 
 class _StopPartial:
-    def __init__(self, cluster_id, hosts_failed):
-        self.cluster_id = cluster_id
+    def __init__(self, workload_id, hosts_failed):
+        self.workload_id = workload_id
         self.hosts_failed = tuple(hosts_failed)
 
 

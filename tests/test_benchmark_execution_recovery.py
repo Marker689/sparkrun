@@ -133,7 +133,7 @@ def test_complete_reuse_needs_no_execution_and_matches_resume_by_id(scheduled_en
     env.sctx.variables.set("RECOVERY_KEY", "expired-later")
     options = replace(env.options, api_key_env="RECOVERY_KEY", integrations={"audit": {}} if publication else {})
     first = benchmark(options, sctx=env.sctx)
-    assert first.cluster_id == env.run.return_value.cluster_id
+    assert first.workload_id == env.run.return_value.workload_id
     before = (Path(first.state_dir) / "result.yaml").read_bytes()
     env.sctx.variables.set("RECOVERY_KEY", "")
     for operation in (env.run, env.stop, env.endpoint, env.probe, env.fw.build_benchmark_command, env.fw.check_prerequisites):
@@ -161,7 +161,7 @@ def test_saved_recipe_preserves_in_memory_inputs_and_actual_job_id(scheduled_env
     env.launch.overrides = {"max_model_len": 4096}  # fixture launch reflects requested serving options
     path = _interrupt_measurement(env, recipe=env.recipe, overrides={"max_model_len": 4096})
     state = BenchmarkRunState.load(path.parent.name, str(env.sctx.config.cache_dir), strict=True)
-    assert state.cluster_id == env.run.return_value.cluster_id
+    assert state.cluster_id == env.run.return_value.workload_id
     env.recipe.model = "changed/source-model"
     env.recipe.metadata["model_dtype"] = "float16"
     monkeypatch.setattr("sparkrun.core.resolve.load_recipe", Mock(side_effect=AssertionError("saved recipe must be self contained")))

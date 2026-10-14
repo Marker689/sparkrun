@@ -125,7 +125,7 @@ def test_run_event_has_anonymous_source_hardware_and_parallelism():
         },
     )
     result = api.RunResult(
-        cluster_id="sparkrun_deadbeef_deadbeef",
+        workload_id="sparkrun_deadbeef_deadbeef",
         host_list=("h1", "h2"),
         placement=None,
         scheduler="greedy",
@@ -180,7 +180,7 @@ def test_benchmark_event_is_anonymous_and_low_cardinality():
         profile="quick",
         results={"throughput": 100, "latency": {"p50": 1.2}},
         outputs={"json": "/home/drew/private/out.json"},
-        cluster_id="sparkrun_secret_cluster",
+        workload_id="sparkrun_secret_cluster",
         host_list=("host-a", "host-b"),
         container_image="registry/private:tag",
         container_image_sha="sha256:secret",
@@ -397,10 +397,10 @@ def test_api_run_calls_api_level_telemetry():
     ):
         result = api.run(options)
 
-    assert result.cluster_id == "sparkrun_aaaaaaaaaaaa_bbbbbbbbbbbb"
+    assert result.workload_id == "sparkrun_aaaaaaaaaaaa_bbbbbbbbbbbb"
     emit.assert_called_once()
     assert emit.call_args.args[0] is not None
-    assert emit.call_args.kwargs["result"].cluster_id == result.cluster_id
+    assert emit.call_args.kwargs["result"].workload_id == result.workload_id
     assert emit.call_args.kwargs["recipe"] is recipe
     effective_options = emit.call_args.kwargs["options"]
     assert effective_options.recipe is options.recipe

@@ -49,7 +49,7 @@ def _fixture():
         host_list=("h1", "h2"),
         is_solo=False,
         placement=placement,
-        cluster_id="sparkrun_test_test",
+        workload_id="sparkrun_test_test",
     )
     options = api.RunOptions(recipe=recipe, hosts=("h1", "h2"), init_port=29731)
     sctx = SimpleNamespace(config=SimpleNamespace(hf_cache_dir="/fallback"))

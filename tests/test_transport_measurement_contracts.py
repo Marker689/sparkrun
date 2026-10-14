@@ -145,7 +145,7 @@ def test_local_observation_preserves_other_or_unknown_user_metadata(local_job, u
     alice = api.status(["worker"], cluster=f.cluster, sctx=f.env.sctx)
     assert f.cid in alice.running_cluster_ids()
     snapshot = api.status(["worker"], cluster=f.cluster, ssh_kwargs={"ssh_user": user}, sctx=f.env.sctx)
-    job = next(j for j in api.list_jobs(sctx=f.env.sctx) if j.cluster_id == f.cid)
+    job = next(j for j in api.list_jobs(sctx=f.env.sctx) if j.workload_id == f.cid)
     assert not snapshot.observation.confirms_absent(job)
     f.env.sctx.config.set("jobs.autoprune", True)
     _prune_stale_job_metadata(f.env.sctx.config, observed_running=snapshot.observation, keep=(), sctx=f.env.sctx)

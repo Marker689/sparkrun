@@ -92,7 +92,7 @@ def existing_launch(match, *, recipe, overrides, cluster, sctx) -> LaunchResult:
     from sparkrun.orchestration.executor import resolve_executor
     from sparkrun.orchestration.job_metadata import load_job_metadata
 
-    meta = load_job_metadata(match.cluster_id, sctx=sctx)
+    meta = load_job_metadata(match.workload_id, sctx=sctx)
     if not meta or not meta.get("hosts"):
         raise click.ClickException("Cannot recover the existing job's head/placement; use --no-ready-wait to check presence only.")
     hosts = list(meta["hosts"])
@@ -121,7 +121,7 @@ def existing_launch(match, *, recipe, overrides, cluster, sctx) -> LaunchResult:
             effective[key] = meta[key]
     return LaunchResult(
         rc=0,
-        cluster_id=match.cluster_id,
+        cluster_id=match.workload_id,
         host_list=hosts,
         is_solo=len(hosts) == 1,
         runtime=runtime,

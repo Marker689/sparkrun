@@ -62,7 +62,7 @@ def test_run_options_overrides_isolated_per_instance():
 
 def test_run_result_fields():
     result = api.RunResult(
-        cluster_id="sparkrun_abc",
+        workload_id="sparkrun_abc",
         host_list=("h1", "h2"),
         placement=None,
         scheduler="greedy",
@@ -72,13 +72,13 @@ def test_run_result_fields():
         dry_run=False,
         is_solo=False,
     )
-    assert result.cluster_id == "sparkrun_abc"
+    assert result.workload_id == "sparkrun_abc"
     assert result.host_list == ("h1", "h2")
     assert result.metadata == {}
 
 
 def test_stop_result_defaults():
-    r = api.StopResult(cluster_id="x", hosts_targeted=("h1",), containers_removed=2)
+    r = api.StopResult(workload_id="x", hosts_targeted=("h1",), containers_removed=2)
     assert r.errors == ()
 
 
@@ -89,7 +89,7 @@ def test_log_line_defaults():
 
 
 def test_job_info_defaults():
-    j = api.JobInfo(cluster_id="x")
+    j = api.JobInfo(workload_id="x")
     assert j.recipe is None
     assert j.runtime is None
     assert j.hosts == ()

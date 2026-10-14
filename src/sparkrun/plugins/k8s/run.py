@@ -45,7 +45,7 @@ def run_k8s(
 
     recipe, runtime = plan.recipe, plan.runtime
     host_list, placement, is_solo = plan.host_list, plan.placement, plan.is_solo
-    cluster_id = plan.cluster_id
+    cluster_id = plan.workload_id
 
     world_size = 1 if is_solo else (placement.total_ranks if placement is not None else (len(host_list) or 1))
     if world_size != 1:
@@ -153,7 +153,7 @@ def run_k8s(
         "k8s_feasible": result.feasible,
     }
     return RunResult(
-        cluster_id=cluster_id,
+        workload_id=cluster_id,
         host_list=tuple(host_list),
         placement=placement,
         scheduler=plan.scheduler,

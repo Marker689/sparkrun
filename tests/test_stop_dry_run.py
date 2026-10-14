@@ -20,12 +20,12 @@ def test_api_stop_dry_run_resolves_without_teardown(tmp_path, monkeypatch, idle_
     assert result.dry_run is True
     assert result.containers_removed == 0
     assert result.hosts_targeted == ("h1", "h2")
-    assert result.cluster_id == "sparkrun_previewonly"
+    assert result.workload_id == "sparkrun_previewonly"
 
 
 def test_api_stop_has_no_cluster_id_keyword():
     with pytest.raises(TypeError):
-        api.stop(cluster_id="sparkrun_legacyspelling", hosts=("h1",))
+        api.stop(hosts=("h1",), **{"cluster_id": "sparkrun_legacyspelling"})
 
 
 def test_cli_stop_target_dry_run_does_not_stop(monkeypatch):
@@ -35,7 +35,7 @@ def test_cli_stop_target_dry_run_does_not_stop(monkeypatch):
 
     def fake_stop(**kwargs):
         calls.append(kwargs)
-        return api.StopResult(cluster_id=kwargs["workload_id"], hosts_targeted=("h1",), containers_removed=0, dry_run=kwargs["dry_run"])
+        return api.StopResult(workload_id=kwargs["workload_id"], hosts_targeted=("h1",), containers_removed=0, dry_run=kwargs["dry_run"])
 
     monkeypatch.setattr(api, "stop", fake_stop)
     result = CliRunner().invoke(main, ["stop", "sparkrun_0123456789ab", "--hosts", "h1", "--dry-run"])

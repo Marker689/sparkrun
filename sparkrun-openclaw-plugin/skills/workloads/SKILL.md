@@ -59,8 +59,8 @@ sparkrun stop --all --cluster <name>
 ```
 
 `status` aliases `cluster status`; run one. Prefer the exact commands and workload
-ID printed by status. Some CLI/result fields call this ID `cluster_id`; it
-identifies a workload, not a saved host cluster. Recipe targets also work:
+ID printed by status (`workload_id` in JSON output); it identifies a workload,
+not a saved host cluster. Recipe targets also work:
 preserve launch overrides (`--tp`, `--port`, `--served-model-name`) or use the
 recorded ID. Do not invent IDs/container names from a presumed hash format.
 

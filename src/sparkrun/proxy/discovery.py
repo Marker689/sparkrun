@@ -107,7 +107,7 @@ class DiscoverySnapshot:
             "errors": self.errors,
             "endpoints": [
                 {
-                    "cluster_id": ep.cluster_id,
+                    "workload_id": ep.cluster_id,
                     "cluster_name": ep.cluster_name,
                     "recipe_revision": ep.recipe_revision,
                     "owner": ep.owner,
@@ -219,9 +219,9 @@ def discover_endpoints(
     # the most recent job overwrites older entries on the same key.
     candidates: dict[str, DiscoveredEndpoint] = {}
     for job in reversed(jobs):
-        if running_ids is not None and job.cluster_id not in running_ids:
+        if running_ids is not None and job.workload_id not in running_ids:
             continue
-        if cluster_ids is not None and job.cluster_id not in cluster_ids:
+        if cluster_ids is not None and job.workload_id not in cluster_ids:
             continue
 
         ep = _endpoint_from_job(job, ib_to_mgmt=ib_to_mgmt)
@@ -297,10 +297,10 @@ def _endpoint_from_job(
             protocols = runtime.native_protocols(recipe)
             capabilities = sorted(set(recipe.capabilities or []) | set(runtime.native_capabilities(recipe)))
         except Exception:
-            logger.debug("Cannot resolve serving APIs from saved recipe for %s", job.cluster_id, exc_info=True)
+            logger.debug("Cannot resolve serving APIs from saved recipe for %s", job.workload_id, exc_info=True)
 
     return DiscoveredEndpoint(
-        cluster_id=job.cluster_id,
+        cluster_id=job.workload_id,
         cluster_name=meta.get("cluster") or None,
         recipe_revision=str(meta.get("recipe_fingerprint") or ""),
         native_protocols=protocols,
