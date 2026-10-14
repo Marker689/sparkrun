@@ -669,11 +669,21 @@ class LlamaCppRuntime(RuntimePlugin):
             with ThreadPoolExecutor(max_workers=resolve_parallel_cap(len(ctx.worker_hosts), _config_ssh_cap(ctx.config))) as pool:
                 futures = {}
                 for host in ctx.worker_hosts:
-                    exec_script = self._resolve_executor().generate_exec_serve_script(
+                    # Same label set the container was launched with (no rank:
+                    # llama.cpp names containers by role, see step 3).
+                    worker_labels = executor.workload_labels_for_cluster(
+                        cluster_id=ctx.cluster_id,
+                        recipe=recipe,
+                        runtime=self,
+                        placement=ctx.placement,
+                        host=host,
+                    )
+                    exec_script = executor.for_host(host).generate_exec_serve_script(
                         container_name=worker_container_name,
                         serve_command=rpc_worker_command,
                         env=ctx.env_for_host(host),
                         detached=True,
+                        sparkrun_labels=worker_labels or None,
                     )
                     future = _operation_submit(
                         pool,
@@ -764,7 +774,14 @@ class LlamaCppRuntime(RuntimePlugin):
             logger.info("Step 6/6: Executing llama-server on head %s...", ctx.head_host)
         logger.info("  Command: %s", head_command[:120])
 
-        rc = exec_serve_on_container(ctx, executor, ctx.head_host, head_container, head_command)
+        head_labels = executor.workload_labels_for_cluster(
+            cluster_id=ctx.cluster_id,
+            recipe=recipe,
+            runtime=self,
+            placement=ctx.placement,
+            host=ctx.head_host,
+        )
+        rc = exec_serve_on_container(ctx, executor, ctx.head_host, head_container, head_command, sparkrun_labels=head_labels)
         if rc != 0:
             dump_serve_log(ctx.head_host, head_container, ctx.ssh_kwargs, dry_run=dry_run)
             cleanup_after_failure(

@@ -79,7 +79,7 @@ def install_sglang_fp8_configs(hosts_containers, executor, ssh_kwargs, dry_run=F
     from sparkrun.orchestration.primitives import run_command_on_host
     from sparkrun.scripts import read_script
 
-    if executor.executor_name != "docker" or not any((get_sglang_tuning_dir() / "fp8").rglob("*.json")):
+    if not any((get_sglang_tuning_dir() / "fp8").rglob("*.json")):
         return
     command = "python3 - --install --output %s <<'SPARKRUN_FP8_PY'\n%s\nSPARKRUN_FP8_PY\n" % (
         quote(TUNING_CONTAINER_PATH),
@@ -87,11 +87,15 @@ def install_sglang_fp8_configs(hosts_containers, executor, ssh_kwargs, dry_run=F
     )
     logger = logging.getLogger(__name__)
     for host, container in hosts_containers:
+        # Each host runs under its own executor (per-host hardware tiers).
+        host_executor = executor.for_host(host)
+        if host_executor.executor_name != "docker":
+            continue
         result = run_command_on_host(
             host,
             # Package files belong to root even when serving uses the SSH UID.
             # Elevate only this installation, leaving the serving user intact.
-            executor.exec_cmd(container, command, env={"PYTHONPATH": ""}, user="0:0"),
+            host_executor.exec_cmd(container, command, env={"PYTHONPATH": ""}, user="0:0"),
             ssh_kwargs=ssh_kwargs,
             timeout=120,
             dry_run=dry_run,

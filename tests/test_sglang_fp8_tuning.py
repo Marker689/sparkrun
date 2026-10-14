@@ -87,6 +87,7 @@ def test_installation_uses_executor_and_skips_other_executors(tmp_path, monkeypa
     send = Mock(return_value=SimpleNamespace(success=True, stdout="installed", stderr=""))
     monkeypatch.setattr("sparkrun.orchestration.primitives.run_command_on_host", send)
     executor = Mock(executor_name="docker")
+    executor.for_host = lambda host: executor
     install_sglang_fp8_configs([("h1", "c1")], executor, {})
     send.assert_not_called()
     root.joinpath("fp8").mkdir(parents=True)
@@ -100,6 +101,23 @@ def test_installation_uses_executor_and_skips_other_executors(tmp_path, monkeypa
     assert send.call_args.kwargs["ssh_kwargs"] == {"ssh_user": "tester"}
     assert executor.exec_cmd.call_args.kwargs["env"] == {"PYTHONPATH": ""}
     assert executor.exec_cmd.call_args.kwargs["user"] == "0:0"
+
+
+def test_installation_uses_each_hosts_own_executor(tmp_path, monkeypatch):
+    root = tmp_path / "tuning"
+    root.joinpath("fp8").mkdir(parents=True)
+    root.joinpath("fp8", "shape.json").write_text("{}")
+    monkeypatch.setattr("sparkrun.tuning.sglang.get_sglang_tuning_dir", lambda: root)
+    send = Mock(return_value=SimpleNamespace(success=True, stdout="", stderr=""))
+    monkeypatch.setattr("sparkrun.orchestration.primitives.run_command_on_host", send)
+    per_host = {"h1": Mock(executor_name="docker"), "h2": Mock(executor_name="docker")}
+    per_host["h1"].exec_cmd.return_value = "exec-h1"
+    per_host["h2"].exec_cmd.return_value = "exec-h2"
+    head = Mock(executor_name="docker")
+    head.for_host = per_host.__getitem__
+    install_sglang_fp8_configs([("h1", "c1"), ("h2", "c2")], head, {})
+    assert [c.args[:2] for c in send.call_args_list] == [("h1", "exec-h1"), ("h2", "exec-h2")]
+    head.exec_cmd.assert_not_called()
 
 
 def test_runtime_installs_after_recipe_preparation(monkeypatch):

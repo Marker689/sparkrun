@@ -429,8 +429,9 @@ class TrtllmRuntime(RuntimePlugin):
 
         write_cmd = ("cat > %s << 'SPARKRUN_EOF'\n%sSPARKRUN_EOF") % (_EXTRA_CONFIG_PATH, extra_yaml)
 
+        executor = self._resolve_executor()
         for host, container_name in hosts_containers:
-            exec_cmd = self._resolve_executor().exec_cmd(container_name, write_cmd)
+            exec_cmd = executor.for_host(host).exec_cmd(container_name, write_cmd)
             result = run_remote_command(
                 host,
                 exec_cmd,

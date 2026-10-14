@@ -307,6 +307,50 @@ def test_llama_cpp_container_name():
     assert LlamaCppRuntime._container_name("spark0", "worker") == "spark0_worker"
 
 
+def test_rpc_workers_exec_through_their_own_host_executor_with_labels(monkeypatch):
+    """Each RPC worker is started by its host's executor and carries the workload labels."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from sparkrun.orchestration.executors.docker import DockerExecutor
+
+    import sparkrun.runtimes._cluster_ops as ops
+
+    monkeypatch.setattr(ops, "cleanup_named_containers", lambda *a, **k: None)
+    monkeypatch.setattr(ops, "detect_ib_with_ips", lambda ctx, comm_env, ib_ip_map, backends=None: (None, {}, {}))
+    monkeypatch.setattr(ops, "launch_containers_parallel", lambda *a, **k: 0)
+    monkeypatch.setattr(ops, "run_pre_serve_hooks", lambda *a, **k: None)
+    head_exec = Mock(return_value=0)
+    monkeypatch.setattr(ops, "exec_serve_on_container", head_exec)
+    sent = []
+    monkeypatch.setattr(
+        "sparkrun.orchestration.ssh.run_remote_script",
+        lambda host, script, **k: sent.append((host, script)) or SimpleNamespace(success=True),
+    )
+
+    executors = {h: DockerExecutor() for h in ("head", "w1", "w2")}
+    root = executors["head"]
+    root.bind_host_executors(executors)
+    calls = {}
+    for host in ("w1", "w2"):
+
+        def generate(*, _host=host, sparkrun_labels=None, **kwargs):
+            calls[_host] = sparkrun_labels
+            return "exec-" + _host
+
+        monkeypatch.setattr(executors[host], "generate_exec_serve_script", generate)
+
+    recipe = Recipe.from_dict({"model": "org/m-GGUF:Q4_K_M", "runtime": "llama-cpp", "container": "img"})
+    runtime = LlamaCppRuntime()
+    runtime.executor = root
+    rc = runtime._run_cluster(["head", "w1", "w2"], "img", recipe=recipe, overrides={}, cluster_id="sparkrun_abc", dry_run=True)
+
+    assert rc == 0
+    assert sorted(sent) == [("w1", "exec-w1"), ("w2", "exec-w2")]
+    assert all(labels and labels["sparkrun.cluster_id"] == "sparkrun_abc" for labels in calls.values())
+    assert set(calls) == {"w1", "w2"}
+    assert head_exec.call_args.kwargs["sparkrun_labels"]["sparkrun.cluster_id"] == "sparkrun_abc"
+
+
 def test_llama_cpp_generate_command_gguf_presync_template():
     """When _gguf_model_path is set, template renders with resolved path
     and -hf is switched to -m."""

@@ -492,6 +492,25 @@ def test_pre_serve_writes_extra_config():
         assert "backend: CUTLASS" in decoded
 
 
+def test_pre_serve_writes_extra_config_through_each_hosts_executor():
+    """Every container is reached through its own host's executor, not the head's."""
+    from unittest import mock
+
+    recipe = Recipe.from_dict({"name": "test", "model": "nvidia/model", "runtime": "trtllm", "defaults": {"moe_backend": "CUTLASS"}})
+    per_host = {"h1": mock.Mock(), "h2": mock.Mock()}
+    per_host["h1"].exec_cmd.return_value = "exec-h1"
+    per_host["h2"].exec_cmd.return_value = "exec-h2"
+    head = mock.Mock()
+    head.for_host = per_host.__getitem__
+    runtime = TrtllmRuntime()
+    runtime.executor = head
+    with mock.patch("sparkrun.orchestration.ssh.run_remote_command") as mock_cmd:
+        mock_cmd.return_value = mock.Mock(success=True)
+        runtime._pre_serve([("h1", "c1"), ("h2", "c2")], {}, dry_run=False, recipe=recipe)
+    assert [c.args[:2] for c in mock_cmd.call_args_list] == [("h1", "exec-h1"), ("h2", "exec-h2")]
+    head.exec_cmd.assert_not_called()
+
+
 def _solo_extra_config(recipe, overrides):
     """Run solo ``_pre_serve`` with the chain the solo path builds; return the written YAML (or None)."""
     import base64
