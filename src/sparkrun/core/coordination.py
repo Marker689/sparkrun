@@ -122,14 +122,18 @@ def operation_boundary(*, mutation=False):
                 cluster = getattr(options, "cluster", None) or bound.arguments.get("cluster")
                 plan = bound.arguments.get("plan")
                 if plan is not None:
-                    hosts = getattr(plan, "host_list", hosts)
+                    # candidate_hosts, not host_list: eviction of a superseded
+                    # deployment sweeps every host placement could have chosen,
+                    # not just the ones this launch landed on.
+                    hosts = getattr(plan, "candidate_hosts", None) or getattr(plan, "host_list", hosts)
                     cluster = getattr(plan, "cluster", cluster)
                 if not hosts:
                     try:
                         from sparkrun.core.cluster_manager import ClusterManager
 
+                        cluster_mgr = ClusterManager(config.config_path.parent)
                         if isinstance(cluster, str):
-                            cluster = ClusterManager(config.config_path.parent).get(cluster)
+                            cluster = cluster_mgr.get(cluster)
                         if cluster is not None:
                             hosts = cluster.hosts
                         elif bound.arguments.get("workload_id") or bound.arguments.get("cluster_id"):
@@ -139,7 +143,21 @@ def operation_boundary(*, mutation=False):
                             meta = load_job_metadata(workload_id, cache_dir=str(config.cache_dir))
                             hosts = (meta or {}).get("hosts")
                         else:
-                            hosts = config.default_hosts
+                            # Mirror api._resolve.resolve_cluster's precedence:
+                            # the default cluster (``cluster set-default``) is
+                            # consulted before config.default_hosts.  Skipping
+                            # this step locked default_hosts while a flagless
+                            # call (e.g. `stop(recipe=...)`) actually tore down
+                            # the default cluster's hosts — two concurrent
+                            # mutations holding disjoint locks over the same
+                            # machines.
+                            default_name = cluster_mgr.get_default()
+                            default_cluster = cluster_mgr.get(default_name) if default_name else None
+                            if default_cluster is not None:
+                                cluster = default_cluster
+                                hosts = default_cluster.hosts
+                            else:
+                                hosts = config.default_hosts
                     except Exception:  # Resolution errors belong to the API body, not lock inference.
                         hosts = None
                 # Host conflicts are deliberately independent of SSH usernames:
