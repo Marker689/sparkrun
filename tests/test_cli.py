@@ -195,6 +195,14 @@ class TestVersionAndHelp:
         assert "logs" in result.output
         assert "benchmark" in result.output
 
+    def test_setup_version_json(self, runner):
+        import json
+
+        result = runner.invoke(main, ["setup", "version", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert {"distribution", "core", "plugins", "channel"} <= set(data)
+
     def test_run_help(self, runner):
         """Test that sparkrun run --help shows run command help."""
         result = runner.invoke(main, ["run", "--help"])

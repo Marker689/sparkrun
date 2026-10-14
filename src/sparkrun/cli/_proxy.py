@@ -918,11 +918,9 @@ def _resolve_host_filter(
 @click.option(
     "--issue-token", is_flag=True, help="Ask the gateway to create or return console credentials (may enable admin authentication)"
 )
-@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@json_option()
 def ui_cmd(issue_token, output_json):
     """Show the gateway's admin console URL."""
-    import json as _json
-
     from sparkrun import api
 
     try:
@@ -931,18 +929,15 @@ def ui_cmd(issue_token, output_json):
         raise click.ClickException(str(e)) from e
 
     if output_json:
-        click.echo(
-            _json.dumps(
-                {
-                    "url": result.url,
-                    "running": result.running,
-                    "token": result.token,
-                    "bind_host": result.bind_host,
-                    "exposed": result.exposed,
-                    "auth_required": result.auth_required,
-                },
-                indent=2,
-            )
+        print_json(
+            {
+                "url": result.url,
+                "running": result.running,
+                "token": result.token,
+                "bind_host": result.bind_host,
+                "exposed": result.exposed,
+                "auth_required": result.auth_required,
+            }
         )
         return
 

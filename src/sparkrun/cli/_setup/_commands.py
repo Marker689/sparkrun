@@ -310,23 +310,21 @@ def setup_update(ctx, no_update_registries, stable, beta, alpha, yolo, no_update
 
 
 @setup.command("version", hidden=True)
-@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable application, core, and plugin version information")
+@json_option(help="Emit machine-readable application, core, and plugin version information")
 @click.pass_context
-def setup_version(ctx, as_json):
+def setup_version(ctx, output_json):
     """Show application, core, and discovered plugin versions without loading plugins.
 
     Includes the application profile, release channel, and installed Git
     commits when available. The self-update flow uses --json to compare builds.
     """
-    import json as _json
-
     from sparkrun.core.version import version_diagnostics
 
     from sparkrun.cli._plugins import management_config
 
     data = version_diagnostics(management_config(ctx))
-    if as_json:
-        click.echo(_json.dumps(data))
+    if output_json:
+        print_json(data)
         return
 
     def package_identity(identity):

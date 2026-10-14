@@ -116,6 +116,16 @@ def test_console_and_tokens_follow_live_capabilities(tmp_path, monkeypatch):
     assert api.proxy.admin_token() is None
 
 
+def test_proxy_ui_json_uses_the_shared_renderer(tmp_path, monkeypatch):
+    engine = ConsoleGateway(state_dir=tmp_path)
+    monkeypatch.setattr(_ops, "_running_engine", lambda sctx=None: engine)
+    result = CliRunner().invoke(main, ["proxy", "ui", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["url"] == engine.ui_url and payload["token"] is None
+    assert set(payload) == {"url", "running", "token", "bind_host", "exposed", "auth_required"}
+
+
 def test_console_credential_issuance_is_independently_optional(tmp_path, monkeypatch):
     class ReadOnlyConsole(TypedGateway):
         ui_url = ConsoleGateway.ui_url
