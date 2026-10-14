@@ -11,7 +11,7 @@ that already exist.
 | Surface | Supported replacement | Retirement boundary |
 | --- | --- | --- |
 | `cluster import --from-spark-vllm-docker-env PATH` | `cluster import svd PATH` (place `--name`, `--default`, and `--dry-run` after `svd`) | Retain the warning and behavior throughout 0.4.x. Remove no earlier than 0.5.0, with a release-note reminder and migration tests. |
-| `recipe update [--registry NAME]` | `registry update [NAME]` for registries; `update` for the application | Retain throughout 0.4.x. Remove no earlier than 0.5.0 after checking the option/argument mappings below. |
+| `recipe update [--registry NAME]` | `registry update [NAME]` for registries; `update` for the application | Removed in 0.4.0 (hidden and deprecated since 0.1.0). Use the mappings below. |
 | `run-recipe.sh` | Native `sparkrun` commands | Retain through 0.5.x. Remove no earlier than 0.6.0, after a full release announces removal and maintained automation has migrated. The script now calls `cluster import svd` internally. |
 
 These are earliest removal versions, not automatic deadlines. Before removal,

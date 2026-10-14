@@ -354,30 +354,20 @@ class TestRecipeShow:
         assert "Error" in result.output
 
 
-class TestRecipeUpdate:
-    """Test recipe update command."""
+class TestRecipeUpdateRemoved:
+    """The deprecated ``recipe update`` alias is gone; ``registry update`` replaces it."""
 
-    def test_update_all(self, runner, registry_setup):
-        """Test updating all registries."""
+    def test_recipe_update_is_unknown(self, runner, registry_setup):
+        result = runner.invoke(main, ["recipe", "update"])
+        assert result.exit_code != 0
+        assert "No such command 'update'" in result.output
+
+    def test_registry_update_replaces_it(self, runner, registry_setup):
         with mock.patch("subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stderr="")
-            result = runner.invoke(main, ["recipe", "update"])
-            assert result.exit_code == 0
-            assert "updated" in result.output.lower()
-
-    def test_update_specific_registry(self, runner, registry_setup):
-        """Test updating a specific registry."""
-        with mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(returncode=0, stderr="")
-            result = runner.invoke(main, ["recipe", "update", "--registry", "test-registry"])
+            result = runner.invoke(main, ["registry", "update", "test-registry"])
             assert result.exit_code == 0
             assert "test-registry" in result.output
-
-    def test_update_nonexistent_registry(self, runner, registry_setup):
-        """Test updating a nonexistent registry."""
-        result = runner.invoke(main, ["recipe", "update", "--registry", "nonexistent"])
-        assert result.exit_code != 0
-        assert "Error" in result.output
 
 
 class TestRegistryList:

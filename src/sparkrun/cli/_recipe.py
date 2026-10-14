@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from sparkrun.core.application_profile import render_identity_text
-
 import sys
 
 import click
@@ -286,19 +284,3 @@ def recipe_vram(ctx, recipe_name, tensor_parallel, max_model_len, gpu_mem, no_au
         print_json({"recipe": recipe.qualified_name, "model": recipe.model, "runtime": recipe.runtime, **est.to_dict()})
     else:
         _display_vram_estimate(recipe, cli_overrides=cli_overrides, auto_detect=not no_auto_detect)
-
-
-@recipe.command("update", hidden=True)
-@click.option("--registry", default=None, help="Update specific registry")
-@click.pass_context
-def recipe_update(ctx, registry):
-    """Update recipe registries from git."""
-    click.echo(
-        render_identity_text(
-            "Warning: '{app_command} recipe update' is deprecated. Use '{app_command} registry update' or '{app_command} update' instead."
-        ),
-        err=True,
-    )
-    from sparkrun.cli._registry import registry_update
-
-    ctx.invoke(registry_update, name=registry)
