@@ -438,6 +438,12 @@ endpoint readiness already has its own budgeted watcher
 (`launcher.wait_for_endpoint_ready`). Reusing it here would time out a
 healthy launch.
 
+**Appended flags go through `RuntimePlugin.append_args`**, which strips a dangling
+line continuation first (otherwise bash reads `\ --nnodes` as one argument).
+Presence checks use `command_has_flag` (whole token, either `--flag value` or
+`--flag=value`); `reconcile_flag_in_command(override=True)` handles both
+spellings and substitutes with a function, never a regex replacement string.
+
 **Executor resolution** (`RuntimePlugin._resolve_executor`): runtimes do not
 construct executors directly. The base helper delegates to
 `orchestration.executor:resolve_executor()` — a single layered chain (CLI →
@@ -445,6 +451,15 @@ recipe → `runtime.default_executor()` → per-executor adjustments →
 `SparkrunConfig` → per-executor defaults → dataclass field defaults). The
 previously-hardcoded `_KNOWN_EXECUTORS` set has been retired; selector
 validation queries SAF via `get_extensions(EXT_EXECUTOR)`.
+
+**Per-launch state stays off the plugin.** Runtimes are SAF singletons shared
+by every operation in the process (the desktop sidecar, the daemon's `proxy
+load`). `launch_inference` binds the executor on a shallow copy of the runtime
+(`LaunchResult.runtime`), and per-host platform env is the keyword-only
+`run(platform_env_by_host=)` argument, flowing into `_run_solo(platform_env=)` and
+`ClusterContext.build(platform_env_by_host=)`. Writing either onto the plugin
+raced between concurrent launches and left stale values for a launch that skipped
+`run()`.
 
 **Unmapped-key reporting** (`RuntimePlugin.known_config_keys` +
 `launcher.py:report_unmapped_config_keys`): a structured runtime builds its
@@ -1180,6 +1195,12 @@ Two layers, deliberately separate:
   fetch (control-machine `docker pull` / HF download, `image_sync.sh`, the model ensure scripts), and
   each refuses instead. The preflight exists so the answer comes first and complete, not one transfer
   failure at a time; the leaves are why a preflight bug still cannot cause egress.
+
+`BuildOptions` shares the field through `api._models.TargetOptions` (with the `-o`
+executor-key split), and `build` mirrors `run`: offline preflight, forced builder
+offline, offline distribution. Recipe loading by name goes through
+`core.resolve.load_recipe(offline=)`; the CLI `_load_recipe` is only its interactive
+wrapper (prompts, chooser, exit codes), so lookup rules belong in core.
 
 An unpinned tag runs whatever is resident, and the job records the resident image's registry digest
 as `effective_container_digest` (via `containers/digest.py:resolve_host_digest`, best effort), so
@@ -2247,6 +2268,10 @@ CLI overrides → recipe defaults → runtime defaults.
 Recipe resolution: CLI → `find_recipe()` (module-level function in `core/recipe.py`) → searches bundled recipes, local
 `./recipes/`, user config recipes, and git-cloned registries.
 
+A recipe revived from job metadata or the registry cache restores `pre_exec` from
+`_raw` when it has `mods`: the saved entries are a past launch's mod injections
+(with that launch's cache paths), and keeping them injected the mods twice.
+
 Two recipe format versions exist: v1 (eugr-style, auto-detected by `recipe_version: "1"` or presence of `build_args`/
 `mods`) and v2 (sparkrun native). vLLM recipes are resolved to either `vllm-ray` (if Ray hints are present) or
 `vllm-distributed` (default). See `RECIPES.md` for the full specification.
@@ -2311,6 +2336,10 @@ Three more rules that fail silently if broken:
 
 Hardware facts (`CUTE_DSL_ARCH`, allocator env) belong to the platform tier,
 not to overrides. See Platform default tiers above.
+
+`recipe_overrides.unevaluable_reasons` is the single answer to "can this sparkrun
+evaluate this entry?"; the launch and `recipe validate` both use it, so validation
+reports exactly what a launch would skip.
 
 **`export recipe --realize`** (`api/_realize.py:realize_recipe`) is `api.plan` plus
 `to_dict(effective=True)`: matched layers and CLI serve overrides are baked in and the
@@ -3137,6 +3166,10 @@ These are hang guards; external I/O still needs a fixture. The `conftest.py` pro
 SAF's stateful root to `tmp_path`, preventing tests from touching `~/.config/sparkrun/`. The bootstrap singleton (
 `_variables`) is reset between tests. All core module imports in tests use `sparkrun.core.*` paths (e.g.,
 `from sparkrun.core.registry import RegistryManager`).
+
+`sparkrun.api` re-exports returned core types lazily through a module `__getattr__`
+(`_LAZY_TYPES`); add new ones there rather than importing their modules eagerly,
+which every `import sparkrun.api` (including shell completion) would pay for.
 
 Mock SSH/Docker operations in tests so no real hosts are needed. Common fixtures: `tmp_recipe_dir` (creates
 sample v1/v2 recipes), `cluster_dir`, `hosts_file`, `v` (initialized SAF Variables instance).

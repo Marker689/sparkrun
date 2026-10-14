@@ -12,6 +12,25 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- `RunOptions` and `BuildOptions` share their target fields (one internal base); only
+  `recipe` may be passed positionally. `BuildOptions.offline` and `sparkrun build
+  --offline/--online` are new, and `build -o entrypoint=''` now configures the executor.
+- `sparkrun.api` re-exports the types its functions return: `ClusterStatus`,
+  `HostOccupancy`, `RunningWorkload`, `GpuOccupancy`, `ClusterDefinition`,
+  `SchedulingRequest`, `SchedulingResult`, plus `resolve_sctx`. `api.workloads`, the
+  lifecycle helpers (`wait_ready`, `post_launch`, `discovery_snapshot`), `api.model_cache`
+  and the `api.setup` planning internals are documented as experimental.
+  `api.discover_endpoints`, the `api.setup.build_*_script` helpers and private
+  `_benchmark` names left the public lists.
+- `api.post_launch` returns `PostLaunchResult` and requires trust only when post hooks
+  exist; `api.discovery_snapshot` honors the default cluster, its transport and SSH user,
+  and raises `SparkrunError` for an unknown cluster; `api.wait_ready(timeout=0)` means no
+  caller budget.
+- `RuntimePlugin.run` takes the per-host platform env as `platform_env_by_host=`
+  (keyword-only) instead of reading a plugin attribute; out-of-tree runtimes overriding
+  `_run_cluster` must accept `**kwargs`. New helpers `RuntimePlugin.append_args` /
+  `command_has_flag`.
+
 - The workload identifier is named `workload_id` across the public API and the
   daemon wire (it was `cluster_id`; the value is unchanged). Renamed: `RunResult`,
   `RunPlan`, `ResolvedLaunchSpec`, `StopResult`, `JobInfo`, `BenchmarkResult`,
@@ -270,6 +289,37 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- `benchmark --offline`, `export recipe --realize --offline` and library recipe loads by
+  name no longer fetch URLs or refresh registries.
+- A recipe revived from job metadata or the registry cache no longer injects its `mods` a
+  second time on relaunch.
+- Concurrent launches in one long-lived process (desktop sidecar, `proxy load`) no longer
+  share the executor or per-host platform env through the runtime plugin singleton.
+- llama.cpp RPC workers, the trtllm extra-config write and the SGLang FP8 config install
+  use each host's own executor; llama.cpp serve execs carry workload labels.
+- A `command:` ending in a dangling `\` no longer merges sparkrun's appended multi-node
+  flags into one argument. Forcing a flag value works on the `--flag=value` spelling,
+  `--flag=value` can be stripped, and flags match only as whole tokens. Atlas resolves its
+  rendezvous address through the shared node template.
+- `recipe validate` reports override operators the launch cannot evaluate (e.g.
+  `arch: {gt: sm_100}`).
+- The k8s launch path records `owner` and `ssh_user` in job metadata.
+- Security: the eugr builder no longer shell-quotes argv passed to git/docker without a
+  shell, and refuses `builder_config.branch` values git would read as options.
+- `proxy --foreground` reported an unreadable state file as a clean stop, so systemd's
+  `Restart=on-failure` never fired; it is now a crash. A malformed recorded auto-discover
+  PID no longer breaks `proxy stop`, and the gateway log handle no longer leaks per start.
+- Cluster definitions and the default-cluster marker are written atomically and
+  owner-only.
+- A corrupt job metadata record is now removed by `stop` and pruning (with a warning)
+  instead of surviving forever as if it belonged to another distribution.
+- Mutating API calls lock the same hosts they act on: lock inference follows
+  `resolve_cluster`'s precedence (default cluster before `default_hosts`) and covers a
+  plan's full candidate host set.
+- Catalog listing no longer deletes abandoned imports, re-imported content no longer
+  expires early, and one corrupt reference record no longer breaks the sweep.
+- `workloads.ensure_ready` no longer leaves a stale receipt for an untrusted recipe.
+- `live_monitor` honors cancellation instead of finishing its sleep interval.
 - `include:` of a foreign-format recipe (e.g. `include: "@lil/<Entry>"`, or a sibling
   manifest a format claims) now loads the base through its format, as `sparkrun run`
   would. It was merged as raw sparkrun YAML, skipping translation, the format's

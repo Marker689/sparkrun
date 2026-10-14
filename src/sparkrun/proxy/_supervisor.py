@@ -312,12 +312,12 @@ class GatewayState:
 
     def _read_autodiscover_pid(self) -> int | None:
         """Read the auto-discover PID from the state file."""
-        try:
-            state = self.get_state()
-            if state and "autodiscover_pid" in state and not _from_previous_boot(state):
+        state = self.get_state()
+        if state and "autodiscover_pid" in state and not _from_previous_boot(state):
+            try:
                 return int(state["autodiscover_pid"])
-        except Exception:
-            pass
+            except (TypeError, ValueError):
+                logger.warning("Ignoring malformed autodiscover_pid %r in %s", state["autodiscover_pid"], self.state_file)
         return None
 
     def current_pid(self) -> int | None:
