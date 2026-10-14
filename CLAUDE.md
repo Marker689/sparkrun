@@ -2105,12 +2105,13 @@ rewritten for a setting change.
 sections *that instance* modified; a whole-document save silently discards the
 other's change. An alias removal is recorded as an explicit deletion, because
 "not in my copy" is not an instruction to delete a document this instance never
-saw. `fcntl` is imported **guarded**: `proxy/config.py` is reached from
-`SparkrunContext`, i.e. essentially every invocation, and a hard import would
-make sparkrun unimportable on a Windows control node. Without it the lock
-degrades to none (`os.replace` is still atomic, so the file is never
-half-written) — strictly weaker, and correct only because the daemon is a
-POSIX-only fork path.
+saw. Locking goes through `utils.fs.file_lock` (msvcrt on Windows, flock
+elsewhere) and writes through `utils.fs.atomic_private_write`, so neither
+module imports `fcntl` itself. **A save never merges into a document it could
+not parse** (`_read(strict=True)`): writing only the pending keys back over a
+typo'd file would erase the bind host and master key, and the next start would
+listen on every interface unauthenticated. The daemon's sweep logs that error
+and retries; plain reads still degrade to defaults.
 
 `api/proxy/` is the console-free facade (mirrors `api/tailscale/`): `start`,
 `stop`, `status`, `models`, `sync`, `register_loaded_model` /
@@ -2612,7 +2613,10 @@ the namespace rule alone would pass it. Enforcement differs by entry point on pu
 `_discover_manifest_entries` drops the bad entry and keeps the rest (raising only when nothing survives, so a hostile
 manifest is never a successful no-op add), and `_load_registries_from_file` skips-with-warning — narrower than the
 enclosing `except`, which reverts to the shipped defaults and would let one hand-edited entry discard every registry the
-user has. `SUBPATH_FIELDS` is the list any new path-forming field must join, or it escapes validation entirely. See
+user has. Per-entry parsing is total (`_entry_from_document`: missing/non-string fields are a skip, string booleans are
+parsed so `trusted: "false"` is not truthy). The `except` fallback is **in-memory only** (`_default_registries(persist=False)`)
+and copies the unreadable file to `registries.yaml.unreadable` first: it used to save the defaults over the user's file
+whenever manifest discovery succeeded, erasing their registries and trust grants. `SUBPATH_FIELDS` is the list any new path-forming field must join, or it escapes validation entirely. See
 `docs/SECURITY.md`.
 
 **Tab completion**: `RecipeNameType.shell_complete()` in `_common.py` supports `@registry/recipe` syntax — `@` prefix

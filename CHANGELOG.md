@@ -258,6 +258,23 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- `sparkrun stop <target> --dry-run` no longer tears the workload down. `api.stop`
+  gains `dry_run` and takes `workload_id` (matching `api.logs`); `cluster_id=`
+  still works with a `DeprecationWarning`.
+- Security: a recipe's container image reference could run shell commands on every
+  target host through the image sync and distribution scripts. Image references are
+  now validated and never re-expanded by the shell.
+- A malformed `registries.yaml` entry is skipped instead of making sparkrun replace
+  the whole file with the default registries. An unparseable file is left in place
+  (a copy is kept as `registries.yaml.unreadable`), and string booleans such as
+  `trusted: "false"` are parsed rather than treated as true.
+- Saving `proxy.yaml` refuses to merge into a file that cannot be parsed, instead of
+  writing back only the pending keys (which dropped the bind host and master key).
+  Proxy config saves use the shared owner-only atomic writer, fixing saves on Windows
+  under Python 3.12.
+- A discovery session left by a killed or crashed owner is reclaimed instead of
+  blocking every later `proxy start` (and restart-looping the systemd unit). A failed
+  discovery start stops the gateway it just spawned.
 - Embedded CLI invocations validate configuration binding independently of cached
   plugin discovery. Conflicting paths fail before dispatch or writes.
 - Job APIs and metadata helpers honor the configured cache with omitted contexts,
