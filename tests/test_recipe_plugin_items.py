@@ -74,7 +74,9 @@ def test_plugin_parse_failure_names_owner(demo_handler):
 
 
 def test_recipe_item_ownership_conflict_is_rejected(demo_handler):
-    with pytest.raises(ValueError, match="already owned"):
+    from sparkrun.core.registration import PluginConflictError
+
+    with pytest.raises(PluginConflictError, match="Recipe item 'demo_plugin' is already registered by tests.demo"):
         register_recipe_item("demo_plugin", _DemoHandler(), owner="someone.else")
 
 
@@ -166,8 +168,10 @@ def test_legacy_plugin_state_defaults_to_identity_participation(demo_handler):
 
 
 def test_registration_is_idempotent_only_for_same_policy(demo_handler):
+    from sparkrun.core.registration import PluginConflictError
+
     register_recipe_item("demo_plugin", demo_handler, owner="tests.demo")
-    with pytest.raises(ValueError, match="already owned"):
+    with pytest.raises(PluginConflictError, match="already registered"):
         register_recipe_item("demo_plugin", demo_handler, owner="tests.demo", affects_fingerprint=False)
 
 

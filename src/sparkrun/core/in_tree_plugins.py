@@ -166,10 +166,11 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
         The plugin module names that loaded, in discovery order.
     """
     package = package or IN_TREE_PLUGIN_PACKAGE
-    from sparkrun.core.plugin_identity import preflight_identities
+    from sparkrun.core.plugin_identity import reserve_identities
 
     identities = in_tree_plugin_identities(v, package)
-    preflight_identities(identities.values())
+    rejected = reserve_identities(identities.values())
+    identities = {name: identity for name, identity in identities.items() if identity not in rejected}
     loaded: list[str] = []
     for name in iter_in_tree_plugin_names(package):
         flag = plugin_feature_flag(name)

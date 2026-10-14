@@ -30,7 +30,7 @@ from sparkrun.core.plugin_identity import (
     preflight_identities,
     preflight_plugin_sources,
 )
-from sparkrun.core.registration import load_and_register_plugin
+from sparkrun.core.registration import PluginConflictError, load_and_register_plugin
 from sparkrun.daemon.auth import TokenStore
 from sparkrun.daemon.jobs import JobStore, Conflict
 from sparkrun.daemon.server import create_app
@@ -128,9 +128,21 @@ def test_duplicate_normalized_directory_ids_fail_before_import(tmp_path, monkeyp
     roots = [
         write_plugin(tmp_path / name, plugin_id, "namespace_" + name) for name, plugin_id in (("one", "OCI_Relay"), ("two", "oci-relay"))
     ]
-    with pytest.raises(RuntimeError, match="identity 'oci-relay'.*one.*two"):
-        load_external_plugins(None, paths=roots)
+    assert load_external_plugins(None, paths=roots) == []
     assert not {"namespace_one", "namespace_two"} & sys.modules.keys()
+    _assert_conflict_blocks_launch(r"identity 'oci-relay'.*one.*two")
+
+
+def _assert_conflict_blocks_launch(pattern):
+    """A contested identity is skipped, recorded, and refused at launch."""
+    import re
+
+    from sparkrun.core.installed_plugins import RequiredIntegrationError, require_integrations
+    from sparkrun.core.registration import recorded_plugin_conflicts
+
+    assert any(re.search(pattern, conflict) for conflict in recorded_plugin_conflicts()), recorded_plugin_conflicts()
+    with pytest.raises(RequiredIntegrationError, match=pattern):
+        require_integrations()
 
 
 def test_cross_source_conflict_is_detected_before_loading_any_provider(binding, tmp_path, monkeypatch):
@@ -144,9 +156,25 @@ def test_cross_source_conflict_is_detected_before_loading_any_provider(binding, 
     monkeypatch.delenv("SPARKRUN_NO_EXTERNAL_PLUGINS", raising=False)
     monkeypatch.setattr("sparkrun.core.external_plugins.configured_plugin_paths", lambda v: [root])
     monkeypatch.setenv("SPARKRUN_FEATURE_INTEGRATION_K8S", "1")
-    with pytest.raises(RuntimeError, match="identity 'k8s'.*in-tree.*external"):
-        preflight_plugin_sources(None, config)
+    rejected = preflight_plugin_sources(None, config)
+    assert {identity.source[0] for identity in rejected} == {"in-tree", "external"}
     assert "namespace_duplicate" not in sys.modules
+    _assert_conflict_blocks_launch(r"identity 'k8s'.*in-tree.*external")
+
+
+def test_malformed_integration_selection_does_not_break_bootstrap(binding, monkeypatch):
+    """One bad source must not fail initialization for every command: it is
+    recorded and skipped, and dependent launches are refused instead."""
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.installed_plugins import RequiredIntegrationError, load_installed_plugins, require_integrations
+
+    monkeypatch.delenv("SPARKRUN_NO_INSTALLED_PLUGINS", raising=False)
+    config = SparkrunConfig(binding.config_path)
+    config.set("integrations", {"example": "yes"})
+    preflight_plugin_sources(None, config)
+    load_installed_plugins(None, config=config)
+    with pytest.raises(RequiredIntegrationError, match="integrations must map"):
+        require_integrations()
 
 
 @pytest.mark.parametrize("source", ["in-tree", "external", "installed", "application"])
@@ -176,7 +204,7 @@ def test_registration_context_cannot_be_bypassed_and_handlers_cannot_be_replaced
             register_daemon_op(replace(op, name="plugins.other.status"))
         bound = register_plugin_daemon_op(op)
         assert register_daemon_op(op) is bound
-        with pytest.raises(ValueError, match="already registered"):
+        with pytest.raises(PluginConflictError, match="already registered"):
             register_daemon_op(replace(op, handler_loader=lambda: None))
         with pytest.raises(ValueError, match="relative paths"):
             register_plugin_daemon_route(DaemonRoute("/v1/fixture", lambda: None, ("status",), op.request_schema))
@@ -388,7 +416,7 @@ def test_managed_namespace_survives_generation_and_version_changes(binding, monk
 @pytest.mark.parametrize("names", [("Same_ID", "same-id"), ("same", "same")])
 def test_installed_duplicate_ids_fail_before_any_import(binding, monkeypatch, names):
     from sparkrun.core.config import SparkrunConfig
-    from sparkrun.core.installed_plugins import load_installed_plugins, installed_plugin_inventory, PluginConflictError
+    from sparkrun.core.installed_plugins import load_installed_plugins, installed_plugin_inventory
 
     entries = [
         SimpleNamespace(
@@ -403,6 +431,6 @@ def test_installed_duplicate_ids_fail_before_any_import(binding, monkeypatch, na
     monkeypatch.delenv("SPARKRUN_NO_INSTALLED_PLUGINS", raising=False)
     config = SparkrunConfig(binding.config_path)
     config.set("integrations", dict.fromkeys(names, True))
-    with pytest.raises(PluginConflictError, match="provider-0.*provider-1"):
-        load_installed_plugins(None, config=config)
+    load_installed_plugins(None, config=config)
     assert all(row.failure and not row.loaded for row in installed_plugin_inventory())
+    _assert_conflict_blocks_launch("provider-0.*provider-1")

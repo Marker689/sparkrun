@@ -260,10 +260,14 @@ def test_required_integration_failures_keep_diagnostics_and_block_launch(monkeyp
     if failure == "disabled":
         config.set("integrations.example", False)
     if failure == "duplicate":
-        with pytest.raises(plugins.PluginConflictError, match="identity.*example"):
-            plugins.load_installed_plugins(Variables(), config=config)
+        # A contested identity is skipped and recorded, not raised: loading the
+        # other plugins continues, and the launch gate below still refuses.
+        from sparkrun.core.registration import recorded_plugin_conflicts
+
+        plugins.load_installed_plugins(Variables(), config=config)
         for entry in entries:
             entry.load.assert_not_called()
+        assert any("identity 'example'" in conflict for conflict in recorded_plugin_conflicts())
     else:
         plugins.load_installed_plugins(Variables(), config=config)
     assert any(p.failure for p in plugins.installed_plugin_inventory())

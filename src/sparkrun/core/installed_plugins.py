@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from sparkrun.core.registration import enlist_registry_state, load_and_register_plugin, format_plugin_failure
+from sparkrun.core.registration import (
+    PluginConflictError as PluginConflictError,  # re-exported: its historical home
+    clear_plugin_conflicts,
+    enlist_registry_state,
+    format_plugin_failure,
+    load_and_register_plugin,
+    raise_plugin_conflict,
+    recorded_plugin_conflicts,
+)
 
 import logging
 import os
@@ -13,14 +21,6 @@ from sparkrun.core.application_profile import get_application_profile
 
 logger = logging.getLogger(__name__)
 ENTRY_POINT_GROUP = "sparkrun.plugins"
-
-
-class PluginConflictError(RuntimeError):
-    """Two providers claim one stable ID; import order cannot resolve it."""
-
-    def __init__(self, message):
-        super().__init__(message)
-        _conflicts.append(message)
 
 
 class RequiredIntegrationError(RuntimeError):
@@ -47,14 +47,15 @@ _claims: dict[tuple[int, str, str], type] = {}
 
 enlist_registry_state(globals(), "_claims")
 _attempted: set[int] = set()
-_conflicts: list[str] = []
+_selection_errors: list[str] = []
 
 
 def reset_installed_plugins() -> None:
     _inventory.clear()
     _claims.clear()
     _attempted.clear()
-    _conflicts.clear()
+    _selection_errors.clear()
+    clear_plugin_conflicts()
 
 
 def claim_implementation(cls: type, v) -> None:
@@ -73,7 +74,7 @@ def claim_implementation(cls: type, v) -> None:
             key = (id(v), attr, selector)
             owner = _claims.get(key)
             if owner is not None and owner is not cls:
-                raise PluginConflictError(
+                raise_plugin_conflict(
                     "Conflicting %s %r: %s.%s and %s.%s"
                     % (
                         attr,
@@ -160,12 +161,23 @@ def installed_plugin_inventory(config=None) -> list[InstalledIntegration]:
 def load_installed_plugins(v, *, config=None) -> None:
     if id(v) in _attempted:
         return
-    rows, providers = _discover_installed_plugins(config)
-    from sparkrun.core.plugin_identity import preflight_identities
+    try:
+        rows, providers = _discover_installed_plugins(config)
+    except ValueError as exc:
+        # A malformed selection (``integrations:``) loads nothing rather than
+        # guessing, and blocks dependent launches instead of every command.
+        _attempted.add(id(v))
+        _inventory.clear()
+        _selection_errors[:] = ["installed integration selection is invalid: %s" % exc]
+        logger.warning("Not loading installed integrations: %s", exc)
+        return
+    _selection_errors.clear()
+    from sparkrun.core.plugin_identity import reserve_identities
 
     _inventory[:] = rows
     identities = installed_plugin_identities(rows)
-    preflight_identities(identities.values())
+    rejected = reserve_identities(identities.values())
+    identities = {index: identity for index, identity in identities.items() if identity not in rejected}
     _attempted.add(id(v))
 
     for index, row in enumerate(_inventory):
@@ -225,6 +237,7 @@ def require_integrations() -> None:
     failures.extend(
         p.failure for p in _inventory if p.selected and p.failure and ("Conflicting" in p.failure or "provided by both" in p.failure)
     )
-    failures.extend(_conflicts)
+    failures.extend(_selection_errors)
+    failures.extend(recorded_plugin_conflicts())
     if failures:
         raise RequiredIntegrationError("Integration requirements are not satisfied: " + "; ".join(failures))

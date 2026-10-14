@@ -44,7 +44,7 @@ argument to thread — the value has to be ambient for the duration of the load.
 
 from __future__ import annotations
 
-from sparkrun.core.registration import enlist_registry_state
+from sparkrun.core.registration import claim_registration, enlist_registry_state
 
 import logging
 from contextlib import contextmanager
@@ -55,7 +55,6 @@ from typing import Iterator
 
 from sparkrun.core.registry import (
     RegistryEntry,
-    RegistryError,
     assert_safe_registry_entry,
     validate_registry_name,
 )
@@ -154,14 +153,15 @@ def register_default_registry(entry: RegistryEntry, *, owner: str) -> None:
 
     Raises:
         ValueError: If *owner* is blank.
-        RegistryError: If the name or a subpath is unsafe, the name impersonates
-            a reserved namespace, or a *different* owner already declared it.
+        RegistryError: If the name or a subpath is unsafe, or the name
+            impersonates a reserved namespace.
+        PluginConflictError: If the name is already declared with a different
+            entry, owner or tier.
 
-    Registration is idempotent for the same owner and an equal entry, so a
-    re-imported plugin module is harmless.  A second owner claiming the same
-    name raises — mirroring :func:`sparkrun.core.recipe_items.register_recipe_item`,
-    because two plugins silently reinterpreting one registry name has no correct
-    arbitration.
+    Declaring an equal entry again is a no-op, so a re-imported plugin module
+    is harmless.  Anything else raises — the rule every plugin registry shares,
+    because two declarations silently reinterpreting one registry name have no
+    correct arbitration.
 
     Validation runs **here**, at the declaration's own call site, rather than
     where the overlay is applied — a plugin is local code we can fix, unlike a
@@ -180,12 +180,8 @@ def register_default_registry(entry: RegistryEntry, *, owner: str) -> None:
 
     declaration = DeclaredRegistry(entry=entry, owner=owner, tier=_ACTIVE_TIER.get())
 
-    existing = _DECLARED.get(entry.name)
-    if existing is not None:
-        if existing.owner == owner and existing.entry == entry:
-            return
-        if existing.owner != owner:
-            raise RegistryError("registry %r is already declared by plugin %r" % (entry.name, existing.owner))
+    if claim_registration(_DECLARED.get(entry.name), declaration, description="Plugin registry", key=entry.name):
+        return
     _DECLARED[entry.name] = declaration
     logger.debug(
         "Plugin %r declared %s registry %r -> %s",

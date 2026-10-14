@@ -18,7 +18,7 @@ which legitimately needs Click.
 
 from __future__ import annotations
 
-from sparkrun.core.registration import enlist_registry_state, register_unique
+from sparkrun.core.registration import claim_registration, enlist_registry_state, register_unique, registration_equal
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
@@ -72,28 +72,27 @@ def register_cli_command(
         name: Command name. Required with a callable (idempotence must not
             have to build the command); inferred from a ``click.Command``.
 
-    Repeated registration by the same callback or loader is idempotent.
-    A different provider claiming the same path and name is an error.
+    Registering the same callback or loader again is a no-op. Any other
+    command at the same path and name raises ``PluginConflictError``.
     """
     resolved_name = name or getattr(command, "name", None)
     if not resolved_name:
         raise ValueError("register_cli_command needs an explicit name= when given a loader")
 
     spec = CliCommandSpec(name=resolved_name, command=command, parent=tuple(parent))
-    for existing in _CLI_EXTENSIONS:
-        if existing.parent == spec.parent and existing.name == spec.name:
+    existing = next((e.command for e in _CLI_EXTENSIONS if e.parent == spec.parent and e.name == spec.name), None)
+    key = " ".join((*spec.parent, spec.name))
+    if not claim_registration(existing, command, description="CLI command", key=key, equal=_same_command):
+        _CLI_EXTENSIONS.append(spec)
 
-            def provider(value):
-                callback = getattr(value, "callback", None) or value
-                return (getattr(callback, "__module__", None), getattr(callback, "__qualname__", None))
 
-            same_provider = provider(existing.command) == provider(spec.command) != (None, None)
-            if existing.command is not spec.command and not same_provider:
-                from sparkrun.core.installed_plugins import PluginConflictError
+def _same_command(left: Any, right: Any) -> bool:
+    """A built ``click.Command`` is compared through its callback, a loader directly."""
 
-                raise PluginConflictError("CLI command %r is claimed by both %r and %r" % (resolved_name, existing.command, spec.command))
-            return
-    _CLI_EXTENSIONS.append(spec)
+    def target(value):
+        return getattr(value, "callback", None) or value
+
+    return left is right or registration_equal(target(left), target(right))
 
 
 def registered_cli_commands() -> list[CliCommandSpec]:

@@ -153,9 +153,9 @@ def test_registration_rejects_distinct_provider_by_name(fake_gateway):
     class Replacement(FakeGateway):
         pass
 
-    from sparkrun.core.installed_plugins import PluginConflictError
+    from sparkrun.core.registration import PluginConflictError
 
-    with pytest.raises(PluginConflictError, match="claimed by both"):
+    with pytest.raises(PluginConflictError, match="Gateway .* already registered by .*a different registration by"):
         register_gateway(FAKE_GATEWAY, feature_flag=FAKE_FLAG, loader=lambda: Replacement)
     assert gateway_class(FAKE_GATEWAY) is FakeGateway
 

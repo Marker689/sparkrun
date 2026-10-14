@@ -108,6 +108,15 @@ def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_p
         raise
 
 
+def validating_candidate() -> bool:
+    """True inside a child process validating a managed plugin candidate.
+
+    Validation reports through initialization failure, so the loaders' usual
+    "log and continue" containment must not apply there.
+    """
+    return _validation_candidate is not None
+
+
 def managed_enabled(record: dict, config) -> bool:
     from sparkrun.core.plugin_policy import PluginSource, plugin_state
 
@@ -136,9 +145,10 @@ def load_managed_plugins(v, *, config=None):
     if _validation_candidate:
         candidate, _path = _validation_candidate
         records[candidate["metadata"]["name"]] = candidate
-    from sparkrun.core.plugin_identity import preflight_identities
+    from sparkrun.core.plugin_identity import reserve_identities
 
-    preflight_identities(managed_plugin_identities(config, records).values())
+    # Contested IDs are recorded here and refused again at registration.
+    reserve_identities(managed_plugin_identities(config, records).values())
     loaded = []
     # Preflight the entire managed set before importing any managed provider.
     rejected = {}

@@ -89,22 +89,22 @@ enlist_registry_state(globals(), "FEATURE_FLAGS", "FEATURE_OWNERS", "DECLARED_FE
 def register_feature(flag: FeatureFlag) -> FeatureFlag:
     """Register *flag* in the global registry and return it.
 
+    Registering an equal flag from the same owner again is a no-op.
+
     Raises:
-        ValueError: if a different flag is already registered under the name.
+        PluginConflictError: The name is already registered with a different
+            definition or by a different owner (core counts as an owner).
     """
     from sparkrun.core.plugin_identity import current_registration_owner, PluginIdentity
+    from sparkrun.core.registration import claim_registration
 
     owner = current_registration_owner()
-    previous_owner = FEATURE_OWNERS.get(flag.name)
-    if previous_owner is not None and previous_owner != owner:
-        raise ValueError("Feature %r already belongs to another plugin" % flag.name)
-    existing = FEATURE_FLAGS.get(flag.name)
-    if existing is not None and isinstance(owner, PluginIdentity) and previous_owner is None:
-        raise ValueError("Feature %r belongs to core" % flag.name)
-    if existing is not None and existing != flag:
-        raise ValueError("Feature flag %r already registered with a different definition" % flag.name)
+    owner = owner if isinstance(owner, PluginIdentity) else None
+    existing = (FEATURE_FLAGS[flag.name], FEATURE_OWNERS.get(flag.name)) if flag.name in FEATURE_FLAGS else None
+    if claim_registration(existing, (flag, owner), description="Feature flag", key=flag.name):
+        return FEATURE_FLAGS[flag.name]
     FEATURE_FLAGS[flag.name] = flag
-    if isinstance(owner, PluginIdentity):
+    if owner is not None:
         FEATURE_OWNERS[flag.name] = owner
     return flag
 

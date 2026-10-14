@@ -99,9 +99,15 @@ def toy_registry(tmp_path: Path):
 def test_registration_is_idempotent_and_owner_exclusive(toy_format):
     from sparkrun.core.installed_plugins import PluginConflictError
 
-    register_recipe_format(TOY)  # same owner: fine
+    register_recipe_format(TOY)  # an equal registration: a no-op
+    register_recipe_format(
+        RecipeFormat(name="toy", owner="tests", iter_files=_toy_iter, name_of=_toy_name, load=_toy_load, claims=_toy_claims)
+    )
     with pytest.raises(PluginConflictError, match="already registered by tests"):
         register_recipe_format(RecipeFormat(name="toy", owner="someone-else", iter_files=_toy_iter, name_of=_toy_name, load=_toy_load))
+    # The same owner cannot silently swap in a different definition either.
+    with pytest.raises(PluginConflictError, match="already registered by tests"):
+        register_recipe_format(RecipeFormat(name="toy", owner="tests", iter_files=_toy_iter, name_of=_toy_name, load=_toy_load))
 
 
 def test_the_builtin_format_cannot_be_replaced():
@@ -267,6 +273,7 @@ def test_the_format_is_told_when_neighbouring_files_are_off_limits(tmp_path, toy
         seen.append(kw["allow_local"])
         return original(path, **kw)
 
+    unregister_recipe_format("toy")
     register_recipe_format(RecipeFormat(name="toy", owner="tests", iter_files=_toy_iter, name_of=_toy_name, load=_spy, claims=_toy_claims))
     Recipe.load(manifest)
     assert seen == [True]

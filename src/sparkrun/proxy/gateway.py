@@ -103,27 +103,23 @@ def register_gateway(name: str, *, feature_flag: str, loader: "Callable[[], type
             registration can name a class this module must not import at
             module scope, and so registering costs nothing at import time.
 
-    Repeated registration of the same provider is idempotent. Distinct
-    providers must use distinct names, rather than depending on import order.
+    Registering an equal declaration (same loader, flag and owner) again is a
+    no-op; anything else raises ``PluginConflictError``. Distinct providers
+    must use distinct names, rather than depending on import order.
     """
-    existing = _GATEWAY_LOADERS.get(name)
-    if existing is not None:
+    from sparkrun.core.plugin_identity import current_registration_owner
+    from sparkrun.core.registration import claim_registration
 
-        def provider(value):
-            return (getattr(value, "__module__", None), getattr(value, "__qualname__", None))
-
-        same_provider = existing is loader or provider(existing) == provider(loader) != (None, None)
-        if not same_provider or GATEWAY_FEATURE_FLAGS.get(name) != feature_flag:
-            from sparkrun.core.installed_plugins import PluginConflictError
-
-            raise PluginConflictError("Gateway %r is claimed by both %r and %r" % (name, provider(existing), provider(loader)))
+    owner = current_registration_owner()
+    existing = None
+    if name in _GATEWAY_LOADERS:
+        existing = (_GATEWAY_LOADERS[name], GATEWAY_FEATURE_FLAGS.get(name), _GATEWAY_OWNERS.get(name))
+    if claim_registration(existing, (loader, feature_flag, owner), description="Gateway", key=name):
         return
     GATEWAY_FEATURE_FLAGS[name] = feature_flag
     _GATEWAY_LOADERS[name] = loader
-    from sparkrun.core.plugin_identity import current_registration_owner
-
-    if current_registration_owner() is not None:
-        _GATEWAY_OWNERS[name] = current_registration_owner()
+    if owner is not None:
+        _GATEWAY_OWNERS[name] = owner
 
 
 def gateway_class(name: str) -> type:

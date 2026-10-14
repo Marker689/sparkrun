@@ -11,6 +11,7 @@ from sparkrun.core.registry import (
     RegistryError,
     RegistryManager,
 )
+from sparkrun.core.registration import PluginConflictError
 from sparkrun.core.registry_defaults import (
     DeclarationTier,
     declaring_tier,
@@ -57,15 +58,17 @@ def test_declaration_is_idempotent_for_the_same_owner_and_entry():
 
 def test_a_second_owner_cannot_claim_an_existing_name():
     register_default_registry(_entry(), owner="coldsnap")
-    with pytest.raises(RegistryError, match="already declared by plugin 'coldsnap'"):
+    with pytest.raises(PluginConflictError, match="already registered by coldsnap"):
         register_default_registry(_entry(), owner="impostor")
 
 
-def test_the_same_owner_may_revise_its_own_declaration():
+def test_the_same_owner_cannot_silently_revise_its_declaration():
+    """One rule for every plugin registry: only an equal re-registration is a no-op."""
     register_default_registry(_entry(), owner="coldsnap")
-    register_default_registry(_entry(description="revised"), owner="coldsnap")
+    with pytest.raises(PluginConflictError, match="already registered by coldsnap"):
+        register_default_registry(_entry(description="revised"), owner="coldsnap")
     (declared,) = iter_declared_registries()
-    assert declared.entry.description == "revised"
+    assert declared.entry.description != "revised"
 
 
 def test_an_unsafe_name_is_rejected():

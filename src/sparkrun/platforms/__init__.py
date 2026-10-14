@@ -67,25 +67,14 @@ def register_platform(platform: HardwarePlatformPlugin, *, prepend: bool = False
             wins ties.  Default appends, so the built-in NVIDIA
             platforms keep their specificity ordering.
     """
+    from sparkrun.core.registration import claim_registration
     from sparkrun.core.setup_plans import validate_platform_setup_plans
 
     validate_platform_setup_plans(platform)
-    for existing in _REGISTRY:
-        if existing.platform_name == platform.platform_name:
-            if type(existing) is type(platform):
-                return
-            from sparkrun.core.installed_plugins import PluginConflictError
-
-            raise PluginConflictError(
-                "Conflicting platform %r: %s.%s and %s.%s"
-                % (
-                    platform.platform_name,
-                    type(existing).__module__,
-                    type(existing).__qualname__,
-                    type(platform).__module__,
-                    type(platform).__qualname__,
-                )
-            )
+    existing = next((p for p in _REGISTRY if p.platform_name == platform.platform_name), None)
+    # Platforms are stateless plugin instances: the same class is the same value.
+    if claim_registration(existing, platform, description="Platform", key=platform.platform_name, equal=lambda a, b: type(a) is type(b)):
+        return
     if prepend:
         _REGISTRY.insert(0, platform)
     else:

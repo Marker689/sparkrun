@@ -236,7 +236,9 @@ def _register_plugins(v: Variables, *, config=None) -> None:
             logger.debug("Skipping transport %s: %s", transport_cls.__name__, e)
 
     # Establish all selected identities before any cross-cutting plugin imports.
-    # Ambiguous providers cannot be resolved by import order.
+    # Ambiguous providers cannot be resolved by import order: contested IDs are
+    # skipped and recorded (require_integrations blocks dependent launches), so
+    # one conflict or malformed source cannot fail initialization for every command.
     from sparkrun.core.plugin_identity import preflight_plugin_sources
 
     preflight_plugin_sources(v, config=config)
@@ -254,13 +256,21 @@ def _register_plugins(v: Variables, *, config=None) -> None:
     except Exception:  # noqa: BLE001 - a broken plugin dir must not kill the CLI
         logger.exception("External plugin loading failed")
 
-    from sparkrun.core.managed_plugins import load_managed_plugins
+    from sparkrun.core.managed_plugins import load_managed_plugins, validating_candidate
 
-    load_managed_plugins(v, config=config)
+    try:
+        load_managed_plugins(v, config=config)
+    except Exception:  # noqa: BLE001 - a broken plugin store must not kill the CLI
+        if validating_candidate():
+            raise  # candidate validation reports through initialization failure
+        logger.exception("Managed plugin loading failed")
 
     from sparkrun.core.installed_plugins import load_installed_plugins
 
-    load_installed_plugins(v, config=config)
+    try:
+        load_installed_plugins(v, config=config)
+    except Exception:  # noqa: BLE001 - required integrations still fail closed at launch
+        logger.exception("Installed plugin loading failed")
 
 
 def get_variables() -> Variables:

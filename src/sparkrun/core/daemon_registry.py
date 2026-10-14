@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from functools import partial
 import re
 from typing import Callable
 
-from sparkrun.core.registration import enlist_registry_state
+from sparkrun.core.registration import enlist_registry_state, register_unique
 from sparkrun.core.daemon_schema import validate_schema
 from sparkrun.core.plugin_identity import PluginIdentity, current_registration_owner, normalize_plugin_id
 
@@ -72,27 +71,8 @@ def _owner(declared):
     return owner, name
 
 
-def _handler_identity(loader):
-    """Stable Python handler identity across equivalent partial/lambda declarations."""
-    if isinstance(loader, partial):
-        return (_handler_identity(loader.func), loader.args, loader.keywords)
-    if hasattr(loader, "__code__"):
-        cells = tuple(cell.cell_contents for cell in (loader.__closure__ or ()))
-        return (loader.__module__, loader.__qualname__, loader.__code__, loader.__defaults__, loader.__kwdefaults__, cells)
-    return loader
-
-
-def _register(registry, key, value, loader_field):
-    previous = registry.get(key)
-    if previous is not None:
-        loader = getattr(value, loader_field)
-        if replace(previous, **{loader_field: loader}) != value or _handler_identity(getattr(previous, loader_field)) != _handler_identity(
-            loader
-        ):
-            raise ValueError("Daemon declaration %r is already registered by %s" % (key, previous.owner))
-        return previous
-    registry[key] = value
-    return value
+def _register(registry, key, value):
+    return register_unique(registry, key, value, description="Daemon declaration")
 
 
 def register_daemon_op(op):
@@ -108,7 +88,7 @@ def register_daemon_op(op):
         if name.split(".")[0] in _RESERVED_ROUTE_ROOTS:
             raise ValueError("Reserved core operation namespace: %s" % name)
         bound = replace(op, owner="core", local_name=name)
-    return _register(_OPERATIONS, bound.name, bound, "handler_loader")
+    return _register(_OPERATIONS, bound.name, bound)
 
 
 def register_plugin_daemon_op(op):
@@ -203,7 +183,7 @@ def register_daemon_route(route):
     bound = replace(
         route, path=path, owner=owner_name, local_path=route.path, operations=tuple(v for _, v in mapping), operation_map=mapping
     )
-    return _register(_ROUTES, path, bound, "decode_loader")
+    return _register(_ROUTES, path, bound)
 
 
 def register_plugin_daemon_route(route):

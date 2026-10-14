@@ -233,7 +233,7 @@ def load_plugin_module(module, v: "Variables", *, tier: "DeclarationTier | None"
             plugin makes the registration call, not us.  Defaults to
             ``OUT_OF_TREE``: least privilege.
     """
-    from sparkrun.core.installed_plugins import PluginConflictError
+    from sparkrun.core.registration import PluginConflictError
 
     try:
         from sparkrun.core.plugin_identity import discovered_identity, registered_plugin_identity
@@ -316,9 +316,10 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
     from sparkrun.core.features import _gate_config
 
     identities = directory_plugin_identities(paths, config=_gate_config(v), explicit=explicit)
-    from sparkrun.core.plugin_identity import preflight_identities
+    from sparkrun.core.plugin_identity import reserve_identities
 
-    preflight_identities(identities.values())
+    rejected = reserve_identities(identities.values())
+    identities = {key: identity for key, identity in identities.items() if identity not in rejected}
     # Inspect all candidates before imports so duplicate module names cannot
     # silently select one directory through sys.modules or sys.path precedence.
     paths = list(dict.fromkeys(path.resolve() for path in paths))

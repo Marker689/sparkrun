@@ -7,7 +7,7 @@ export for that key; the core only preserves lifecycle and round-trip order.
 
 from __future__ import annotations
 
-from sparkrun.core.registration import enlist_registry_state
+from sparkrun.core.registration import enlist_registry_state, register_unique
 
 import re
 from dataclasses import dataclass
@@ -78,8 +78,9 @@ def register_recipe_item(
 ) -> None:
     """Claim a top-level recipe *key* for *owner*.
 
-    Registration is idempotent for the same owner and handler object.  A
-    second owner cannot silently reinterpret an existing recipe surface.
+    Registering an equal claim (same owner, handler and options) again is a
+    no-op.  Anything else raises ``PluginConflictError``: a second owner, or a
+    changed definition, cannot silently reinterpret an existing recipe surface.
 
     Passive annotations may set ``affects_fingerprint=False``. Items owning
     execution or preparation must retain the default, because they change the
@@ -114,19 +115,7 @@ def register_recipe_item(
         raise TypeError("recipe affects_fingerprint must be a bool")
     if not affects_fingerprint and (execution_strategy is not None or preparation_steps is not None or build_preparation is not None):
         raise ValueError("recipe items contributing execution or preparation must affect the fingerprint")
-    existing = _RECIPE_ITEMS.get(key)
-    if existing is not None:
-        if (
-            existing.owner == owner
-            and existing.handler is handler
-            and existing.execution_strategy is execution_strategy
-            and existing.preparation_steps is preparation_steps
-            and existing.affects_fingerprint == affects_fingerprint
-            and existing.build_preparation is build_preparation
-        ):
-            return
-        raise ValueError("recipe item %r is already owned by %s" % (key, existing.owner))
-    _RECIPE_ITEMS[key] = RecipeItemRegistration(
+    registration = RecipeItemRegistration(
         key=key,
         owner=owner,
         handler=handler,
@@ -135,6 +124,7 @@ def register_recipe_item(
         affects_fingerprint=affects_fingerprint,
         build_preparation=build_preparation,
     )
+    register_unique(_RECIPE_ITEMS, key, registration, description="Recipe item")
 
 
 def unregister_recipe_item(key: str, *, owner: str) -> None:

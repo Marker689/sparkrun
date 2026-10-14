@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from sparkrun.core.plugin_identity import PluginIdentity, current_registration_owner
-from sparkrun.core.registration import enlist_registry_state
+from sparkrun.core.registration import enlist_registry_state, register_unique
 
 WORKLOAD_LIFECYCLE_API_VERSION = 1
 
@@ -29,10 +29,7 @@ def register_workload_lifecycle(provider: WorkloadLifecycleProvider):
         raise ValueError("Lifecycle providers must use their loader-assigned plugin identity")
     if provider.version != WORKLOAD_LIFECYCLE_API_VERSION:
         raise ValueError("Unsupported workload lifecycle API version")
-    existing = _PROVIDERS.get(provider.name)
-    if existing is not None and existing != provider:
-        raise ValueError("Workload lifecycle provider is already registered")
-    _PROVIDERS[provider.name] = provider
+    register_unique(_PROVIDERS, provider.name, provider, description="Workload lifecycle provider")
 
 
 def registered_workload_lifecycles():

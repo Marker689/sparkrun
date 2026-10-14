@@ -48,10 +48,15 @@ def register_kv_strategy(strategy: KVCacheStrategy) -> None:
 
     The escape hatch for out-of-tree plugins (a vendor fork with its own packed
     slot layout), called from a plugin module's ``register(v)`` hook alongside
-    :func:`~sparkrun.platforms.register_platform`.  Re-registering a name
-    replaces the existing entry, so a plugin may override a built-in.
+    :func:`~sparkrun.platforms.register_platform`.  Registering the same
+    strategy class under its name again is a no-op; a different strategy under
+    a registered name (including a built-in's) raises ``PluginConflictError``.
     """
-    _REGISTRY[:] = [s for s in _REGISTRY if s.name != strategy.name]
+    from sparkrun.core.registration import claim_registration
+
+    existing = next((s for s in _REGISTRY if s.name == strategy.name), None)
+    if claim_registration(existing, strategy, description="KV cache strategy", key=strategy.name, equal=lambda a, b: type(a) is type(b)):
+        return
     _REGISTRY.append(strategy)
     _REGISTRY.sort(key=lambda s: s.priority)
 

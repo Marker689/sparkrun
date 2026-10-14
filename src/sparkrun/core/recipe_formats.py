@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from sparkrun.core.registration import enlist_registry_state
+from sparkrun.core.registration import enlist_registry_state, register_unique
 
 if TYPE_CHECKING:
     from sparkrun.core.registry import RegistryManager
@@ -82,22 +82,16 @@ enlist_registry_state(globals(), "_FORMATS")
 
 
 def register_recipe_format(recipe_format: RecipeFormat) -> None:
-    """Register *recipe_format*. Idempotent for the same owner; a second owner raises.
+    """Register *recipe_format*. Registering an equal format again is a no-op.
 
     Raises:
         ValueError: The name is the built-in format.
-        PluginConflictError: Another owner already registered the name.
+        PluginConflictError: The name is already registered with a different
+            definition, by another owner or the same one.
     """
     if recipe_format.name == DEFAULT_RECIPE_FORMAT:
         raise ValueError("recipe format %r is built in and cannot be re-registered" % DEFAULT_RECIPE_FORMAT)
-    existing = _FORMATS.get(recipe_format.name)
-    if existing is not None and existing.owner != recipe_format.owner:
-        from sparkrun.core.installed_plugins import PluginConflictError
-
-        raise PluginConflictError(
-            "recipe format %r is already registered by %s (not %s)" % (recipe_format.name, existing.owner, recipe_format.owner)
-        )
-    _FORMATS[recipe_format.name] = recipe_format
+    register_unique(_FORMATS, recipe_format.name, recipe_format, description="Recipe format")
 
 
 def unregister_recipe_format(name: str) -> None:

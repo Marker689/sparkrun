@@ -8,11 +8,13 @@ workers; this is not a concurrent registry mutation API.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import partial
 from types import ModuleType
-from typing import Any, TypeVar, TYPE_CHECKING
+from typing import Any, NoReturn, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scitrera_app_framework import Variables
@@ -37,19 +39,152 @@ class PluginCompatibilityError(ValueError):
         )
 
 
+class PluginConflictError(RuntimeError):
+    """Two registrations claim one key; import order cannot resolve it."""
+
+
 K = TypeVar("K")
 V = TypeVar("V")
 _SOURCES: list[tuple[dict[str, Any], str]] = []
 _ACTIVE: ContextVar[tuple[_Snapshot, ...]] = ContextVar("sparkrun_registration_snapshots", default=())
 
+# Conflicts survive registration rollback: the rejected plugin is gone, but a
+# launch that would have used it must not proceed as if nothing happened
+# (installed_plugins.require_integrations reads this). Recorded where a conflict
+# is raised, so merely constructing an error has no side effect.
+_CONFLICTS: list[str] = []
 
-def register_unique(registry: MutableMapping[K, V], key: K, value: V, *, description: str) -> None:
-    """Allow identical registration; reject a second provider for the same key."""
-    if key in registry and registry[key] != value:
-        from sparkrun.core.installed_plugins import PluginConflictError
 
-        raise PluginConflictError("%s %r is already registered" % (description, key))
-    registry[key] = value
+def raise_plugin_conflict(message: str) -> NoReturn:
+    """Record a registration conflict for launch gating, then raise it."""
+    record_plugin_conflict(message)
+    raise PluginConflictError(message)
+
+
+def record_plugin_conflict(message: str) -> None:
+    """Record a conflict that a caller contains rather than raises."""
+    if message not in _CONFLICTS:
+        _CONFLICTS.append(message)
+
+
+def recorded_plugin_conflicts() -> tuple[str, ...]:
+    return tuple(_CONFLICTS)
+
+
+def clear_plugin_conflicts() -> None:
+    _CONFLICTS.clear()
+
+
+def _callable_identity(value: Any) -> Any:
+    """Stable identity for a declared callable, across re-imports of its module.
+
+    A re-imported plugin module creates new function objects with equal code,
+    so identity is module, qualified name, code, defaults and closure contents.
+    """
+    if isinstance(value, partial):
+        return ("partial", _callable_identity(value.func), value.args, value.keywords)
+    code = getattr(value, "__code__", None)
+    if code is None:
+        return value
+    cells = []
+    for cell in getattr(value, "__closure__", None) or ():
+        try:
+            cells.append(cell.cell_contents)
+        except ValueError:  # an empty cell
+            cells.append(_EMPTY_CELL)
+    return (
+        "function",
+        getattr(value, "__module__", None),
+        getattr(value, "__qualname__", None),
+        code,
+        getattr(value, "__defaults__", None),
+        getattr(value, "__kwdefaults__", None),
+        tuple(cells),
+    )
+
+
+_EMPTY_CELL = object()
+
+
+def registration_equal(left: Any, right: Any) -> bool:
+    """Whether two registrations are the same value (the no-op case).
+
+    Dataclasses compare field by field, sequences element-wise and callables by
+    :func:`_callable_identity`; everything else uses ``==``.
+    """
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if dataclasses.is_dataclass(left) and not isinstance(left, type):
+        return all(registration_equal(getattr(left, f.name), getattr(right, f.name)) for f in dataclasses.fields(left))
+    if isinstance(left, (tuple, list)):
+        return len(left) == len(right) and all(registration_equal(a, b) for a, b in zip(left, right, strict=True))
+    if isinstance(left, partial) or hasattr(left, "__code__"):
+        return _callable_identity(left) == _callable_identity(right)
+    try:
+        return bool(left == right)
+    except Exception:  # noqa: BLE001 - an unorderable value is simply not equal
+        return False
+
+
+def _describe(value: Any) -> str:
+    """Name the provider behind a registration for a conflict diagnostic."""
+    owner = getattr(value, "owner", None)
+    owner = getattr(owner, "plugin_id", owner)
+    if isinstance(owner, str) and owner:
+        return owner
+    if isinstance(value, tuple):
+        return ", ".join(_describe(item) for item in value if item is not None) or "core"
+    if isinstance(value, partial):
+        return _describe(value.func)
+    if isinstance(value, type) or callable(value):
+        target = getattr(value, "callback", None) or value
+        module, qualname = getattr(target, "__module__", None), getattr(target, "__qualname__", None)
+        if module and qualname:
+            return "%s.%s" % (module, qualname)
+    if dataclasses.is_dataclass(value) or not isinstance(value, (str, int, float, bool)):
+        return "%s.%s" % (type(value).__module__, type(value).__qualname__)
+    return repr(value)
+
+
+def claim_registration(
+    existing: Any,
+    value: Any,
+    *,
+    description: str,
+    key: Any,
+    equal: Callable[[Any, Any], bool] | None = None,
+) -> bool:
+    """Apply the one conflict rule every in-process plugin registry shares.
+
+    Returns ``False`` when *key* is unclaimed (*existing* is ``None``): the
+    caller stores *value*. Returns ``True`` when *value* equals the existing
+    registration, which makes re-registration a no-op. Anything else, including
+    a different value from the same owner, raises :class:`PluginConflictError`.
+    """
+    if existing is None:
+        return False
+    if (equal or registration_equal)(existing, value):
+        return True
+    raise_plugin_conflict(
+        "%s %r is already registered by %s; a different registration by %s cannot replace it"
+        % (description, key, _describe(existing), _describe(value))
+    )
+
+
+def register_unique(
+    registry: MutableMapping[K, V],
+    key: K,
+    value: V,
+    *,
+    description: str,
+    equal: Callable[[V, V], bool] | None = None,
+) -> V:
+    """Store *value* under *key* by the shared rule; return the registered value."""
+    if not claim_registration(registry.get(key), value, description=description, key=key, equal=equal):
+        registry[key] = value
+    return registry[key]
 
 
 def enlist_registry_state(namespace: dict[str, Any], *names: str) -> None:
