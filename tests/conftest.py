@@ -219,7 +219,7 @@ def isolate_stateful(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolate_runtime_state(tmp_path: Path, monkeypatch):
+def isolate_runtime_state(tmp_path_factory, monkeypatch):
     """Point runtime-lease coordination state at a per-test directory.
 
     ``core/runtime_lease.py`` keys it off the *OS account* home and ignores
@@ -238,8 +238,9 @@ def isolate_runtime_state(tmp_path: Path, monkeypatch):
 
     with ExitStack() as stack:
         if os.name != "nt":
-            root = tmp_path / "runtime-state"
-            root.mkdir(mode=0o700)
+            # Beside tmp_path, not in it: tests assert on tmp_path's contents
+            # or use it as an (empty) transfer source.
+            root = tmp_path_factory.mktemp("runtime-state")
         else:
             # Private storage refuses pytest's shared temp parent on Windows
             # (see daemon_test_directory), so own a secured root instead.
