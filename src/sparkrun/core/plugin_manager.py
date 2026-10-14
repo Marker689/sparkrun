@@ -288,9 +288,9 @@ class PluginManager:
         with self.store.mutation() as (config, records, baseline):
             name, record = self.store.select(records, selector)
             from sparkrun.core.plugin_lifecycle import run_hook, apply_plan
-            from sparkrun.core.plugin_policy import plugin_state
+            from sparkrun.core.plugin_policy import PluginSource, plugin_state
 
-            if plugin_state(name, config, source="external").required:
+            if plugin_state(name, config, source=PluginSource.EXTERNAL).required:
                 raise PluginError("Plugin %s is required by this application" % name)
             warning = None
             messages = []

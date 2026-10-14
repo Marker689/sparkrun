@@ -311,10 +311,11 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
         The top-level module names that were loaded — ``[]`` when nothing is
         configured.
     """
+    explicit = paths is not None
     paths = configured_plugin_paths(v, paths)
     from sparkrun.core.features import _gate_config
 
-    identities = directory_plugin_identities(paths, config=_gate_config(v))
+    identities = directory_plugin_identities(paths, config=_gate_config(v), explicit=explicit)
     from sparkrun.core.plugin_identity import preflight_identities
 
     preflight_identities(identities.values())
@@ -355,7 +356,12 @@ def load_external_plugins(v: "Variables", paths: "list[Path] | None" = None) -> 
     return loaded
 
 
-def directory_plugin_identities(paths, config=None):
+def directory_plugin_identities(paths, config=None, *, explicit: bool = False):
+    """Identities of enabled directory plugins under *paths*.
+
+    *explicit* marks programmatically named directories, which bypass the
+    ``core.external_plugins`` flag (configured ``plugins.paths`` do not).
+    """
     from sparkrun.core.plugin_identity import discovered_identity
     from sparkrun.core.registration import record_plugin_load_failure
 
@@ -366,12 +372,12 @@ def directory_plugin_identities(paths, config=None):
             try:
                 spec = PathFinder.find_spec(name, [str(path)])
                 identity = discovered_identity(name, name, source, origin=spec.origin if spec else None)
-                from sparkrun.core.plugin_policy import plugin_state
+                from sparkrun.core.plugin_policy import PluginSource, plugin_state
                 from sparkrun.core.features import declare_plugin_features
                 from sparkrun.core.plugin_manifest import read_declarations
 
                 declare_plugin_features(identity, read_declarations(spec.origin if spec else None, name))
-                if plugin_state(identity.plugin_id, config, source="directory").enabled:
+                if plugin_state(identity.plugin_id, config, source=PluginSource.EXTERNAL, external_gate=not explicit).enabled:
                     identities[path, name] = identity
             except (ValueError, OSError) as exc:
                 record_plugin_load_failure(source, exc)

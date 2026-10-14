@@ -96,7 +96,7 @@ def _discover_installed_plugins(config=None) -> tuple[list[InstalledIntegration]
     overrides = config.get("integrations", {})
     if not isinstance(overrides, dict) or any(type(value) is not bool for value in overrides.values()):
         raise ValueError("integrations must map stable integration IDs to true or false")
-    from sparkrun.core.plugin_policy import plugin_state
+    from sparkrun.core.plugin_policy import PluginSource, plugin_state
 
     selected = set(profile.integrations) | set(profile.required_integrations)
     selected.update(name for name, enabled in overrides.items() if enabled)
@@ -109,7 +109,7 @@ def _discover_installed_plugins(config=None) -> tuple[list[InstalledIntegration]
     for ep in sorted(entry_points(group=ENTRY_POINT_GROUP), key=lambda e: (e.name, e.value, getattr(e.dist, "name", "") or "")):
         package = ep.dist.name if ep.dist else None
         version = ep.dist.version if ep.dist else None
-        state = plugin_state(ep.name, config, source="installed")
+        state = plugin_state(ep.name, config, source=PluginSource.INSTALLED)
         chosen, source = state.enabled, state.source
         row = InstalledIntegration(ep.name, ep.value, package, version, chosen, source, ep.name in profile.required_integrations)
         previous = next((p for p in out if p.name == ep.name), None)

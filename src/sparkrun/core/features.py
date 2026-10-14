@@ -202,7 +202,7 @@ def _raw_feature_enabled(
 
 
 def is_feature_enabled(name: str, *, config=None, channel=None, env=None) -> bool:
-    from sparkrun.core.plugin_policy import LEGACY_PLUGIN_FLAGS, plugin_state
+    from sparkrun.core.plugin_policy import LEGACY_PLUGIN_FLAGS, plugin_state, policy_source
 
     for plugin, alias in LEGACY_PLUGIN_FLAGS.items():
         if name == alias:
@@ -211,7 +211,7 @@ def is_feature_enabled(name: str, *, config=None, channel=None, env=None) -> boo
         return False
     owner = FEATURE_OWNERS.get(name) or DECLARED_FEATURE_OWNERS.get(name)
     if owner is not None and (
-        name not in FEATURE_FLAGS or not plugin_state(owner.plugin_id, config, source=owner.source[0], env=env).enabled
+        name not in FEATURE_FLAGS or not plugin_state(owner.plugin_id, config, source=policy_source(owner.source[0]), env=env).enabled
     ):
         return False
     return _raw_feature_enabled(name, config=config, channel=channel, env=env)

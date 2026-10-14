@@ -23,6 +23,7 @@ the configured path, never a same-named module from elsewhere.
 
 from __future__ import annotations
 
+from sparkrun.core.plugin_policy import PluginSource
 from sparkrun.core.registration import plugin_load_failure
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -33,10 +34,11 @@ if TYPE_CHECKING:
 
     from sparkrun.core.config import SparkrunConfig
 
-#: ``source`` values.
-SOURCE_IN_TREE = "in-tree"
-SOURCE_EXTERNAL = "external"
-SOURCE_INSTALLED = "installed"
+#: ``source`` values: the loading-policy spellings, so a row's source can be
+#: handed to :func:`~sparkrun.core.plugin_policy.plugin_state` unchanged.
+SOURCE_IN_TREE = PluginSource.IN_TREE.value
+SOURCE_EXTERNAL = PluginSource.EXTERNAL.value
+SOURCE_INSTALLED = PluginSource.INSTALLED.value
 
 #: ``version_source`` values (``None`` when the version is unknown).
 VERSION_FROM_MODULE = "module"
@@ -213,7 +215,7 @@ def _external_plugins(config: "SparkrunConfig | None", v: "Variables | None") ->
         iter_plugin_module_names,
         loaded_plugin_module,
     )
-    from sparkrun.core.plugin_policy import plugin_state
+    from sparkrun.core.plugin_policy import PluginSource, plugin_state
 
     if config is None:
         return []
@@ -241,7 +243,10 @@ def _external_plugins(config: "SparkrunConfig | None", v: "Variables | None") ->
                     failure=plugin_load_failure((SOURCE_EXTERNAL, name, str(path.resolve()))),
                 )
             )
-    return [replace(plugin, enabled=plugin_state(plugin.plugin_id or plugin.name, config, source="external").enabled) for plugin in out]
+    return [
+        replace(plugin, enabled=plugin_state(plugin.plugin_id or plugin.name, config, source=PluginSource.EXTERNAL).enabled)
+        for plugin in out
+    ]
 
 
 def list_plugins(config: "SparkrunConfig | None" = None, v: "Variables | None" = None) -> list[PluginInfo]:

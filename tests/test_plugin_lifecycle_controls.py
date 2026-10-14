@@ -174,6 +174,7 @@ print(json.dumps([help_result.exit_code, any(line.strip().startswith('proxy ') f
 
 def test_plugin_policy_is_shared_and_profile_requirements_survive(tmp_path, monkeypatch):
     from sparkrun.core.application_profile import ApplicationProfile
+    from sparkrun.core.plugin_policy import PluginSource
 
     profile = ApplicationProfile(
         id="fixture", display_name="Fixture", command="fixture", package="sparkrun", required_integrations=("important",)
@@ -181,7 +182,7 @@ def test_plugin_policy_is_shared_and_profile_requirements_survive(tmp_path, monk
     config = SparkrunConfig(tmp_path / "config.yaml")
     monkeypatch.setattr(config, "_profile", profile)
     config.set("plugins.enabled", {"important": False})
-    for source in ("in-tree", "directory", "external", "installed"):
+    for source in PluginSource:
         state = plugin_state("important", config, source=source)
         assert not state.enabled
         assert state.required
@@ -359,6 +360,25 @@ def test_directory_policy_uses_declared_canonical_identity(tmp_path, monkeypatch
     assert plugin.plugin_id == "canonical-fixture"
     assert plugin.enabled is False
     assert directory_plugin_identities([directory], config) == {}
+
+
+def test_directory_plugins_honor_the_external_loading_gate(tmp_path, monkeypatch):
+    """Directory plugins are external: the policy re-check must see
+    ``core.external_plugins``. They were evaluated under a "directory" source
+    the policy never gated. Explicitly named paths still bypass the flag."""
+    from sparkrun.core.external_plugins import directory_plugin_identities
+    from sparkrun.core.plugin_policy import plugin_state
+
+    config = SparkrunConfig(tmp_path / "config.yaml")
+    directory = tmp_path / "external"
+    directory.mkdir()
+    (directory / "gated_fixture.py").write_text("SPARKRUN_PLUGIN_API_VERSION = 1\n")
+    config.set("features", {"core.external_plugins": False})
+    monkeypatch.delenv("SPARKRUN_NO_EXTERNAL_PLUGINS")
+    assert directory_plugin_identities([directory], config) == {}
+    assert set(directory_plugin_identities([directory], config, explicit=True)) == {(directory.resolve(), "gated_fixture")}
+    with pytest.raises(ValueError):
+        plugin_state("gated-fixture", config, source="directory")
 
 
 def test_legacy_loading_alias_honors_explicit_channel(tmp_path):

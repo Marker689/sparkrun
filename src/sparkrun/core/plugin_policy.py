@@ -8,8 +8,36 @@ migration inputs; an explicit ``plugins.enabled`` override takes precedence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 from sparkrun.core.plugin_identity import normalize_plugin_id
+
+
+class PluginSource(StrEnum):
+    """Where a plugin comes from, as far as loading policy is concerned.
+
+    ``EXTERNAL`` covers configured directories and managed plugins: both need
+    ``core.external_plugins``. ``INSTALLED`` entry points are off unless
+    selected. An unknown spelling is an error rather than a silent bypass of
+    those gates.
+    """
+
+    IN_TREE = "in-tree"
+    EXTERNAL = "external"
+    INSTALLED = "installed"
+
+
+def policy_source(kind: str) -> PluginSource:
+    """Policy source for a registration identity's source kind.
+
+    Programmatic registrations (``module``, ``application``) have no source
+    gate of their own, which is the in-tree rule.
+    """
+    try:
+        return PluginSource(kind)
+    except ValueError:
+        return PluginSource.IN_TREE
+
 
 LEGACY_PLUGIN_FLAGS = {
     "k8s": "integration.k8s",
@@ -41,12 +69,28 @@ def plugin_overrides(config) -> dict[str, bool]:
     return result
 
 
-def plugin_state(name, config=None, *, source="in-tree", legacy_feature=None, env=None, channel=None) -> PluginState:
+def plugin_state(
+    name,
+    config=None,
+    *,
+    source: PluginSource | str = PluginSource.IN_TREE,
+    legacy_feature=None,
+    env=None,
+    channel=None,
+    external_gate: bool = True,
+) -> PluginState:
+    """Resolve whether plugin *name* loads.
+
+    ``external_gate=False`` is only for explicitly named directories (a
+    programmatic ``load_external_plugins(paths=...)``), which bypass the
+    ``core.external_plugins`` flag by contract.
+    """
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.core.features import _raw_feature_enabled, feature_source
     from sparkrun.core.external_plugins import _external_plugins_disabled
     import os
 
+    source = PluginSource(source)
     config = config if config is not None else SparkrunConfig()
     env = os.environ if env is None else env
     name = normalize_plugin_id(name)
@@ -72,11 +116,15 @@ def plugin_state(name, config=None, *, source="in-tree", legacy_feature=None, en
         enabled = _raw_feature_enabled(legacy, config=config, env=env, channel=channel)
         origin = "legacy feature: " + feature_source(legacy, config=config, env=env, channel=channel)
     else:
-        enabled, origin = source != "installed", "default"
+        enabled, origin = source is not PluginSource.INSTALLED, "default"
     reason = None if enabled else "plugin disabled"
-    if source == "external" and (_external_plugins_disabled() or not _raw_feature_enabled("core.external_plugins", config=config, env=env)):
+    if (
+        source is PluginSource.EXTERNAL
+        and external_gate
+        and (_external_plugins_disabled() or not _raw_feature_enabled("core.external_plugins", config=config, env=env))
+    ):
         enabled, reason = False, "external plugin loading disabled"
-    if source == "installed" and env.get("SPARKRUN_NO_INSTALLED_PLUGINS", "").lower() in {"1", "true", "yes"}:
+    if source is PluginSource.INSTALLED and env.get("SPARKRUN_NO_INSTALLED_PLUGINS", "").lower() in {"1", "true", "yes"}:
         enabled, reason = False, "installed plugin loading disabled"
     return PluginState(enabled, origin, reason, required)
 

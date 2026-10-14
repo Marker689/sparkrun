@@ -109,11 +109,11 @@ def load_managed_package(metadata: PluginMetadata, package: Path, v, *, source_p
 
 
 def managed_enabled(record: dict, config) -> bool:
-    from sparkrun.core.plugin_policy import plugin_state
+    from sparkrun.core.plugin_policy import PluginSource, plugin_state
 
     metadata = record["metadata"]
     legacy = metadata.get("feature") if not metadata.get("declarations") else None
-    return plugin_state(metadata["name"], config, source="external", legacy_feature=legacy).enabled
+    return plugin_state(metadata["name"], config, source=PluginSource.EXTERNAL, legacy_feature=legacy).enabled
 
 
 def load_managed_plugins(v, *, config=None):
