@@ -103,3 +103,33 @@ Docker launches now stage a seccomp profile that permits io_uring; see
 sets `OMP_NUM_THREADS` by default; recipes can set it explicitly. Hugging Face
 Hub 2.2.0 uses Xet where supported; the HTTP selection policy and recovery limits
 are documented in [model caches](MODEL_CACHE.md).
+
+## Retired and deprecated commands
+
+| Command | Use instead | Status |
+| --- | --- | --- |
+| `recipe update [--registry NAME]` | `registry update [NAME]` (registries); `update` (Sparkrun itself) | Removed in 0.4.0 (hidden and deprecated since 0.1.0). |
+| `cluster import --from-spark-vllm-docker-env PATH` | `cluster import svd PATH` (put `--name`, `--default`, `--dry-run` after `svd`) | Deprecated; warns. Kept throughout 0.4.x; removed no earlier than 0.5.0. |
+| `run-recipe.sh` | Native `sparkrun` commands | Deprecated shim (calls `cluster import svd` internally). Kept through 0.5.x; removed no earlier than 0.6.0. |
+
+These are earliest removal versions, not deadlines; each removal is announced in
+the release notes of the release that makes it. `benchmark RECIPE` and the `perf`
+alias are intentional conveniences and are not deprecated.
+
+Mappings for `run-recipe.sh`:
+
+- `run-recipe.sh --list` → `sparkrun recipe list`.
+- `run-recipe.sh RECIPE -n h1,h2 -t IMAGE --tp 2 -d` →
+  `sparkrun run RECIPE --hosts h1,h2 --image IMAGE --tp 2`. `run` detaches by
+  default; use `--foreground` for the shim's foreground behavior.
+- `run-recipe.sh RECIPE --config FILE.env` → `sparkrun cluster import svd FILE.env`,
+  then `sparkrun run RECIPE --cluster NAME` with the returned name. Import is
+  idempotent through the stored source path; keep secrets in the `.env` file.
+- Engine arguments after `--` → `-o key=value` options; Docker volume/publish
+  arguments → `--executor-args`. See `sparkrun run --help` for quoting.
+- The shim's `--discover`, `--show-env`, `--build-only` and `--download-only` have
+  no equivalent today.
+
+Saved workloads, benchmark results and older recipe formats from 0.3.x remain
+readable in 0.4; no conversion is required.
+

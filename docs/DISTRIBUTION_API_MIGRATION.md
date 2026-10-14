@@ -785,10 +785,10 @@ imported from its committed source.
 
 ### CLI and saved-data boundaries
 
-See the [CLI retirement and stored-data migration plan](LEGACY_MIGRATION_PLAN.md)
-for the 0.4.x/0.5.x support windows and required conversion/recovery work. Legacy
+CLI retirement windows are in the
+[upgrade guide](UPGRADING_0_4.md#retired-and-deprecated-commands). Legacy
 ownership, benchmark results, Arena submission IDs, and recipe parsing remain
-readable until their migration paths are implemented and verified.
+readable until a verified conversion or recovery path exists for each.
 
 ### Internal benchmark result name
 

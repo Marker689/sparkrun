@@ -3192,6 +3192,28 @@ passing. `tests/test_features.py` unit-tests the gate directly
 clean subprocess (SAF exposes `is_multi_extension` once at registration and the
 registry is process-global, so a plugin can't be re-hidden mid-process).
 
+### Retiring legacy readers
+
+Old saved data is read until a verified migration exists. Do not delete a legacy
+reader because a CLI deprecation window elapsed. Each removal needs versioned
+fixtures from supported releases, an implemented converter or recovery path
+shipped for at least one release, and a release note naming the supported source
+versions. Readers that must stay until then:
+
+| Data | What removal requires |
+| --- | --- |
+| Unlabelled sparkrun containers, k8s ownership, historical local PID/log paths, old exported services | Explicit adoption into canonical ownership/metadata (or an operator recovery command that can inspect and stop them), resolved against the application/config identity. Never auto-adopt foreign or ambiguous resources; test interrupted adoption and stale metadata. |
+| Benchmark IDs, older host fields, saved specification, restored timestamps | A versioned state converter (preview + backup) preserving IDs, completed measurements, pending tasks, original timestamps and provenance; migrate-twice and resume-only-pending tests; never overwrite a newer unsupported schema. |
+| `BenchmarkStateSnapshot.extras` | Move each integration's data into its own `context.data` namespace. Arena reads the historical `submission_id` on resume, so a retried migration must never mint a second submission ID or duplicate an upload. |
+| v1 recipe fields/topology, `eugr-vllm`, persisted `cluster_config` | Audit registries and saved snapshots; a converter to canonical fields that reports ambiguous translations; compare resolved commands, images, placement, env, workload identity and stop/log lookup before and after. |
+
+A converter inventories without writes (no credentials in reports, no probing of
+unrelated application roots), previews deterministically, backs up, applies under
+the per-state lock with atomic replacement (journaled across files), verifies IDs
+and references, and keeps the original until the operator confirms. Never silently
+regenerate an identity. User-facing CLI retirement windows live in
+`docs/UPGRADING_0_4.md`.
+
 ### Testing Patterns
 
 Tests use pytest with `pytest-timeout`: each test has a 120-second wall-clock limit and a stack dump after 60 seconds.

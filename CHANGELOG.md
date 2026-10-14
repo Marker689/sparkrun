@@ -239,8 +239,8 @@ system, gateway registry, and execution-strategy extension points shipped in
 - Unified runtime image selection across preparation and materialization, using
   per-host platform defaults while preserving explicit recipe images and
   homogeneous-runtime/builder constraints. SparkRoute uses required 0.4 host
-  initialization directly. Published a separate [CLI and saved-data migration
-  plan](docs/LEGACY_MIGRATION_PLAN.md) before retiring recovery support.
+  initialization directly. CLI retirement windows are in the
+  [upgrade guide](docs/UPGRADING_0_4.md#retired-and-deprecated-commands).
 - Added immutable application profiles and profile-aware, console-free
   initialization for CLI, daemon, desktop, and other Python frontends. Plugins
   can read application and controller identities; one controller represents an
