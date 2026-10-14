@@ -270,6 +270,15 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- `include:` of a foreign-format recipe (e.g. `include: "@lil/<Entry>"`, or a sibling
+  manifest a format claims) now loads the base through its format, as `sparkrun run`
+  would. It was merged as raw sparkrun YAML, skipping translation, the format's
+  manifest validation and the foreign-format trust gate. An untrusted or unavailable
+  format makes the include fail.
+- trtllm single-node launches now write `extra-llm-api-config.yml` from the CLI
+  overrides too. A `-o` key such as `free_gpu_memory_fraction` added
+  `--extra_llm_api_options` but never wrote the file when the recipe declared none of
+  those keys, and was silently dropped when it did.
 - `sparkrun stop <target> --dry-run` no longer tears the workload down. `api.stop`
   gains `dry_run` and takes `workload_id` (matching `api.logs`); the
   `cluster_id=` keyword is removed.
