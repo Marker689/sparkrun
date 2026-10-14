@@ -165,8 +165,8 @@ def load_installed_plugins(v, *, config=None) -> None:
         rows, providers = _discover_installed_plugins(config)
     except ValueError as exc:
         # A malformed selection (``integrations:``) loads nothing rather than
-        # guessing, and blocks dependent launches instead of every command.
-        _attempted.add(id(v))
+        # guessing, and blocks dependent launches instead of every command. It
+        # does not consume the one-time attempt: a corrected config can retry.
         _inventory.clear()
         _selection_errors[:] = ["installed integration selection is invalid: %s" % exc]
         logger.warning("Not loading installed integrations: %s", exc)
@@ -228,16 +228,18 @@ def installed_plugin_identities(rows):
 
 def require_integrations() -> None:
     """Fail dependent launches while keeping help/version/inventory usable."""
-    failures = [
-        "%s (%s): %s" % (p.name, p.package or "missing", p.failure or "not loaded")
-        for p in installed_plugin_inventory()
-        if p.required and not p.loaded
-    ]
+    # An unreadable selection means the requirements cannot even be enumerated.
+    failures = list(_selection_errors)
+    if not failures:
+        failures = [
+            "%s (%s): %s" % (p.name, p.package or "missing", p.failure or "not loaded")
+            for p in installed_plugin_inventory()
+            if p.required and not p.loaded
+        ]
     # Ambiguous names cannot be arbitrated even when the integration is optional.
     failures.extend(
         p.failure for p in _inventory if p.selected and p.failure and ("Conflicting" in p.failure or "provided by both" in p.failure)
     )
-    failures.extend(_selection_errors)
     failures.extend(recorded_plugin_conflicts())
     if failures:
         raise RequiredIntegrationError("Integration requirements are not satisfied: " + "; ".join(failures))

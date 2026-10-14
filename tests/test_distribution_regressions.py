@@ -292,10 +292,15 @@ def test_failed_initialization_cannot_return_partial_context(tmp_path, monkeypat
     from scitrera_app_framework import Variables
 
     path = tmp_path / "config.yaml"
-    path.write_text("integrations: []\n")
-    with pytest.raises(ValueError, match="integrations"):
-        initialize(config_path=path)
     path.write_text("integrations: {}\n")
+
+    def broken_registration(v, *, config=None):
+        raise ValueError("registration broke")
+
+    monkeypatch.setattr("sparkrun.core.bootstrap._register_plugins", broken_registration)
+    with pytest.raises(ValueError, match="registration broke"):
+        initialize(config_path=path)
+    monkeypatch.undo()
     with pytest.raises(RuntimeError, match="previously failed; restart"):
         initialize(config_path=path)
     with pytest.raises(RuntimeError, match="previously failed; restart"):
@@ -303,18 +308,33 @@ def test_failed_initialization_cannot_return_partial_context(tmp_path, monkeypat
 
     # Failed discovery also must not consume the loader's one-time attempt.
     from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.installed_plugins import RequiredIntegrationError, require_integrations
 
     variables = Variables()
     config = SparkrunConfig()
     config.set("integrations", [])
     entries = Mock(return_value=[])
     monkeypatch.setattr("sparkrun.core.installed_plugins.entry_points", entries)
-    with pytest.raises(ValueError, match="integrations"):
-        load_installed_plugins(variables, config=config)
+    load_installed_plugins(variables, config=config)  # recorded, not raised
     entries.assert_not_called()
+    with pytest.raises(RequiredIntegrationError, match="integrations"):
+        require_integrations()
     config.set("integrations", {})
+    entries.reset_mock()
     load_installed_plugins(variables, config=config)
     entries.assert_called_once()
+
+
+def test_a_malformed_integration_selection_does_not_fail_initialization(tmp_path):
+    """One bad plugin source must not make every command unusable."""
+    from sparkrun.application import initialize
+    from sparkrun.core.installed_plugins import RequiredIntegrationError, require_integrations
+
+    path = tmp_path / "config.yaml"
+    path.write_text("integrations: []\n")
+    initialize(config_path=path)
+    with pytest.raises(RequiredIntegrationError, match="integrations"):
+        require_integrations()
 
 
 @pytest.mark.parametrize("owner", ["jetsonrun", "sparkrun", "legacy", "unrelated"])
