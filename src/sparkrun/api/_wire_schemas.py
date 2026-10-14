@@ -1774,11 +1774,22 @@ RESULT_SCHEMAS = {
                     "additionalProperties": True,
                 },
             },
+            "offline": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {"offline": {"type": "boolean"}, "source": {"type": "string"}},
+                        "required": ["offline", "source"],
+                        "additionalProperties": True,
+                    },
+                    {"type": "null"},
+                ]
+            },
             "recipe": {"type": "string"},
             "runtime": {"type": "string"},
             "cluster": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         },
-        "required": ["host_list", "needs_image", "issues", "recipe", "runtime", "cluster"],
+        "required": ["host_list", "needs_image", "issues", "offline", "recipe", "runtime", "cluster"],
         "additionalProperties": True,
     },
     "benchmarks.run": {

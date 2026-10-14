@@ -133,3 +133,30 @@ def test_build_cli_preserves_default_cluster(build_recipe, monkeypatch):
     assert result.exit_code == 0, result.output
     assert seen[0].cluster == "native"
     assert seen[0].hosts == ("localhost",)
+
+
+def test_build_cli_offline_keeps_recipe_load_local_and_lifts_executor_overrides(build_recipe, monkeypatch):
+    from sparkrun.core import resolve
+    from sparkrun.core.application_profile import env_name
+
+    monkeypatch.setattr("sparkrun.models.hub.disable_hub_metadata", lambda: None)
+    monkeypatch.setenv(env_name("NO_TELEMETRY"), "0")  # restored after _enter_offline_mode sets it
+    loads, seen = [], []
+    real = resolve.load_recipe
+
+    def load(*args, **kwargs):
+        loads.append(kwargs.get("offline"))
+        return real(*args, **kwargs)
+
+    def plan(request, **kwargs):
+        seen.append(request)
+        return SimpleNamespace(host_list=request.hosts, recipe=request.recipe, issues=())
+
+    monkeypatch.setattr(resolve, "load_recipe", load)
+    monkeypatch.setattr(api, "plan_build", plan)
+    monkeypatch.setattr(api, "build", lambda request, **k: api.BuildResult("build-test", request.hosts, "docker", True))
+    result = CliRunner().invoke(main, ["build", build_recipe, "--hosts", "localhost", "--offline", "--dry-run", "-o", "entrypoint="])
+    assert result.exit_code == 0, result.output
+    assert loads == [True]
+    assert seen[0].offline is True
+    assert seen[0].executor_config == {"entrypoint": ""} and "entrypoint" not in seen[0].overrides

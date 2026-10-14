@@ -20,8 +20,11 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
     from sparkrun.core.config import SparkrunConfig
-    from sparkrun.core.recipe import Recipe
+    from sparkrun.core.recipe import Recipe, RecipeAmbiguousError
 
 logger = logging.getLogger(__name__)
 
@@ -189,31 +192,66 @@ def apply_env_overrides(recipe, env_pairs) -> dict[str, str]:
     return applied
 
 
+def recipe_name_looks_like_path(name: str) -> bool:
+    """Return True when *name* looks like a filesystem path.
+
+    Used to short-circuit registry refresh retries for obvious path inputs,
+    since updating remote registries cannot help resolve a missing local file.
+    """
+    if not name:
+        return False
+    if name.startswith("@"):  # @registry/recipe is a registry reference, not a path
+        return False
+    if name.startswith((".", "/", "~")):
+        return True
+    if name.endswith((".yaml", ".yml")):
+        return True
+    return False
+
+
 def load_recipe(
     config: "SparkrunConfig",
     recipe_name: str,
     *,
     resolve: bool = True,
+    offline: bool = False,
+    allow_untrusted_host: bool = False,
+    choose_ambiguous: "Callable[[RecipeAmbiguousError], tuple[Path, str | None]] | None" = None,
+    retry_after_update: bool = False,
+    on_refresh: "Callable[[str], None] | None" = None,
 ):
-    """Find and load a recipe without any interactive prompts or exits.
+    """Find and load a recipe without any console I/O or exits.
 
-    Mirrors the non-interactive happy path of
-    ``cli/_common.py:_load_recipe``: expands shortcuts, fetches URL-sourced
-    recipes (refusing off-allowlist hosts rather than prompting), looks up
-    the recipe across configured registries, and tags it with its source
-    registry.
+    The one implementation behind both the API and the CLI's interactive
+    ``cli/_common.py:_load_recipe`` wrapper, which supplies the prompts through
+    the hooks below.  Expands shortcuts, fetches URL-sourced recipes, looks up
+    the recipe across configured registries and CWD recipes, and tags it with
+    its source registry.
+
+    Args:
+        offline: Load from what is already here: a URL recipe comes from the
+            local cache only, registries are never refreshed on a miss, and a
+            foreign recipe format reads local facts only.
+        allow_untrusted_host: Fetch a URL recipe from a host off the allowlist
+            (the CLI asks first).
+        choose_ambiguous: Called with a :class:`RecipeAmbiguousError` to pick
+            one match, returning ``(path, registry_name)``; ``None`` raises.
+        retry_after_update: When the lookup misses, refresh the registries
+            once and retry (never offline, never for a path-like name).
+        on_refresh: Called with the name before that refresh (for a notice).
 
     Returns ``(recipe, recipe_path, registry_mgr)``.
 
     Raises:
-        RecipeUntrustedHostError: URL host is off the allowlist (the CLI
-            wrapper offers an interactive override; the API surfaces it).
-        RecipeAmbiguousError: Name matches multiple registries (the CLI
-            wrapper prompts; the API surfaces it).
+        RecipeUntrustedHostError: URL host is off the allowlist.
+        RecipeAmbiguousError: Name matches multiple registries and no
+            *choose_ambiguous* was given.
         RecipeError: Recipe not found or failed to load.
     """
     from sparkrun.core.recipe import (
         Recipe,
+        RecipeAmbiguousError,
+        RecipeError,
         discover_cwd_recipes,
         expand_recipe_shortcut,
         fetch_and_cache_recipe,
@@ -228,10 +266,10 @@ def load_recipe(
 
     if is_recipe_url(recipe_name):
         logger.debug("Loading recipe from URL: %s", recipe_name)
-        cached_path = fetch_and_cache_recipe(recipe_name)
+        cached_path = fetch_and_cache_recipe(recipe_name, allow_untrusted_host=allow_untrusted_host, offline=offline)
         registry_mgr = config.get_registry_manager()
         registry_mgr.ensure_initialized()
-        recipe = Recipe.load(cached_path, resolve=resolve, registry_manager=registry_mgr, allow_local_includes=False)
+        recipe = Recipe.load(cached_path, resolve=resolve, registry_manager=registry_mgr, allow_local_includes=False, offline=offline)
         recipe.source_path = recipe_name
         # URL-sourced recipes are never auto-trusted (see
         # core.launcher.resolve_recipe_trust): their hooks require --trust
@@ -242,11 +280,31 @@ def load_recipe(
     registry_mgr = config.get_registry_manager()
     registry_mgr.ensure_initialized()
 
-    recipe_path = find_recipe(recipe_name, registry_manager=registry_mgr, local_files=discover_cwd_recipes())
-    recipe = Recipe.load(recipe_path, resolve=resolve, registry_manager=registry_mgr)
+    selected_registry, _ = parse_scoped_name(recipe_name)
+    retried = False
+    while True:
+        try:
+            recipe_path = find_recipe(recipe_name, registry_manager=registry_mgr, local_files=discover_cwd_recipes())
+            break
+        except RecipeAmbiguousError as err:
+            if choose_ambiguous is None:
+                raise
+            recipe_path, selected_registry = choose_ambiguous(err)
+            break
+        except RecipeError:
+            if retried or not retry_after_update or offline or recipe_name_looks_like_path(recipe_name):
+                raise
+            retried = True
+            if on_refresh is not None:
+                on_refresh(recipe_name)
+            # A scoped name (@registry/...) refreshes only that registry.
+            try:
+                registry_mgr.update(selected_registry) if selected_registry else registry_mgr.update()
+            except Exception as update_err:
+                logger.debug("Registry update failed during retry: %s", update_err)
 
-    scope, _ = parse_scoped_name(recipe_name)
-    registry = recipe_registry_entry(recipe_path, registry_mgr, registry_name=scope)
+    recipe = Recipe.load(recipe_path, resolve=resolve, registry_manager=registry_mgr, offline=offline)
+    registry = recipe_registry_entry(recipe_path, registry_mgr, registry_name=selected_registry)
     tag_recipe_source(recipe, registry, config=config)
     return recipe, recipe_path, registry_mgr
 

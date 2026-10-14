@@ -96,6 +96,7 @@ def resolve_recipe(
     config: "SparkrunConfig | None" = None,
     overrides: dict | None = None,
     local_files: list[Path] | None = None,
+    offline: bool = False,
 ) -> "Recipe":
     """Return a resolved :class:`Recipe` from a name or pre-loaded object.
 
@@ -116,6 +117,8 @@ def resolve_recipe(
             discovered recipes) consulted alongside the configured
             registries — mirrors :func:`find_recipe`'s parameter so the
             CLI's cwd-recipe shortcut works through the API.
+        offline: Load from local content only: a foreign recipe format reads
+            local facts only (registries are never refreshed here either way).
 
     Raises:
         RecipeNotFound: When a string name doesn't resolve to any
@@ -143,7 +146,7 @@ def resolve_recipe(
             raise RecipeNotFound("Recipe %r not found in any configured registry" % recipe_input)
         try:
             with _recipe_errors():
-                recipe = Recipe.load(recipe_path, resolve=False, registry_manager=registry_mgr)
+                recipe = Recipe.load(recipe_path, resolve=False, registry_manager=registry_mgr, offline=offline)
         except RegistryError as exc:
             # Ownership is decided while loading (it selects the recipe format);
             # an ambiguous or orphaned cache path is the same failure the

@@ -12,7 +12,7 @@ use the separate, opt-in capture_diagnostics API.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
@@ -33,17 +33,20 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class RunOptions:
-    """Inputs to :func:`sparkrun.api.run`.
+class TargetOptions:
+    """Fields shared by :class:`RunOptions` and :class:`~sparkrun.api.BuildOptions`.
 
-    Frontends translate their inputs into this operation contract. Hosts may
-    be explicit, supplied by a cluster, or resolved from application defaults.
-    Recipe/runtime settings, including the serve port, belong in ``overrides``.
-    Terminal rendering belongs to the frontend; capture_diagnostics can wrap this operation.
+    Internal base, deliberately not exported from :mod:`sparkrun.api`: the
+    contract is the two concrete option types, whose field names and defaults
+    this base keeps identical (and from drifting apart again — ``build`` once
+    lacked ``offline`` and the executor-key split ``run`` had).  Only
+    ``recipe`` is positional; every other field is keyword-only.
     """
 
     recipe: "str | Recipe"
     """Recipe name (resolved via registries) or pre-loaded ``Recipe`` object."""
+
+    _: KW_ONLY
 
     hosts: tuple[str, ...] | None = None
     """Explicit host list.  When set, overrides any cluster's hosts."""
@@ -58,6 +61,83 @@ class RunOptions:
     ``entrypoint``, ``shm_size``) are moved into :attr:`executor_config` on
     construction."""
 
+    dry_run: bool = False
+    """Compute everything but don't execute scripts on remote hosts."""
+    trust: bool = False
+    """Explicitly authorize recipe hooks. False keeps automatic trust for local
+    recipes and trusted registries; otherwise hooks require authorization.
+    The library does not prompt. True supplies that authorization."""
+
+    # Distribution / networking.
+    transfer_mode: str | None = None
+    """Override the cluster's transfer mode (``auto`` / ``local`` /
+    ``push`` / ``delegated`` / ``pull``)."""
+    cache_dir: str | None = None
+    """Override the remote HuggingFace cache dir on target hosts."""
+    offline: bool | None = None
+    """Work from existing images, models and registry content only, with no
+    internet egress (:mod:`sparkrun.core.offline`). ``None`` defers to the
+    cluster's ``offline:``; ``True`` / ``False`` force it. Not workload
+    identity: it changes where bytes come from, not what runs."""
+
+    # Executor knobs (forwarded to ``resolve_executor`` as cli_overrides).
+    executor: str | None = None
+    """Override the resolved executor selector (``docker`` / ``local`` / ``k8s``)."""
+    executor_config: dict[str, Any] | None = None
+    """Executor option overrides (``shm_size``, ``memory_limit``, ``privileged``, …)."""
+
+    transfer_interface: str | None = None
+    """Network interface used for resource transfers (e.g. ``cx7`` / ``mgmt``)."""
+    local_cache_dir: str | None = None
+    """Control-machine cache dir for downloads (defaults to the same as ``cache_dir``)."""
+    sync_tuning: bool = True
+    """Sync tuning configs from registries to local cache before launch."""
+    topology: str | None = None
+    """Cluster topology hint (carried through to the runtime)."""
+    preserve_model_perms: bool | None = None
+    """Model-rsync permission preservation override.  ``None`` → derive from
+    the resolved cluster's ``distribution.model.preserve_perms``; an explicit
+    bool wins, including when the caller restricts a named cluster's hosts."""
+    skip_model_fan_out: bool | None = None
+    """Skip the per-host model rsync fan-out (shared cache).  ``None`` → derive
+    from the cluster's ``distribution.model.skip_fan_out``; explicit bool wins."""
+
+    def __post_init__(self) -> None:
+        # Executor settings given as overrides (``-o entrypoint=''``) configure
+        # the container, not the serve command.  Lifted here so every caller —
+        # run, build, benchmark, proxy load, realize, library code — sees them
+        # in ``executor_config`` and none renders them as (unmapped) serve
+        # flags.  An override wins over an executor_config value of the same
+        # key, the precedence ``-o`` has always had over the CLI's executor flags.
+        from sparkrun.core.resolve import split_executor_overrides
+
+        serve, executor = split_executor_overrides(self.overrides)
+        if executor:
+            object.__setattr__(self, "overrides", serve)
+            object.__setattr__(self, "executor_config", {**(self.executor_config or {}), **executor})
+
+    def executor_overrides(self) -> dict[str, Any]:
+        """Return caller settings for the shared executor resolution chain.
+
+        An executor selector in executor_config retains its existing precedence
+        over the shorthand executor field. The returned mapping is independent.
+        """
+        values = {"executor": self.executor} if self.executor else {}
+        values.update(self.executor_config or {})
+        return values
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunOptions(TargetOptions):
+    """Inputs to :func:`sparkrun.api.run`.
+
+    Frontends translate their inputs into this operation contract. Hosts may
+    be explicit, supplied by a cluster, or resolved from application defaults.
+    Recipe/runtime settings, including the serve port, belong in ``overrides``.
+    Terminal rendering belongs to the frontend; capture_diagnostics can wrap this operation.
+    Only ``recipe`` may be passed positionally.
+    """
+
     strategy_options: dict[str, Any] = field(default_factory=dict)
     """Run-scoped inputs for the recipe-selected execution strategy.
 
@@ -71,8 +151,6 @@ class RunOptions:
     # Mode / lifecycle knobs.
     solo: bool = False
     """Force single-host mode regardless of host count."""
-    dry_run: bool = False
-    """Compute everything but don't execute scripts on remote hosts."""
     follow: bool = False
     """Legacy foreground-runtime log attachment (only when detached=False).
 
@@ -82,10 +160,6 @@ class RunOptions:
     """
     detached: bool = True
     """Launch container detached (CLI default; inverse of --foreground)."""
-    trust: bool = False
-    """Explicitly authorize recipe hooks. False keeps automatic trust for local
-    recipes and trusted registries; otherwise hooks require authorization.
-    The library does not prompt. True supplies that authorization."""
     ensure: bool = False
     """If True, skip the launch when this workload is already serving.
 
@@ -108,17 +182,6 @@ class RunOptions:
     """Registered scheduler name (e.g. ``"greedy"``).  ``None`` selects
     the default (greedy)."""
 
-    # Distribution / networking.
-    transfer_mode: str | None = None
-    """Override the cluster's transfer mode (``auto`` / ``local`` /
-    ``push`` / ``delegated``)."""
-    cache_dir: str | None = None
-    """Override the remote HuggingFace cache dir on target hosts."""
-    offline: bool | None = None
-    """Launch from existing images, models and registry content only, with no
-    internet egress (:mod:`sparkrun.core.offline`). ``None`` defers to the
-    cluster's ``offline:``; ``True`` / ``False`` force it. Not workload
-    identity: it changes where bytes come from, not what runs."""
     runtime_cache: bool | None = None
     """Toggle the persistent compilation/autotune cache for this launch.
 
@@ -148,11 +211,6 @@ class RunOptions:
     init_port: int = 25000
     """vLLM/SGLang distributed init port."""
 
-    # Executor knobs (forwarded to ``resolve_executor`` as cli_overrides).
-    executor: str | None = None
-    """Override the resolved executor selector (``docker`` / ``local`` / ``k8s``)."""
-    executor_config: dict[str, Any] | None = None
-    """Executor option overrides (``shm_size``, ``memory_limit``, ``privileged``, …)."""
     rootful: bool = False
     """Run docker containers privileged + as root (disables rootless adjustments)."""
 
@@ -160,49 +218,10 @@ class RunOptions:
     # ``launch_inference`` for parity with the existing CLI command).
     workload_id_override: str | None = None
     """Override the deterministic cluster ID (static container name)."""
-    transfer_interface: str | None = None
-    """Network interface used for resource transfers (e.g. ``cx7`` / ``mgmt``)."""
-    local_cache_dir: str | None = None
-    """Control-machine cache dir for downloads (defaults to the same as ``cache_dir``)."""
-    sync_tuning: bool = True
-    """Sync tuning configs from registries to local cache before launch."""
     extra_docker_opts: tuple[str, ...] | None = None
     """Extra arguments threaded through to the container executor (``docker run``)."""
-    topology: str | None = None
-    """Cluster topology hint (carried through to the runtime)."""
-    preserve_model_perms: bool | None = None
-    """Model-rsync permission preservation override.  ``None`` → derive from
-    the resolved cluster's ``distribution.model.preserve_perms``; an explicit
-    bool wins, including when the caller restricts a named cluster's hosts."""
-    skip_model_fan_out: bool | None = None
-    """Skip the per-host model rsync fan-out (shared cache).  ``None`` → derive
-    from the cluster's ``distribution.model.skip_fan_out``; explicit bool wins."""
     recipe_ref: str | None = None
     """Simplified recipe reference for display (e.g. ``@spark-arena/UUID``)."""
-
-    def __post_init__(self) -> None:
-        # Executor settings given as overrides (``-o entrypoint=''``) configure
-        # the container, not the serve command.  Lifted here so every caller —
-        # run, benchmark, proxy load, realize, library code — sees them in
-        # ``executor_config`` and none renders them as (unmapped) serve flags.
-        # An override wins over an executor_config value of the same key, the
-        # precedence ``-o`` has always had over the CLI's executor flags.
-        from sparkrun.core.resolve import split_executor_overrides
-
-        serve, executor = split_executor_overrides(self.overrides)
-        if executor:
-            object.__setattr__(self, "overrides", serve)
-            object.__setattr__(self, "executor_config", {**(self.executor_config or {}), **executor})
-
-    def executor_overrides(self) -> dict[str, Any]:
-        """Return caller settings for the shared executor resolution chain.
-
-        An executor selector in executor_config retains its existing precedence
-        over the shorthand executor field. The returned mapping is independent.
-        """
-        values = {"executor": self.executor} if self.executor else {}
-        values.update(self.executor_config or {})
-        return values
 
 
 @dataclass(frozen=True)

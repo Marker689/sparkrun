@@ -25,6 +25,7 @@ def plan_build(options: BuildOptions, *, sctx=None) -> BuildPlan:
     from sparkrun.api._resolve import resolve_cluster, resolve_recipe, resolve_runtime, scope_operation
     from sparkrun.core.installed_plugins import RequiredIntegrationError, require_integrations
     from sparkrun.core.launcher import _enforce_recipe_mount_trust, resolve_recipe_trust
+    from sparkrun.core.offline import resolve_offline
     from sparkrun.core.validation import validate_for_launch
     from sparkrun.orchestration.executor import resolve_executor
 
@@ -34,10 +35,13 @@ def plan_build(options: BuildOptions, *, sctx=None) -> BuildPlan:
     except RequiredIntegrationError as error:
         raise IntegrationUnavailable(str(error)) from error
 
-    recipe = resolve_recipe(deepcopy(options.recipe), sctx=sctx, overrides=deepcopy(options.overrides))
+    # The cluster is resolved first (no SSH) so its ``offline:`` default also
+    # keeps the recipe lookup local, as ``api.plan`` does for a launch.
+    cluster = deepcopy(resolve_cluster(options.cluster, options.hosts, sctx=sctx))
+    offline = resolve_offline(options.offline, cluster)
+    recipe = resolve_recipe(deepcopy(options.recipe), sctx=sctx, overrides=deepcopy(options.overrides), offline=offline.offline)
     if options.rebuild is not None:
         recipe.builder_config["rebuild"] = options.rebuild
-    cluster = deepcopy(resolve_cluster(options.cluster, options.hosts, sctx=sctx))
     hosts = tuple(cluster.hosts)
     if not hosts:
         raise HostsUnreachable("Build requires at least one target host.")
@@ -79,7 +83,7 @@ def plan_build(options: BuildOptions, *, sctx=None) -> BuildPlan:
         raise
     except Exception as error:
         raise SparkrunError("Build planning failed: %s" % error) from error
-    return BuildPlan(recipe, runtime, cluster, hosts, target, executor.needs_image, options, tuple(issues))
+    return BuildPlan(recipe, runtime, cluster, hosts, target, executor.needs_image, options, tuple(issues), offline=offline)
 
 
 @operation_boundary(mutation=True)
@@ -116,6 +120,7 @@ def _prepare(options: BuildOptions, *, plan: BuildPlan, sctx, timeline) -> Build
     from sparkrun.core.cluster_manager import ModelDistributionPrefs
     from sparkrun.core.image_preparation import prepare_images, stage_prepared_images, validate_image_configuration
     from sparkrun.core.launcher import (
+        _offline_preflight,
         _verify_mount_sources,
         resolve_effective_cache_dir,
         resolve_recipe_trust,
@@ -133,6 +138,7 @@ def _prepare(options: BuildOptions, *, plan: BuildPlan, sctx, timeline) -> Build
     config = sctx.config
     ssh_kwargs = build_ssh_kwargs(config)
     overrides = deepcopy(options.overrides)
+    offline = bool(plan.offline and plan.offline.offline)
     trusted = resolve_recipe_trust(recipe, options.trust, sctx=sctx)
     if not trusted and any(r.key in recipe.plugin_items and r.build_preparation for r in registered_recipe_items()):
         raise TrustRejected("Recipe build hooks require explicit authorization: pass BuildOptions(trust=True) (CLI: --trust).")
@@ -170,10 +176,37 @@ def _prepare(options: BuildOptions, *, plan: BuildPlan, sctx, timeline) -> Build
         topology=topology,
         mgmt_interface=cluster.mgmt_interface,
     )
+    model_prefs = cluster.distribution.model
+    skip_model = skip_model or not model_prefs.enabled
+    prefs = ModelDistributionPrefs(
+        preserve_perms=options.preserve_model_perms if options.preserve_model_perms is not None else model_prefs.preserve_perms,
+        skip_fan_out=options.skip_model_fan_out if options.skip_model_fan_out is not None else model_prefs.skip_fan_out,
+    )
+    if offline and not options.dry_run:
+        # Same preflight as an offline launch: every gap, before the builder runs.
+        _offline_preflight(
+            recipe,
+            runtime,
+            hosts,
+            cluster=cluster,
+            launch_hardware=None,
+            config=config,
+            v=sctx.variables,
+            ssh_kwargs=ssh_kwargs,
+            transfer_result=transfer,
+            cache_dir=effective_cache,
+            local_cache_dir=local_cache,
+            skip_model=skip_model,
+            skip_images=not plan.needs_image,
+            shared_model_cache=prefs.skip_fan_out,
+        )
 
     with timed(timeline, "build.environment"):
         logger.info("Preparing %s environment on %d host(s)", recipe.builder or plan.executor_target.executor, len(hosts))
         context = prepare_build_context(BuildContext(options, plan, recipe, sctx))
+        if offline:
+            # Forced, not a default a caller's builder_context could undo.
+            context["offline"] = True
         prepared = prepare_images(
             recipe,
             runtime,
@@ -196,12 +229,6 @@ def _prepare(options: BuildOptions, *, plan: BuildPlan, sctx, timeline) -> Build
             overrides=overrides,
         )
 
-    model_prefs = cluster.distribution.model
-    skip_model = skip_model or not model_prefs.enabled
-    prefs = ModelDistributionPrefs(
-        preserve_perms=options.preserve_model_perms if options.preserve_model_perms is not None else model_prefs.preserve_perms,
-        skip_fan_out=options.skip_model_fan_out if options.skip_model_fan_out is not None else model_prefs.skip_fan_out,
-    )
     distribution: dict[str, Any] = dict(
         dry_run=options.dry_run,
         recipe_name=recipe.name,
@@ -214,6 +241,7 @@ def _prepare(options: BuildOptions, *, plan: BuildPlan, sctx, timeline) -> Build
         cluster_name=cluster.name,
         prefs=prefs,
         timeline=timeline,
+        offline=offline,
     )
     with timed(timeline, "build.distribute"):
         if plan.needs_image:

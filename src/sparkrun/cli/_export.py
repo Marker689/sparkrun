@@ -202,13 +202,13 @@ def export_recipe(
 def _export_realized_recipe(ctx, recipe_name, *, output_json, save_path, pin, offline, hosts, hosts_file, cluster_name, options, **flags):
     """``export recipe --realize``: plan like ``run``, then write the recipe that plan would launch."""
     from sparkrun import api
-    from sparkrun.cli._common import resolve_host_context
+    from sparkrun.cli._common import _enter_offline_mode_for, resolve_host_context
     from sparkrun.utils.yaml_helpers import LiteralBlockDumper
 
     sctx = _get_context(ctx)
     config = sctx.config
     hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx.variables, sctx=sctx)
-    recipe, _recipe_path, _registry_mgr = _load_recipe(config, recipe_name, resolve=False)
+    recipe, _recipe_path, _registry_mgr = _load_recipe(config, recipe_name, resolve=False, offline=_enter_offline_mode_for(offline, hctx))
     recipe, overrides = _apply_recipe_overrides(options, recipe=recipe, **flags)
 
     local_cache_dir, remote_cache_dir, _mode, _iface = hctx.cluster.resolve_transfer_config(config)

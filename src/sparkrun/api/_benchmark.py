@@ -326,6 +326,25 @@ def _resolve_running_deployment(
 # ---------------------------------------------------------------------------
 
 
+def _loads_offline(options: BenchmarkOptions, sctx) -> bool:
+    """Whether the recipe lookup must stay local, decided before the launch's own resolution.
+
+    ``options.offline`` wins; otherwise the target cluster's ``offline:``
+    applies (named or default), as it will for the launch.  Resolving the
+    cluster here reads only its file.
+    """
+    from sparkrun.api._resolve import resolve_cluster
+    from sparkrun.core.offline import resolve_offline
+
+    if options.offline is not None:
+        return bool(options.offline)
+    try:
+        cluster = resolve_cluster(options.cluster, options.hosts or None, sctx=sctx)
+    except SparkrunError:
+        return False  # an unloadable cluster is reported by the launch itself
+    return resolve_offline(None, cluster).offline
+
+
 def _validated_benchmark_options(options: BenchmarkOptions) -> BenchmarkOptions:
     """Copy data inputs before hooks without coercing arbitrary containers."""
     from sparkrun.utils.data import normalize_data
@@ -502,7 +521,7 @@ def _execute_benchmark(
 
     try:
         if isinstance(options.recipe, str):
-            recipe, _recipe_path, registry_mgr = _load_recipe(config, recipe_name, resolve=False)
+            recipe, _recipe_path, registry_mgr = _load_recipe(config, recipe_name, resolve=False, offline=_loads_offline(options, sctx))
         else:
             from sparkrun.api._resolve import resolve_recipe
 

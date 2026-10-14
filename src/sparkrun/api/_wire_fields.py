@@ -15,6 +15,7 @@ DTO_FIELDS = {
         "dry_run",
         "trust",
         "rebuild",
+        "offline",
         "executor",
         "cache_dir",
         "local_cache_dir",
@@ -26,7 +27,7 @@ DTO_FIELDS = {
         "skip_model_fan_out",
         "builder_context",
     ],
-    "sparkrun.api._build_models.BuildPlan": ["host_list", "needs_image", "issues"],
+    "sparkrun.api._build_models.BuildPlan": ["host_list", "needs_image", "issues", "offline"],
     "sparkrun.api._build_models.BuildResult": [
         "host_list",
         "executor",

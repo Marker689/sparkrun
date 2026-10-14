@@ -343,3 +343,77 @@ def test_result_excludes_models_with_no_selected_targets(io):
     )
     result = api.build(options(rec, hosts=("h1",)))
     assert result.models == ("org/head",)
+
+
+def test_build_and_run_options_share_target_fields_and_defaults():
+    from dataclasses import fields
+
+    from sparkrun.api._models import TargetOptions
+
+    shared = {f.name: (f.default, f.default_factory) for f in fields(TargetOptions)}
+    for cls in (api.BuildOptions, api.RunOptions):
+        own = {f.name: (f.default, f.default_factory) for f in fields(cls)}
+        assert {k: own[k] for k in shared} == shared
+    assert "offline" in shared and api.BuildOptions("r").offline is None
+    with pytest.raises(TypeError):
+        api.BuildOptions("r", ("h1",))  # only recipe is positional
+
+
+def test_build_options_lift_executor_overrides_like_run():
+    value = api.BuildOptions("r", overrides={"entrypoint": "", "port": 9000}, executor_config={"shm_size": "1g"})
+    assert value.overrides == {"port": 9000}
+    assert value.executor_config == {"shm_size": "1g", "entrypoint": ""}
+    assert value.executor_overrides() == {"shm_size": "1g", "entrypoint": ""}
+
+
+@pytest.mark.parametrize(
+    "flag,cluster_offline,expected", [(None, True, True), (False, True, False), (True, None, True), (None, None, False)]
+)
+def test_plan_build_resolves_offline_like_plan(io, flag, cluster_offline, expected):
+    value = options(offline=flag)
+    value.cluster.offline = cluster_offline
+    assert api.plan_build(value).offline.offline is expected
+
+
+def test_offline_build_preflights_and_keeps_builder_and_distribution_local(io, monkeypatch):
+    from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
+
+    seen, preflights = [], []
+
+    class Builder(BuilderPlugin):
+        builder_name = "eugr"
+
+        def prepare(self, image, rec, hosts, **kwargs):
+            seen.append(dict(kwargs))
+            return image
+
+    monkeypatch.setattr("sparkrun.core.bootstrap.get_builder", lambda *a, **k: Builder())
+    monkeypatch.setattr(VllmDistributedRuntime, "prepare", lambda *a, **k: None)
+    monkeypatch.setattr("sparkrun.core.launcher._offline_preflight", lambda *a, **k: preflights.append(k))
+    # A caller's builder_context cannot switch an offline build back online.
+    api.build(options(recipe(builder="eugr"), offline=True, builder_context={"offline": False}))
+    assert len(preflights) == 1 and preflights[0]["skip_images"] is False
+    assert seen[0]["builder_context"]["offline"] is True
+    assert io[0][7]["offline"] is True
+
+
+def test_online_build_has_no_offline_preflight(io, monkeypatch):
+    monkeypatch.setattr("sparkrun.core.launcher._offline_preflight", lambda *a, **k: pytest.fail("online build preflighted"))
+    api.build(options())
+    assert io[0][7]["offline"] is False
+
+
+def test_offline_build_loads_named_recipe_offline(io, monkeypatch, tmp_path):
+    import yaml
+
+    path = tmp_path / "named.yaml"
+    path.write_text(yaml.safe_dump(recipe().to_dict()))
+    loads, real = [], Recipe.load.__func__
+
+    def load(cls, *args, **kwargs):
+        loads.append(kwargs.get("offline"))
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(Recipe, "load", classmethod(load))
+    api.plan_build(options(str(path), offline=True))
+    assert loads == [True]

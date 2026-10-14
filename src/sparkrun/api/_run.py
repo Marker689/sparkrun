@@ -148,7 +148,12 @@ def plan(options: RunOptions, *, sctx: "SparkrunContext | None" = None) -> RunPl
     cluster_def = resolve_cluster(options.cluster, options.hosts, sctx=sctx, config=config)
 
     # Reject incompatible recipes before transport/provider preparation.
-    recipe = resolve_recipe(options.recipe, sctx=sctx.for_cluster(cluster_def), overrides=options.overrides)
+    recipe = resolve_recipe(
+        options.recipe,
+        sctx=sctx.for_cluster(cluster_def),
+        overrides=options.overrides,
+        offline=resolve_offline(options.offline, cluster_def).offline,
+    )
     from sparkrun.core.version import require_recipe_version
 
     try:

@@ -106,7 +106,7 @@ def fake_recipe_env(tmp_path: Path, monkeypatch):
         }
     )
 
-    def _fake_loader(config, recipe_name, resolve=False):
+    def _fake_loader(config, recipe_name, resolve=False, offline=False):
         return recipe, Path("/dev/null"), None
 
     # Patch the console-free core loader that ``_execute_benchmark`` now

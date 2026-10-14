@@ -10,6 +10,7 @@ from ._common import (
     HIDE_ADVANCED_OPTIONS,
     RECIPE_NAME,
     _apply_recipe_overrides,
+    _enter_offline_mode_for,
     _get_context,
     _load_recipe,
     _parse_options,
@@ -39,6 +40,13 @@ from ._common import (
 )
 @click.option("--transfer-interface", default=None, help="Network interface for resource transfers.")
 @click.option("--rebuild/--no-rebuild", default=None, help="Request a builder rebuild or refresh registry images.")
+@click.option(
+    "--offline/--online",
+    "offline",
+    default=None,
+    help="Prepare from images, models and recipes that already exist, with no internet access (copies inside the "
+    "cluster are allowed). --online overrides a cluster set to offline.",
+)
 @click.option("--no-sync-tuning", is_flag=True, help="Skip registry tuning refresh; existing tuning files are still staged.")
 @click.option("--trust", is_flag=True, help="Authorize recipe-owned preparation hooks and host-path overrides.")
 @click.option("--builder-option", "builder_options", multiple=True, help="Builder context: KEY=VALUE (repeatable).")
@@ -64,6 +72,7 @@ def build(
     transfer_mode,
     transfer_interface,
     rebuild,
+    offline,
     no_sync_tuning,
     trust,
     builder_options,
@@ -78,7 +87,8 @@ def build(
     """
     sctx = _get_context(ctx)
     targets = resolve_host_context(hosts, hosts_file, cluster_name, copy(sctx.config), sctx=sctx)
-    recipe, _, _ = _load_recipe(sctx.config, recipe_name, resolve=False, retry_after_update=True)
+    offline_early = _enter_offline_mode_for(offline, targets)
+    recipe, _, _ = _load_recipe(sctx.config, recipe_name, resolve=False, retry_after_update=True, offline=offline_early)
     recipe, overrides = _apply_recipe_overrides(
         options,
         recipe=recipe,
@@ -101,6 +111,7 @@ def build(
         transfer_mode=transfer_mode,
         transfer_interface=transfer_interface,
         rebuild=rebuild,
+        offline=offline,
         sync_tuning=not no_sync_tuning,
         trust=trust,
         builder_context=_parse_options(builder_options),

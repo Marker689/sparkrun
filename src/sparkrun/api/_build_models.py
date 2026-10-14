@@ -5,47 +5,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from sparkrun.api._models import TargetOptions
+
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.offline import OfflineMode
     from sparkrun.core.recipe import Recipe
     from sparkrun.core.validation import RecipeIssue
     from sparkrun.orchestration.executor import ExecutorTarget
     from sparkrun.runtimes.base import RuntimePlugin
 
 
-@dataclass(frozen=True)
-class BuildOptions:
+@dataclass(frozen=True, kw_only=True)
+class BuildOptions(TargetOptions):
     """Build environments and stage assets on every selected host.
 
     Host selection does not use GPU occupancy or inference node-count limits.
     Builders may run temporary build/probe processes, but this operation never
     starts inference, captures snapshots, or runs launch-strategy hooks.
+    Shares its target, transfer, executor and ``offline`` fields with
+    :class:`~sparkrun.api.RunOptions`; only ``recipe`` may be passed positionally.
     """
 
-    recipe: str | Recipe
-    hosts: tuple[str, ...] | None = None
-    cluster: str | ClusterDefinition | None = None
-    overrides: dict[str, Any] = field(default_factory=dict)
-    dry_run: bool = False
-    trust: bool = False
     rebuild: bool | None = None
-    executor: str | None = None
-    executor_config: dict[str, Any] | None = None
-    cache_dir: str | None = None
-    local_cache_dir: str | None = None
-    transfer_mode: str | None = None
-    transfer_interface: str | None = None
-    topology: str | None = None
-    sync_tuning: bool = True
-    preserve_model_perms: bool | None = None
-    skip_model_fan_out: bool | None = None
+    """Request a builder rebuild / registry refresh (refused offline)."""
     builder_context: dict[str, Any] = field(default_factory=dict)
     """Builder inputs; explicit values override plugin-provided defaults."""
-
-    def executor_overrides(self) -> dict[str, Any]:
-        values = {"executor": self.executor} if self.executor else {}
-        values.update(self.executor_config or {})
-        return values
 
 
 @dataclass(frozen=True)
@@ -60,6 +45,10 @@ class BuildPlan:
     needs_image: bool
     options: BuildOptions = field(repr=False)
     issues: tuple[RecipeIssue, ...] = ()
+    offline: OfflineMode | None = field(default=None, kw_only=True)
+    """Resolved offline mode (value and deciding layer): ``BuildOptions.offline``
+    > the cluster's ``offline:`` > online.  ``None`` only for a plan built
+    outside :func:`sparkrun.api.plan_build`."""
 
 
 @dataclass(frozen=True)

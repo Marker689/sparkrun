@@ -20,8 +20,7 @@ if TYPE_CHECKING:
 
 from scitrera_app_framework.util import ext_parse_bool
 from sparkrun.core.recipe import (
-    expand_recipe_shortcut as _expand_recipe_shortcut,
-    fetch_and_cache_recipe as _fetch_and_cache_recipe,
+    expand_recipe_shortcut as _expand_recipe_shortcut,  # noqa: F401 — re-exported for cli/_run.py
     is_recipe_url as _is_recipe_url,
     simplify_recipe_ref as _simplify_recipe_ref,  # noqa: F401 — re-exported for cli/_run.py, cli/_benchmark.py
 )
@@ -375,28 +374,19 @@ def _get_cluster_manager(v=None, sctx: SparkrunContext | None = None):
 
 
 def _recipe_name_looks_like_path(name: str) -> bool:
-    """Return True when *name* looks like a filesystem path.
+    """Return True when *name* looks like a filesystem path (see :mod:`sparkrun.core.resolve`)."""
+    from sparkrun.core.resolve import recipe_name_looks_like_path
 
-    Used to short-circuit registry refresh retries for obvious path inputs,
-    since updating remote registries cannot help resolve a missing local file.
-    """
-    if not name:
-        return False
-    if name.startswith("@"):  # @registry/recipe is a registry reference, not a path
-        return False
-    if name.startswith((".", "/", "~")):
-        return True
-    if name.endswith((".yaml", ".yml")):
-        return True
-    return False
+    return recipe_name_looks_like_path(name)
 
 
 def _load_recipe(config, recipe_name, resolve=True, retry_after_update=False, offline=False):
-    """Find, load, and return a recipe.
+    """Find, load, and return a recipe, prompting where a terminal allows.
 
-    Handles disambiguation when a recipe name matches multiple registries.
-    Supports remote URLs and @spark-arena/ shortcuts.
-    Exits with an error message on failure.
+    The interactive wrapper over :func:`sparkrun.core.resolve.load_recipe`,
+    which owns the lookup itself; this adds the off-allowlist URL confirmation,
+    the ambiguous-name chooser and the refresh notice, and turns failures into
+    an error message and exit.
 
     Args:
         config: SparkrunConfig instance.
@@ -415,53 +405,13 @@ def _load_recipe(config, recipe_name, resolve=True, retry_after_update=False, of
     Returns:
         Tuple of (recipe, recipe_path, registry_mgr).
     """
-    from sparkrun.core.recipe import Recipe, find_recipe, discover_cwd_recipes, RecipeError, RecipeAmbiguousError
+    from sparkrun.core.recipe import RecipeError, RecipeUntrustedHostError
     from sparkrun.core.registry import RegistryError
-    from sparkrun.core._recipe_source import recipe_registry_entry, tag_recipe_source
-    from sparkrun.utils import parse_scoped_name
-
-    # Expand shortcuts (e.g. @spark-arena/UUID -> full URL)
-    recipe_name = _expand_recipe_shortcut(recipe_name)
-
-    # Handle remote URLs (e.g. spark-arena recipe links)
-    if _is_recipe_url(recipe_name):
-        from sparkrun.core.recipe import RecipeUntrustedHostError
-
-        logger.debug("Loading recipe from URL: %s", recipe_name)
-        try:
-            cached_path = _fetch_and_cache_recipe(recipe_name, offline=offline)
-        except RecipeUntrustedHostError as e:
-            # Off-allowlist https host: confirm interactively, else abort.
-            if sys.stdin.isatty() and click.confirm(
-                "Recipe URL host '%s' is not in the trusted allowlist. Fetch anyway?" % e.host,
-                default=False,
-            ):
-                cached_path = _fetch_and_cache_recipe(recipe_name, allow_untrusted_host=True, offline=offline)
-            else:
-                click.echo("Error: %s" % e, err=True)
-                sys.exit(1)
-        except RecipeError as e:
-            click.echo("Error: %s" % e, err=True)
-            sys.exit(1)
-        registry_mgr = config.get_registry_manager()
-        registry_mgr.ensure_initialized()
-        try:
-            recipe = Recipe.load(cached_path, resolve=resolve, registry_manager=registry_mgr, allow_local_includes=False)
-        except RecipeError as e:
-            click.echo("Error: %s" % e, err=True)
-            sys.exit(1)
-        # Store URL as source for display/debugging
-        recipe.source_path = recipe_name
-        # URL-sourced recipes are never auto-trusted (see
-        # core.launcher.resolve_recipe_trust): their hooks require
-        # --trust or interactive confirmation.
-        tag_recipe_source(recipe, None, config=config, external=True)
-        return recipe, cached_path, registry_mgr
-
-    registry_mgr = config.get_registry_manager()
-    registry_mgr.ensure_initialized()
+    from sparkrun.core.resolve import load_recipe
 
     def _prompt_disambiguation(err):
+        if not sys.stdin.isatty():
+            raise click.ClickException(str(err)) from err
         # Labels are path-qualified (@reg/subdir/name), so nested matches within
         # one registry are distinguishable — a bare @reg/name would print the
         # same option twice. Each label is re-typeable as a scoped recipe name.
@@ -477,41 +427,32 @@ def _load_recipe(config, recipe_name, resolve=True, retry_after_update=False, of
         registry_name, chosen = err.matches[choice - 1]
         return chosen, registry_name
 
-    # Locate the recipe file; optionally retry once after refreshing registries.
-    recipe_path = None
-    selected_registry, _ = parse_scoped_name(recipe_name)
-    retried = False
-    while True:
-        try:
-            recipe_path = find_recipe(recipe_name, registry_manager=registry_mgr, local_files=discover_cwd_recipes())
-            break
-        except RecipeAmbiguousError as e:
-            if sys.stdin.isatty():
-                recipe_path, selected_registry = _prompt_disambiguation(e)
-                break
-            raise click.ClickException(str(e)) from e
-        except RecipeError as e:
-            if retried or not retry_after_update or offline or _recipe_name_looks_like_path(recipe_name):
-                click.echo("Error: %s" % e, err=True)
-                sys.exit(1)
-            retried = True
-            click.echo("Recipe '%s' not found; refreshing registries and retrying..." % recipe_name, err=True)
-            # If the user scoped the name (@registry/...), only refresh that registry.
-            scoped_registry, _ = parse_scoped_name(recipe_name)
-            try:
-                registry_mgr.update(scoped_registry) if scoped_registry else registry_mgr.update()
-            except Exception as update_err:
-                logger.debug("Registry update failed during retry: %s", update_err)
+    def _attempt(allow_untrusted_host=False):
+        return load_recipe(
+            config,
+            recipe_name,
+            resolve=resolve,
+            offline=offline,
+            allow_untrusted_host=allow_untrusted_host,
+            choose_ambiguous=_prompt_disambiguation,
+            retry_after_update=retry_after_update,
+            on_refresh=lambda name: click.echo("Recipe '%s' not found; refreshing registries and retrying..." % name, err=True),
+        )
 
     try:
-        recipe = Recipe.load(recipe_path, resolve=resolve, registry_manager=registry_mgr, offline=offline)
-        registry = recipe_registry_entry(recipe_path, registry_mgr, registry_name=selected_registry)
-        tag_recipe_source(recipe, registry, config=config)
+        try:
+            return _attempt()
+        except RecipeUntrustedHostError as e:
+            # Off-allowlist https host: confirm interactively, else abort.
+            if sys.stdin.isatty() and click.confirm(
+                "Recipe URL host '%s' is not in the trusted allowlist. Fetch anyway?" % e.host,
+                default=False,
+            ):
+                return _attempt(allow_untrusted_host=True)
+            raise
     except (RecipeError, RegistryError) as e:
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
-
-    return recipe, recipe_path, registry_mgr
 
 
 @dataclass(frozen=True)
@@ -1664,3 +1605,19 @@ def _enter_offline_mode(offline: bool | None, cluster=None, *, benchmark_apps: b
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
     return True
+
+
+def _enter_offline_mode_for(offline: bool | None, targets: "HostContext") -> bool:
+    """:func:`_enter_offline_mode` against the cluster *targets* resolved to.
+
+    ``HostContext`` carries the resolved cluster's settings but not its
+    ``offline:`` default, so the definition is read here; an unreadable one
+    is left for the operation itself to report.
+    """
+    cluster = None
+    if targets.cluster_name:
+        try:
+            cluster = targets.cluster_mgr.get(targets.cluster_name)
+        except Exception as error:
+            logger.debug("Could not load cluster %s for its offline default: %s", targets.cluster_name, error)
+    return _enter_offline_mode(offline, cluster)
