@@ -28,7 +28,43 @@ def binding(daemon_test_directory, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     config = tmp_path / "config.yaml"
     config.write_text("features:\n  daemon: true\n")
-    return Binding.from_config(SparkrunConfig(config)).prepare()
+    prepared = Binding.from_config(SparkrunConfig(config)).prepare()
+    yield prepared
+    _reap_binding_processes(prepared)
+
+
+def _reap_binding_processes(binding):
+    """Kill whatever a test's real server left serving this binding.
+
+    Workers are detached into their own session by design, so they outlive the
+    API process (that is what the crash tests verify), and stopping the test
+    server does not stop them. A worker parked on a prompt by a failed test, or
+    one ignoring SIGTERM (the ``tree`` fixture), otherwise survives the test and
+    an interrupted pytest run, reparented to init and holding a runtime lease.
+    Fixture teardown also runs on failure and KeyboardInterrupt. Matching the
+    binding's unique config path in argv finds the server and its workers, and
+    their descendants include children started in a separate session.
+    """
+    if not (binding.directory / "test-server.log").exists():
+        return  # real_server never ran, so nothing was spawned for this binding
+    import psutil
+
+    marker = str(binding.config_path)
+    victims = {}
+    for process in psutil.process_iter(["cmdline"]):
+        if process.pid == os.getpid() or marker not in (process.info["cmdline"] or ()):
+            continue
+        victims[process.pid] = process
+        try:
+            victims.update((child.pid, child) for child in process.children(recursive=True))
+        except psutil.Error:
+            pass
+    for process in victims.values():
+        try:
+            process.kill()
+        except psutil.Error:
+            pass
+    psutil.wait_procs(list(victims.values()), timeout=10)
 
 
 def operation():
