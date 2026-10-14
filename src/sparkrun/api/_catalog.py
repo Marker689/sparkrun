@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -42,6 +43,8 @@ from sparkrun.api._context import resolve_sctx
 from sparkrun.api._resolve import _recipe_errors
 from sparkrun.core._recipe_source import catalog_root, is_catalog_import, tag_recipe_source
 from sparkrun.api._errors import RecipeNotFound, SparkrunError
+
+logger = logging.getLogger(__name__)
 
 MAX_RECIPE_BYTES = 256 * 1024
 _REFERENCE = re.compile(r"^catalog:([0-9a-f]{32})$")
@@ -172,10 +175,14 @@ def catalog_recipes(
     filters: dict[CatalogFacet, str] | None = None,
     sctx: SparkrunContext | None = None,
 ) -> CatalogPage:
-    """Search cached recipes with exact file identity and bounded pagination."""
+    """Search cached recipes with exact file identity and bounded pagination.
+
+    Read-only: listing never removes abandoned imports (that happens when a new
+    import is staged, or through :func:`cleanup_catalog_imports`).
+    """
     from sparkrun.api._recipes import _search_registry_recipes
-    from sparkrun.core.recipe import recipe_summary, filter_recipes
-    from sparkrun.core.registry import RegistryError
+    from sparkrun.core.recipe import filter_recipes, recipe_matches_query, recipe_summary
+    from sparkrun.core.registry import RECIPE_ASSET, RegistryError, iter_asset_files
 
     if not 1 <= limit <= 100 or offset < 0 or len(query) > 256:
         raise SparkrunError("Invalid catalog page or query")
@@ -187,7 +194,6 @@ def catalog_recipes(
     ):
         raise SparkrunError("Invalid recipe filters")
     sctx = resolve_sctx(sctx)
-    cleanup_catalog_imports(sctx=sctx)
     manager = sctx.registry_manager
     inventory = manager.list_registries(allow_discovery=False)
     by_name = {entry.name: entry for entry in inventory}
@@ -202,14 +208,12 @@ def catalog_recipes(
         roots = [Path(sctx.config.config_path).parent / "recipes", _root(sctx) / "imports"]
         for root in roots:
             if root.is_dir():
-                for path in sorted(root.rglob("*.yaml")) + sorted(root.rglob("*.yml")):
+                # Same rules as registry listing: ``.yaml`` beats a same-stem
+                # ``.yml``, and one matching predicate for every source.
+                for path in iter_asset_files(root, RECIPE_ASSET):
                     try:
                         row = recipe_summary(path)
-                        if (
-                            row
-                            and (not runtime or row.get("runtime") == runtime)
-                            and query.lower() in " ".join(str(row.get(k, "")) for k in ("name", "model", "description")).lower()
-                        ):
+                        if row and (not runtime or row.get("runtime") == runtime) and recipe_matches_query(row, query):
                             entries.append(row)
                     except (OSError, ValueError):
                         continue
@@ -420,11 +424,16 @@ def import_recipe(content: str, *, sctx: SparkrunContext | None = None) -> Catal
     except Exception as exc:
         raise SparkrunError("Import must contain a valid recipe YAML document") from exc
     sctx = resolve_sctx(sctx)
+    # Staging is when abandoned imports are swept; listing stays read-only.
+    cleanup_catalog_imports(sctx=sctx)
     identity = hashlib.sha256(content.encode()).hexdigest()
     path = _root(sctx) / "imports" / (identity + ".yaml")
     path.parent.mkdir(parents=True, exist_ok=True)
     # Immutable content-addressed import, also safe across concurrent imports.
-    if not path.exists():
+    if path.exists():
+        # Re-importing restarts the abandonment clock, which ages by mtime.
+        os.utime(path)
+    else:
         fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".import-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -477,7 +486,14 @@ def cleanup_catalog_imports(*, sctx: SparkrunContext | None = None, max_age_seco
             continue
         ref = _reference(path, None, sctx, imported=True)
         record = _root(sctx) / "references" / (ref.split(":")[1] + ".json")
-        value = json.loads(record.read_text())
+        try:
+            value = json.loads(record.read_text())
+            if not isinstance(value, dict):
+                raise ValueError("expected an object")
+        except (OSError, ValueError) as exc:
+            # Whether it was retained is unknown, so keep it rather than guess.
+            logger.warning("Skipping catalog import %s: unreadable reference record %s (%s)", path.name, record, exc)
+            continue
         if not value.get("retained"):
             path.unlink(missing_ok=True)
             record.unlink(missing_ok=True)

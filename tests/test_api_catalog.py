@@ -243,3 +243,66 @@ def test_include_error_detail_survives_api_resolution(catalog):
         resolve_recipe(str(path), sctx=sctx)
     assert isinstance(error.value.__cause__, RecipeError)
     assert str(error.value) == "Recipe is invalid: " + str(error.value.__cause__)
+
+
+def _age(path, days=8):
+    import os
+    import time
+
+    old = time.time() - days * 86400
+    os.utime(path, (old, old))
+
+
+def test_listing_never_deletes_abandoned_imports(catalog):
+    sctx, _, data = catalog
+    staged = api.import_recipe(yaml.safe_dump(data), sctx=sctx)
+    _age(staged["source_path"])
+    api.catalog_recipes(sctx=sctx)
+    assert Path(staged["source_path"]).is_file()
+
+
+def test_reimport_restarts_the_abandonment_clock(catalog):
+    sctx, _, data = catalog
+    content = yaml.safe_dump(data)
+    first = api.import_recipe(content, sctx=sctx)
+    _age(first["source_path"])
+    again = api.import_recipe(content, sctx=sctx)  # also sweeps stale imports
+    assert again["source_path"] == first["source_path"]
+    assert Path(again["source_path"]).is_file()
+    assert api.cleanup_catalog_imports(sctx=sctx) == 0
+
+
+def test_staging_an_import_sweeps_abandoned_ones(catalog):
+    sctx, _, data = catalog
+    stale = api.import_recipe(yaml.safe_dump(data), sctx=sctx)
+    _age(stale["source_path"])
+    data["model"] = "test/other"
+    api.import_recipe(yaml.safe_dump(data), sctx=sctx)
+    assert not Path(stale["source_path"]).exists()
+
+
+def test_corrupt_reference_record_is_skipped_not_fatal(catalog, caplog):
+    from sparkrun.core._recipe_source import catalog_root
+
+    sctx, _, data = catalog
+    corrupt = api.import_recipe(yaml.safe_dump(data), sctx=sctx)
+    data["model"] = "test/abandoned"
+    abandoned = api.import_recipe(yaml.safe_dump(data), sctx=sctx)
+    record = catalog_root(sctx.config) / "references" / (corrupt["reference"].split(":")[1] + ".json")
+    record.write_text("{not json")
+    for detail in (corrupt, abandoned):
+        _age(detail["source_path"])
+    assert api.cleanup_catalog_imports(sctx=sctx) == 1
+    assert Path(corrupt["source_path"]).is_file()  # unknown retention is kept
+    assert not Path(abandoned["source_path"]).exists()
+    assert "unreadable reference record" in caplog.text
+    assert api.catalog_recipes(sctx=sctx)["total"] >= 2
+
+
+def test_local_scan_prefers_yaml_and_uses_the_shared_query_predicate(catalog):
+    sctx, root, data = catalog
+    (root / "dup.yaml").write_text(yaml.safe_dump({**data, "model": "test/yaml-wins"}))
+    (root / "dup.yml").write_text(yaml.safe_dump({**data, "model": "test/yml-loses"}))
+    page = api.catalog_recipes("dup", local_only=True, sctx=sctx)
+    assert [row["model"] for row in page["recipes"]] == ["test/yaml-wins"]
+    assert api.catalog_recipes("YAML-WINS", local_only=True, sctx=sctx)["total"] == 1  # same case-insensitive predicate

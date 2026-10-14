@@ -214,8 +214,17 @@ def live_monitor(
     """Yield :class:`MonitorFrame` snapshots on *interval* until the caller stops.
 
     Blocking generator over :class:`LiveMonitorSession`, for headless consumers
-    (an SSE bridge, a logger).  Closes the session on generator teardown.
+    (an SSE bridge, a logger).  Closes the session on generator teardown.  The
+    wait between frames is the operation's cancel event (``sctx.operation``, or
+    the current operation), so cancelling it ends the stream at once instead of
+    after a full interval.
     """
+    from sparkrun.api._context import resolve_sctx
+    from sparkrun.core.operation import CURRENT
+
+    sctx = resolve_sctx(sctx)
+    operation = getattr(sctx, "operation", None) or CURRENT.get()
+    cancel = operation.cancel if operation is not None else threading.Event()
     session = open_live_monitor(
         hosts,
         cluster=cluster,
@@ -226,8 +235,7 @@ def live_monitor(
         sctx=sctx,
     )
     try:
-        while True:
-            time.sleep(interval)
+        while not cancel.wait(interval):
             yield session.frame()
     finally:
         session.close()

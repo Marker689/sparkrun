@@ -193,6 +193,22 @@ def test_live_monitor_occupancy_only_when_no_telemetry(monkeypatch):
     assert act.free_slots == 4  # occupancy still present
 
 
+def test_live_monitor_stops_promptly_when_its_operation_is_cancelled(monkeypatch):
+    import threading
+
+    from sparkrun.core.operation import OperationState
+
+    monkeypatch.setattr("sparkrun.orchestration.telemetry.get_telemetry_provider", lambda scope, v=None: None)
+    monkeypatch.setattr("sparkrun.api.status", lambda *a, **k: ClusterStatus(hosts=(HostOccupancy(host="h1"),), executor="docker"))
+    sctx = api.default_sctx()
+    sctx.operation = OperationState()
+    threading.Timer(0.2, sctx.operation.cancel.set).start()
+    started = time.monotonic()
+    frames = list(api.live_monitor(["h1"], interval=60, sctx=sctx))
+    assert frames == []  # cancelled during the first wait
+    assert time.monotonic() - started < 10  # not a 60s uninterruptible sleep
+
+
 # --------------------------------------------------------------------------
 # TUI detail rendering — workloads sourced from occupancy (all executors)
 # --------------------------------------------------------------------------
