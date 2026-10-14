@@ -145,6 +145,60 @@ class TestEugrBuilderName:
         assert EugrBuilder().builder_name == "eugr"
 
 
+class TestEugrArgvHygiene:
+    """Argv lists reach subprocess verbatim; recipe branch values cannot become git options."""
+
+    def test_build_argv_is_not_shell_quoted(self, eugr_builder_with_repo):
+        builder, repo_dir = eugr_builder_with_repo
+        builder._repo_dir = repo_dir
+        with mock.patch("sparkrun.builders.eugr._run_build_capturing", return_value=(0, "")) as mock_build:
+            builder._build_image("reg/img:tag", ["--label", "a b"], dry_run=False, save_logs=False)
+        cmd = mock_build.call_args[0][0]
+        assert cmd[1:] == ["-t", "reg/img:tag", "--label", "a b"]
+
+    def test_build_metadata_probe_argv_is_not_shell_quoted(self, tmp_path):
+        from sparkrun.builders.eugr import EugrBuilder
+
+        builder = EugrBuilder()
+        with (
+            mock.patch.object(builder, "_resolve_cache_dir", return_value=tmp_path),
+            mock.patch("sparkrun.containers.registry.get_image_id", return_value="sha256:x"),
+            mock.patch("sparkrun.builders.eugr.subprocess.run", return_value=mock.Mock(returncode=1, stdout="")) as run,
+        ):
+            builder._save_build_metadata("reg/img:tag with space", [])
+        argv = run.call_args_list[-1].args[0]
+        assert argv[:3] == ["docker", "run", "--rm"]
+        assert argv[3] == "reg/img:tag with space"
+
+    @pytest.mark.parametrize("branch", ["--upload-pack=touch /tmp/x", "-b", "a b", 5])
+    def test_option_like_branch_is_refused(self, tmp_path, branch):
+        from sparkrun.builders.eugr import EugrBuilder
+
+        builder = EugrBuilder()
+        with mock.patch("sparkrun.builders.eugr.subprocess.run") as run:
+            with pytest.raises(ValueError, match="builder_config.branch"):
+                builder.ensure_repo(cache_dir=tmp_path, branch=branch)
+            with pytest.raises(ValueError, match="builder_config.branch"):
+                builder._ensure_repo_remote("head", {}, dry_run=True, branch=branch)
+        run.assert_not_called()
+
+    def test_git_receives_the_branch_unquoted_and_separated(self, tmp_path):
+        from sparkrun.builders.eugr import EugrBuilder
+
+        builder = EugrBuilder()
+        with mock.patch("sparkrun.builders.eugr.subprocess.run", return_value=mock.Mock(returncode=0, stderr="")) as run:
+            builder.ensure_repo(cache_dir=tmp_path, branch="feature/x")
+        clone = run.call_args_list[0].args[0]
+        assert clone[:4] == ["git", "clone", "-b", "feature/x"]
+        assert clone[4] == "--"
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        with mock.patch("sparkrun.builders.eugr.subprocess.run", return_value=mock.Mock(returncode=0, stderr="", stdout="")) as run:
+            EugrBuilder._update_repo(repo, branch="feature/x")
+        assert ["git", "-C", str(repo), "checkout", "feature/x", "--"] in [c.args[0] for c in run.call_args_list]
+
+
 class TestEugrPrepareImage:
     """Test EugrBuilder.prepare() — build and mod injection."""
 

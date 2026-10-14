@@ -18,7 +18,7 @@ from scitrera_app_framework import Variables, get_working_path
 
 from sparkrun.builders.base import BuilderPlugin, _flatten_dict
 from sparkrun.utils.images import is_pullable_image_ref, parse_image_ref
-from sparkrun.utils.shell import quote, quote_list, args_list_to_shell_str
+from sparkrun.utils.shell import quote, args_list_to_shell_str
 
 if TYPE_CHECKING:
     from sparkrun.core.config import SparkrunConfig
@@ -139,6 +139,19 @@ def _wants_build(build_args: list[str]) -> bool:
     fine — the presence of the flag itself already forces the build.
     """
     return any(a not in _PULL_COMPATIBLE_BUILD_ARGS for a in build_args)
+
+
+def _checked_branch(branch: Any) -> str | None:
+    """Return the recipe's ``builder_config.branch``, refusing what git would read as an option.
+
+    ``builder_config`` is recipe content with no trust gate, and a value such
+    as ``--upload-pack=…`` reaches ``git clone -b`` / ``git checkout``.
+    """
+    if branch is None or branch == "":
+        return None
+    if not isinstance(branch, str) or branch.startswith("-") or any(c.isspace() for c in branch):
+        raise ValueError("builder_config.branch must be a git branch name, got %r" % (branch,))
+    return branch
 
 
 def _wants_b12x(build_args: list[str]) -> bool:
@@ -1224,7 +1237,7 @@ class EugrBuilder(BuilderPlugin):
         else:
             try:
                 result = subprocess.run(
-                    ["docker", "run", "--rm", quote(image), "cat", "/workspace/build-metadata.yaml"],
+                    ["docker", "run", "--rm", image, "cat", "/workspace/build-metadata.yaml"],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -1284,8 +1297,9 @@ class EugrBuilder(BuilderPlugin):
         if not build_script.exists():
             raise RuntimeError("build-and-copy.sh not found at %s" % build_script)
 
-        cmd = [str(build_script), "-t", quote(image)] + quote_list(build_args)
-        logger.info("Building eugr container: %s", " ".join(cmd))
+        # An argv list (no shell): values are passed verbatim, never shell-quoted.
+        cmd = [str(build_script), "-t", image] + [str(a) for a in build_args if a]
+        logger.info("Building eugr container: %s", args_list_to_shell_str(cmd))
 
         if dry_run:
             return
@@ -1383,6 +1397,7 @@ class EugrBuilder(BuilderPlugin):
         # TODO: hard-coded inline script
         remote_path = remote_cache_path("eugr-spark-vllm-docker", home="~")
 
+        branch = _checked_branch(branch)
         if branch:
             # Clone with specific branch or fetch+checkout if already cloned
             script = (
@@ -1390,11 +1405,11 @@ class EugrBuilder(BuilderPlugin):
                 "REPO_DIR=%(path)s\n"
                 'if [ -d "$REPO_DIR/.git" ]; then\n'
                 '  git -C "$REPO_DIR" fetch origin\n'
-                '  git -C "$REPO_DIR" checkout %(branch)s\n'
+                '  git -C "$REPO_DIR" checkout %(branch)s --\n'
                 '  git -C "$REPO_DIR" pull --ff-only || true\n'
                 "else\n"
                 '  mkdir -p "$(dirname "$REPO_DIR")"\n'
-                '  git clone -b %(branch)s %(url)s "$REPO_DIR"\n'
+                '  git clone -b %(branch)s -- %(url)s "$REPO_DIR"\n'
                 "fi\n"
                 'echo "$REPO_DIR"\n'
             ) % {"path": remote_path, "url": EUGR_REPO_URL, "branch": quote(branch)}
@@ -1540,6 +1555,7 @@ class EugrBuilder(BuilderPlugin):
             registry_cache_root: Registry cache root to check for existing clones.
             branch: Optional git branch to checkout (for developer builds).
         """
+        branch = _checked_branch(branch)
         # Check if registry already has this repo cloned
         if registry_cache_root is not None:
             registry_repo = registry_cache_root / "eugr-vllm"
@@ -1568,8 +1584,8 @@ class EugrBuilder(BuilderPlugin):
             repo_dir.parent.mkdir(parents=True, exist_ok=True)
             cmd = ["git", "clone"]
             if branch:
-                cmd += ["-b", quote(branch)]
-            cmd += [EUGR_REPO_URL, str(repo_dir)]
+                cmd += ["-b", branch]
+            cmd += ["--", EUGR_REPO_URL, str(repo_dir)]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError("Failed to clone eugr repo: %s" % result.stderr.strip())
@@ -1604,7 +1620,7 @@ class EugrBuilder(BuilderPlugin):
                 text=True,
             )
             checkout = subprocess.run(
-                ["git", "-C", str(repo_dir), "checkout", quote(branch)],
+                ["git", "-C", str(repo_dir), "checkout", branch, "--"],
                 capture_output=True,
                 text=True,
             )
