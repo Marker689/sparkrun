@@ -6,7 +6,7 @@ import logging
 
 from sparkrun.orchestration.primitives import sync_resource_to_hosts
 from sparkrun.scripts import read_script
-from sparkrun.utils.shell import quote
+from sparkrun.utils.shell import quote, validate_image_ref
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ def sync_image_to_hosts(
     Returns:
         List of hostnames where the image sync failed.
     """
+    validate_image_ref(image)
     script = read_script("image_sync.sh").format(image=quote(image), force_pull="1" if force_pull else "0", offline="1" if offline else "0")
 
     return sync_resource_to_hosts(

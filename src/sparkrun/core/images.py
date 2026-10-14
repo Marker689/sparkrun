@@ -155,8 +155,8 @@ def resolve_image_plan(
 
     Raises:
         ImagePlanError: A declared host is not in the cluster, a host is
-            declared twice, or a selected host has neither an entry nor a
-            ``container:`` fallback.
+            declared twice, a selected host has neither an entry nor a
+            ``container:`` fallback, or an image is not a valid reference.
     """
     declared_raw = getattr(recipe, "containers", None) or []
 
@@ -202,6 +202,14 @@ def resolve_image_plan(
             "No container image for host(s) %s: they have no `containers:` entry and the "
             "recipe/runtime supplies no fallback. Set `container:` or a per-host image." % ", ".join(missing)
         )
+
+    from sparkrun.utils.shell import validate_image_ref
+
+    for img in dict.fromkeys(images):
+        try:
+            validate_image_ref(img)
+        except ValueError as exc:
+            raise ImagePlanError(str(exc)) from exc
 
     if fell_back and declared_raw:
         # Never silent: on a machine-tuned cluster, running the generic image is

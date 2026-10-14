@@ -8,7 +8,8 @@ set -uo pipefail
 # literal curly-brace characters (shell functions are therefore avoided in
 # favor of backgrounded subshells, which use parentheses).
 
-IMAGE="{image}"
+# Bare on purpose: Python substitutes an already shell-quoted value.
+IMAGE={image}
 TARGETS="{targets}"
 SSH_OPTS="{ssh_opts}"
 SSH_USER="{ssh_user}"

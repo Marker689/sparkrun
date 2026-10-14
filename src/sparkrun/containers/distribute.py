@@ -26,7 +26,7 @@ from sparkrun.orchestration.ssh import (
     run_remote_command,
 )
 from sparkrun.scripts import read_script
-from sparkrun.utils.shell import args_list_to_shell_str, quote
+from sparkrun.utils.shell import args_list_to_shell_str, quote, validate_image_ref
 
 from sparkrun.core.progress import PROGRESS
 
@@ -478,6 +478,7 @@ def distribute_image_from_head(
                 worker_transfer_hosts = None
 
     # Build ensure script (pull image on head)
+    validate_image_ref(image)
     ensure_script = read_script("image_sync.sh").format(
         image=quote(image), force_pull="1" if force_pull else "0", offline="1" if offline else "0"
     )

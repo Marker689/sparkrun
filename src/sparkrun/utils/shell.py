@@ -190,6 +190,22 @@ def validate_hostname(host: str) -> str:
     return host
 
 
+def validate_image_ref(image: str) -> str:
+    """Validate and return a container image reference, or raise ValueError.
+
+    Image references reach generated shell scripts and come from recipe
+    content (``container:`` / ``containers:``), which registries supply.
+    Quoting is still required at every use; this is the second line, refusing
+    anything that cannot be a Docker reference (``registry[:port]/repo[:tag][@digest]``,
+    including a bracketed IPv6 registry) before a script is rendered at all.
+    """
+    if not isinstance(image, str) or not image:
+        raise ValueError("Container image reference must be a non-empty string")
+    if len(image) > 512 or not re.fullmatch(r"[A-Za-z0-9\[][A-Za-z0-9._/:@\[\]-]*", image):
+        raise ValueError("Invalid container image reference %r" % image)
+    return image
+
+
 def validate_unix_username(user: str) -> str:
     """Validate and return a Unix username, or raise ValueError.
 
