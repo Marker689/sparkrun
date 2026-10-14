@@ -271,44 +271,23 @@ _UNTRUSTED_IPC_MODES = frozenset({"", "none", "private", "shareable"})
 _TRUSTED_DEFAULT_EXECUTORS = frozenset({"", "docker"})
 
 
-def _enforce_recipe_mount_trust(recipe: Recipe, trusted: bool) -> None:
-    """Reject untrusted recipes that try to escape container isolation.
+def recipe_isolation_overrides(recipe: Recipe) -> list[str]:
+    """Describe each container-isolation override *recipe* declares, in gate order.
 
-    Several recipe-controlled surfaces can expose host state to the workload
-    container or defeat the rootless-by-default hardening:
-
-    * ``cluster_config`` — the (undocumented) ``resolved_model_path`` /
-      ``remote_cache_dir`` / ``local_cache_dir`` launch overrides, which
-      identity-mount a host directory and repoint the serve argument at it;
-    * ``executor_config`` privilege keys (:data:`_TRUST_GATED_EXECUTOR_KEYS`) —
-      ``privileged``/``cap_add``/``security_opt``/``devices``/``user``/``volumes``.
-      These sit *above* the executor's rootless ``apply_runtime_adjustments``
-      layer in :func:`resolve_executor`'s chain, so a recipe that sets them wins
-      over the hardening (e.g. ``privileged: true`` → ``docker run --privileged``);
-    * ``executor_config.ipc``, gated on its **value** rather than its presence
-      (:data:`_UNTRUSTED_IPC_MODES`) — narrowing the namespace is free, leaving
-      it for the host's or another container's is not.
-
-    All are infra-level escape hatches.  Honouring them for an untrusted
-    (registry- or URL-sourced) recipe would let "run this link" mount ``/``,
-    grant ``--privileged``, or pass through ``/dev/mem`` and take over the host.
-    They are allowed only for trusted recipes (local, default-registry, or
-    ``--trust``); an untrusted recipe that sets them fails closed here, at the
-    single launch choke point shared by ``run``/``benchmark``/``proxy``.
-
-    Raises:
-        RecipeError: when an untrusted recipe declares any gated surface.
+    The pure half of :func:`_enforce_recipe_mount_trust`: an untrusted recipe
+    with any of these is refused, and ``--trust`` (or answering yes at the CLI's
+    trust prompt) authorizes all of them, so the prompt lists them too.
     """
-    if trusted:
-        return
-    from sparkrun.core.recipe import RecipeError, is_local_model_path
+    from sparkrun.core.recipe import is_local_model_path
+
+    problems: list[str] = []
 
     # Direct attribute access (not getattr-with-default): these are always set
     # by ``Recipe.__init__`` / ``__setstate__``, so a rename should raise loudly
     # here rather than silently disabling the security gate.
     cc = recipe.cluster_config
     if cc is not None and not cc.is_empty():
-        raise RecipeError(
+        problems.append(
             "This recipe sets cluster_config host/path overrides (pre-placed model "
             "path or cache-dir redirection), which can expose host paths to the "
             "container. They are only honoured for trusted recipes; re-run with "
@@ -321,7 +300,7 @@ def _enforce_recipe_mount_trust(recipe: Recipe, trusted: bool) -> None:
     # hatch above, so gate it the same way — an untrusted "run this link" recipe
     # must not be able to mount an arbitrary host path via ``model:``.
     if is_local_model_path(recipe.model):
-        raise RecipeError(
+        problems.append(
             "This recipe's model is an absolute host path (%r), which identity-mounts "
             "that host directory into the container. It is only honoured for trusted "
             "recipes; re-run with --trust after auditing this recipe." % recipe.model
@@ -333,7 +312,7 @@ def _enforce_recipe_mount_trust(recipe: Recipe, trusted: bool) -> None:
         # list must be caught too.
         gated = sorted(k for k in _TRUST_GATED_EXECUTOR_KEYS if k in exec_cfg)
         if gated:
-            raise RecipeError(
+            problems.append(
                 "This recipe sets privileged executor_config keys %s, which can "
                 "break container isolation (extra host bind mounts, --privileged, "
                 "raw --device access, or running as root). They are only honoured "
@@ -346,7 +325,7 @@ def _enforce_recipe_mount_trust(recipe: Recipe, trusted: bool) -> None:
         # escalation. See _UNTRUSTED_IPC_MODES.
         raw_ipc = exec_cfg.get("ipc")
         if raw_ipc is not None and str(raw_ipc).strip().lower() not in _UNTRUSTED_IPC_MODES:
-            raise RecipeError(
+            problems.append(
                 "This recipe sets executor_config ipc=%r, which places the workload "
                 "outside its own IPC namespace — sharing the host's /dev/shm (every "
                 "other tenant's POSIX shared memory and semaphores on that machine), "
@@ -373,12 +352,51 @@ def _enforce_recipe_mount_trust(recipe: Recipe, trusted: bool) -> None:
         if smuggled and not selected and isinstance(smuggled, str):
             selected = smuggled.strip().lower()
     if selected not in _TRUSTED_DEFAULT_EXECUTORS:
-        raise RecipeError(
+        problems.append(
             "This recipe selects the %r executor, which runs the workload outside "
             "a Docker container (no rootless / namespace isolation). It is only "
             "honoured for trusted recipes; re-run with --trust after auditing this "
             "recipe." % selected
         )
+    return problems
+
+
+def _enforce_recipe_mount_trust(recipe: Recipe, trusted: bool) -> None:
+    """Reject untrusted recipes that try to escape container isolation.
+
+    Several recipe-controlled surfaces can expose host state to the workload
+    container or defeat the rootless-by-default hardening:
+
+    * ``cluster_config`` — the (undocumented) ``resolved_model_path`` /
+      ``remote_cache_dir`` / ``local_cache_dir`` launch overrides, which
+      identity-mount a host directory and repoint the serve argument at it;
+    * ``executor_config`` privilege keys (:data:`_TRUST_GATED_EXECUTOR_KEYS`) —
+      ``privileged``/``cap_add``/``security_opt``/``devices``/``user``/``volumes``.
+      These sit *above* the executor's rootless ``apply_runtime_adjustments``
+      layer in :func:`resolve_executor`'s chain, so a recipe that sets them wins
+      over the hardening (e.g. ``privileged: true`` → ``docker run --privileged``);
+    * ``executor_config.ipc``, gated on its **value** rather than its presence
+      (:data:`_UNTRUSTED_IPC_MODES`) — narrowing the namespace is free, leaving
+      it for the host's or another container's is not.
+
+    All are infra-level escape hatches.  Honouring them for an untrusted
+    (registry- or URL-sourced) recipe would let "run this link" mount ``/``,
+    grant ``--privileged``, or pass through ``/dev/mem`` and take over the host.
+    They are allowed only for trusted recipes (local, default-registry, or
+    ``--trust``); an untrusted recipe that sets them fails closed here, at the
+    single launch choke point shared by ``run``/``benchmark``/``proxy``.
+
+    Raises:
+        RecipeError: when an untrusted recipe declares any gated surface (the
+            first one, as :func:`recipe_isolation_overrides` orders them).
+    """
+    if trusted:
+        return
+    from sparkrun.core.recipe import RecipeError
+
+    problems = recipe_isolation_overrides(recipe)
+    if problems:
+        raise RecipeError(problems[0])
 
 
 def _format_missing_mounts(missing: dict, keep: set) -> str:
@@ -2730,8 +2748,8 @@ def complete_post_launch(
     # The verdict launch_inference() decided for pre_exec, so post_exec (in the
     # head container) and post_commands (on this machine) cannot disagree with
     # it.  Results that carry none (provider launches, older producers) resolve.
-    _is_trusted = trust or (
-        result.recipe_trusted if getattr(result, "recipe_trusted", None) is not None else resolve_recipe_trust(recipe, trust)
+    _is_trusted = bool(
+        trust or (result.recipe_trusted if getattr(result, "recipe_trusted", None) is not None else resolve_recipe_trust(recipe, trust))
     )
 
     try:

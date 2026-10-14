@@ -291,12 +291,15 @@ def format_duration(seconds: float) -> str:
     return "%dh %dm %ds" % (h, m, s)
 
 
-def format_hook_summary(recipe_label: str, hooks, *, limit: int = 100) -> str:
+def format_hook_summary(recipe_label: str, hooks, *, isolation=(), limit: int = 100) -> str:
     """Describe untrusted recipe hooks in a few lines, for a trust prompt.
 
     *hooks* maps hook kind to commands (``sparkrun.api.untrusted_hooks``).
     Each command shows its first line, cut at *limit* characters; ``mods``
-    are listed by name on one line.
+    are listed by name on one line.  *isolation* lists the recipe's
+    container-isolation overrides (``launcher.recipe_isolation_overrides``):
+    trusting the recipe authorizes those too, so they are shown by their
+    first sentence.
     """
     lines = ["Recipe '%s' is not from a trusted source and runs these hooks:" % recipe_label]
     for kind, commands in hooks.items():
@@ -312,4 +315,7 @@ def format_hook_summary(recipe_label: str, hooks, *, limit: int = 100) -> str:
             elif len(command_lines) > 1:
                 text += " ..."
             lines.append("    - %s" % text)
+    if isolation:
+        lines.append("Trusting it also allows:")
+        lines.extend("  - %s." % str(item).split(". ", 1)[0].rstrip(".") for item in isolation)
     return "\n".join(lines)

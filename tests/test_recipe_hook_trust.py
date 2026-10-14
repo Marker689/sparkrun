@@ -377,3 +377,35 @@ def test_proxy_load_forwards_trust(proxy_load_env, monkeypatch):
     out = CliRunner().invoke(main, ["proxy", "load", str(proxy_load_env), "--cluster", "lab", "--trust", "--dry-run"])
     assert out.exit_code == 0, out.output
     assert run.call_args.args[0].trust is True
+
+
+def test_prompt_lists_isolation_overrides_trust_would_also_allow(monkeypatch, capsys):
+    """Answering yes grants full trust, so the prompt shows mounts/executor overrides too."""
+    from sparkrun.cli._common import authorize_recipe_hooks
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("click.confirm", Mock(return_value=True))
+    recipe = _untrusted_recipe(pre_exec=["echo hi"], executor_config={"privileged": True, "volumes": ["/:/host"]})
+    assert authorize_recipe_hooks(recipe, trust=False, dry_run=False) is True
+    shown = capsys.readouterr().err
+    assert "Trusting it also allows:" in shown
+    assert "privileged executor_config keys ['privileged', 'volumes']" in shown
+
+
+def test_isolation_overrides_lists_every_gated_surface_and_enforcement_raises_the_first(tmp_path):
+    from sparkrun.core.launcher import _enforce_recipe_mount_trust, recipe_isolation_overrides
+    from sparkrun.core.recipe import RecipeError
+
+    recipe = _untrusted_recipe(model=str(tmp_path), executor="local", executor_config={"ipc": "host", "cap_add": ["SYS_ADMIN"]})
+    found = recipe_isolation_overrides(recipe)
+    assert [("absolute host path" in p, "cap_add" in p, "ipc=" in p, "'local' executor" in p) for p in found] == [
+        (True, False, False, False),
+        (False, True, False, False),
+        (False, False, True, False),
+        (False, False, False, True),
+    ]
+    with pytest.raises(RecipeError) as raised:
+        _enforce_recipe_mount_trust(recipe, trusted=False)
+    assert str(raised.value) == found[0]
+    _enforce_recipe_mount_trust(recipe, trusted=True)
+    assert recipe_isolation_overrides(_untrusted_recipe()) == []

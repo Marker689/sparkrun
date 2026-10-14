@@ -796,9 +796,11 @@ def authorize_recipe_hooks(recipe, *, trust: bool, dry_run: bool, sctx=None) -> 
             "Recipe '%s' is not from a trusted source and runs hooks (%s), and this session is not interactive. "
             "Audit the recipe, then re-run with --trust." % (label, ", ".join(hooks))
         )
+    from sparkrun.core.launcher import recipe_isolation_overrides
     from sparkrun.utils.text import format_hook_summary
 
-    if not confirm_untrusted_hooks(format_hook_summary(label, hooks)):
+    summary = format_hook_summary(label, hooks, isolation=recipe_isolation_overrides(recipe))
+    if not confirm_untrusted_hooks(summary):
         raise click.ClickException("Launch cancelled: the recipe's hooks were not authorized.")
     return True
 

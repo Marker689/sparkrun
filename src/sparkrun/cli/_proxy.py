@@ -739,6 +739,7 @@ def load_cmd(
     if recipe.post_exec or recipe.post_commands:
         from sparkrun.core.launcher import post_launch_lifecycle
 
+        assert result is not None  # guarded above: post hooks need the handle
         post_launch_lifecycle(result, remote_cache_dir=result.effective_cache_dir, trust=trust, dry_run=dry_run, progress=sctx.progress)
 
     if not dry_run:
@@ -753,6 +754,7 @@ def load_cmd(
             from sparkrun.orchestration.primitives import build_ssh_kwargs
 
             click.echo("Waiting for server to become ready...")
+            assert result is not None  # guarded above: a real launch needs the handle
             readiness = wait_for_serve_ready(
                 result,
                 ssh_kwargs=build_ssh_kwargs(config),
