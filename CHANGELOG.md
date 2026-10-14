@@ -12,6 +12,37 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- `update` and `setup update` are one implementation: both accept
+  `--no-update-registries`, skip the self-upgrade on non-uv installs (still updating
+  plugins and registries), and exit non-zero when the core upgrade fails (`update` used to
+  exit 0; `setup update` refused non-uv installs).
+- `export systemd`: the generated cluster carries the source cluster's full host list and
+  definition (user, executor, transport, scheduler, …); the service's `run` decides
+  placement at each start instead of a statusless greedy trim made at export. Cluster env
+  is resolved at export (`env_file` is a control-machine path, so its values are written
+  into the head node's 0600 cluster file). The SSH user falls back to the local login,
+  not `$USER`/`root`; `--service-name` and the SSH user are validated. New experimental
+  `sparkrun.api.systemd_export`.
+- New experimental `api.setup.plan_cx7` / `apply_cx7` / `save_cx7_topology` and
+  `diagnose_ssh`: the decisions behind `setup cx7`, the wizard's CX7 phase and `setup ssh
+  --diagnose`, so a GUI can configure the CX7 fabric. `setup cx7` auto-detection treats
+  three hosts as ring candidates by physical port pairs, the wizard's rule.
+- `run`, `proxy load`, `benchmark` and every command using the shared host resolution fail
+  with "Cannot load cluster '<name>'" when the effective named or default cluster cannot be
+  read, instead of running against an anonymous host list without the cluster's SSH user,
+  executor, transport or offline setting.
+- API: `features.*`, `plugins.*`, `model_cache.*` and `setup.run_setup_steps` accept
+  `sctx=`; `status`, `status_report`, `open_telemetry`, `open_live_monitor` and
+  `live_monitor` take `hosts` as optional, falling back to the resolved cluster's hosts
+  (daemon `cluster.observe` / `cluster.report` too).
+- `api.stop_all` and the daemon's `workloads.stop_all` require hosts or a cluster; a
+  teardown never defaults to the default cluster (pass its name to sweep it).
+- Removed `VRAMEstimate.fits_dgx_spark` (use `check_fit`) and
+  `launcher.apply_platform_runtime_flag_defaults` / `resolve_platform_env_defaults` (use
+  `resolve_platform_runtime_flags` / `resolve_platform_env_by_host`). Plugins declaring an
+  `application_profile_api` different from the host's are refused at load, for every
+  plugin source.
+
 - Removed the hidden, long-deprecated `recipe update` command; use `registry update
   [NAME]`, or `update` for the application.
 - `plugins list` and `setup features list` show only enabled plugins and flags by default
@@ -297,6 +328,12 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- `api.materialize` reports the same container env as the launch: it now includes the
+  runtime-cache mount and env, and layers the comm env beneath the container env as the
+  executor does.
+- `logs` no longer prepares a provider transport twice; `stop` and `logs` share one
+  target resolver and report missing hosts with the same message.
+- SparkRoute installed as a managed plugin works under an alternate application profile.
 - Tests: the suite no longer reads or writes the developer's `~/.sparkrun-runtime` (a
   test-only lease root, inherited by subprocesses and inert outside pytest), daemon tests
   kill the detached workers they spawn, and a log-reader cancellation test no longer races

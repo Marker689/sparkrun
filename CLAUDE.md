@@ -127,6 +127,7 @@ The CLI was split from a single `cli.py` into a package for maintainability. The
 | `_benchmark.py`   | `benchmark` command group — run benchmark profiles against inference workloads                                                                                                                                                                                    |
 | `_tune.py`        | `tune` command group — run Triton fused MoE kernel tuning (SGLang and vLLM)                                                                                                                                                                                       |
 | `_wizard.py`      | `setup wizard` command — guided cluster setup                                                                                                                                                                                                                     |
+| `_export.py`      | `export` group; `export systemd` renders `api.systemd_export` → `orchestration/systemd_service.py` (the `proxy systemd` layering). The unit runs `run --cluster <slug>-systemd`, so export bakes the source cluster's whole definition and candidate hosts, never a placement (decide once); a job target keeps the job's hosts; `env_file` is control-side, so env is resolved at export |
 | `_check.py`       | `setup check` command — non-destructive readiness probe of a cluster's hosts against the wizard's setup steps (ordered `SETUP_CHECKS` registry; seed of a future per-platform step system with paired check/apply stages)                                          |
 | `_proxy.py`       | `proxy` command group — thin renderer over `api.proxy` (see Inference Gateway below)                                                                                                                                                                              |
 | `_proxy_systemd.py` | `proxy systemd` group: install/status/uninstall the proxy's systemd unit (see Inference Gateway below)                                                                                                                                                               |
@@ -185,7 +186,7 @@ wrote always wins:
 |----------------------------------------|------------------------------|-----------------------------------------------------------|
 | `default_image(runtime)`               | container image              | `RuntimePlugin.default_image_for()`, per host via `images.resolve_runtime_image_plan` |
 | `default_runtime_flags(runtime, accel)`| recipe `defaults` (serve flags) | `launcher.resolve_platform_runtime_flags` (keys absent from the config chain only) |
-| `default_env(runtime, accel, family=)` | container env                | `platforms.accelerator_defaults` per host in `launch_inference` (lowest env tier, `platform_env_by_host`) |
+| `default_env(runtime, accel, family=)` | container env                | `launcher.resolve_platform_env_by_host` (per host); below cluster/recipe env in `compose_launch_env` |
 | `default_executor_config(executor)`    | `ExecutorConfig`             | `executor.resolve_executor(host_hardware=…)`, layer 9, one executor per host |
 | `default_max_gpu_memory_utilization`   | usable-memory cap            | `core.limits`                                              |
 | `default_compute_capability(accel)`    | compute capability / `arch`  | `platforms.resolve_compute_capability`                     |
@@ -208,6 +209,14 @@ discrete-card numbers. It is a `setdefault`, never a clamp. A recipe value, even
 one too high for GB10, is served as written, because recipe content is not
 rewritten for the hardware. Don't confuse it with `default_max_gpu_memory_utilization`
 (0.90), which is the scheduling and fit budget, not a serve flag.
+
+**Container env is composed once** (`core/launch_env.compose_launch_env`), lowest
+tier first: comm env → runtime-cache env → the runtime's common env → its
+solo/cluster env → platform `default_env` → cluster env + recipe env → rendered
+env templates → `get_extra_env()` (HF vars, last). Solo, cluster and
+`api.materialize` all go through it, so a materialized unit's env equals what the
+executor receives (`tests/test_launch_env.py`). The platform tier is lowest among
+tiers a *user* writes, not below the runtime's own env; no keys overlap today.
 
 **Compute capability is declared, not probed.** It is fixed per accelerator
 model, so the platform recognizing the model is the authority (GB10 → `12.1`;
@@ -257,7 +266,7 @@ covers bundled, directory, managed and installed plugins
 in `config.yaml` (what `plugins enable` / `disable` write) → the legacy `integrations:`
 mapping → the application profile's selected / required integrations → a
 legacy whole-plugin feature flag (`LEGACY_PLUGIN_FLAGS`, or the plugin's
-`IN_TREE_PLUGIN_FEATURES` entry when it declares no manifest) → the default
+known-plugin entry when it declares no manifest) → the default
 (on for in-tree and directory plugins, off for installed packages). Directory
 and managed plugins additionally need `core.external_plugins`.
 
@@ -265,13 +274,17 @@ Loading and capability are separate. A plugin's capability flags (e.g.
 `gateway.litellm`) come from its `SPARKRUN_PLUGIN_MANIFEST`, which
 `plugin_manifest.read_declarations` reads as a literal **without importing the
 module**; an enabled capability cannot load a disabled plugin.
-`in_tree_plugins.IN_TREE_PLUGIN_FEATURES` is now the inventory of known in-tree
-module names plus those legacy bindings: a module under `sparkrun.plugins`
-without an entry is skipped loudly, since the silent version would put the
-symptom far from its cause. Namespace membership is not ownership: only
-`BUNDLED_PLUGIN_NAMES` at their shipped location load at the in-tree
-declaration tier (`in_tree_declaration_tier`); a separately installed package in
-`sparkrun.plugins.<name>` (SparkRoute, ColdSnap) is third-party code.
+`plugin_policy.KNOWN_PLUGINS` is the one table of first-party plugins
+(normalized id → module, title, legacy flag, `bundled`, `requires_profile_api`);
+`BUNDLED_PLUGIN_NAMES`, `IN_TREE_PLUGIN_FEATURES` and `LEGACY_PLUGIN_FLAGS`
+derive from it. A module under `sparkrun.plugins` without an entry is skipped
+loudly, since the silent version would put the symptom far from its cause.
+Namespace membership is not ownership: only bundled plugins at their shipped
+location load at the in-tree declaration tier (`in_tree_declaration_tier`); a
+separately installed package in `sparkrun.plugins.<name>` (SparkRoute, ColdSnap)
+is third-party code. A declared `application_profile_api` must equal the host's
+and is checked for every source in `registration.load_and_register_plugin`; no
+code names a plugin to decide this.
 
 One consequence worth knowing: `PluggableGroup` attaches plugin commands once
 per process, so the gate is effectively read once per CLI invocation (the test
@@ -470,6 +483,11 @@ line continuation first (otherwise bash reads `\ --nnodes` as one argument).
 Presence checks use `command_has_flag` (whole token, either `--flag value` or
 `--flag=value`); `reconcile_flag_in_command(override=True)` handles both
 spellings and substitutes with a function, never a regex replacement string.
+
+**Core does not name runtimes.** Runtime-specific launch behavior is a hook on
+`RuntimePlugin`: `presynced_gguf_overrides` (llama.cpp mmproj),
+`supports_per_node_env` (trtllm refuses per-node env templates) and
+`replica_service_domains` (vLLM service domains in `api.materialize`).
 
 **Executor resolution** (`RuntimePlugin._resolve_executor`): runtimes do not
 construct executors directly. The base helper delegates to
@@ -737,6 +755,15 @@ for routes to the plan's other hosts, because both callers SSH again
 immediately (verification, the wizard's host-key distribution). A remote
 attempt that still hits ssh's rc-255 no-route error is retried once. Neither
 `setup cx7` nor the wizard saves the cluster `topology` after a partial apply.
+
+Both commands render one implementation, `api/setup/_cx7.py` (`plan_cx7` →
+`Cx7Plan`, `apply_cx7`, `save_cx7_topology`). It decides the topology (saved
+when asked → explicit → `choose_topology` callback or neighbor discovery for a
+ring-eligible auto run → switch), the interface filter (explicit → `--port` →
+the cluster's saved `fabric_interfaces`) and the #311 save rule; the CLI keeps
+prompts and sudo credentials, and progress arrives through `on_event` kinds.
+`setup ssh --diagnose` has the same split (`api.setup.diagnose_ssh` returns
+verdicts; the CLI writes the remediation). Both are daemon wire exclusions.
 
 **Session guard** (`ssh.py:wrap_with_session_guard` + `scripts/session_guard.sh`):
 remote payloads run via `ssh <host> bash -s`, i.e. **without a PTY**, so on
@@ -1360,6 +1387,10 @@ rather than silently ignored.
 
 ### Launch Materialization (`api.materialize`)
 
+Env and mounts come from the same `compose_launch_env`,
+`resolve_launch_runtime_cache` and `resolve_platform_env_by_host` the launch
+uses (resolved read-only), so a unit's env is what the executor would receive.
+
 `api.plan` stops at placement. `api.materialize(options, plan=…) ->
 ResolvedLaunchSpec` resolves the rest — per-unit argv, env, mounts, devices and
 the worker/rank topology — **read-only**: no image pull, no model distribution,
@@ -1499,7 +1530,11 @@ the default-cluster step) and silently dropped that cluster's executor pin,
 `executor_config`, `hosts_hardware` and transport from the sweep. Any command
 that pairs a resolved host list with an `api.*` cluster argument must forward
 `HostContext.cluster_name`; `HostContext.describe()` is the matching banner, so
-the report also *says* what it covers.
+the report also *says* what it covers. `HostContext.cluster_def` is the loaded
+effective cluster: `with_host_context` injects the whole `HostContext` into
+commands that declare `host_context`, which forward `.cluster_def` / `.cluster`
+instead of re-resolving it. An unreadable effective cluster is a
+`ClickException`, never an anonymous fallback.
 
 Under the hood, `api.status` calls
 `orchestration/executor.py:query_status_for_cluster(cluster, hosts, …)`, which
@@ -1573,7 +1608,11 @@ login. On a cluster whose `user:` differs from that login, every teardown
 connection was refused while `stop` still printed a success line and the
 workload kept serving (issue #277). `api._resolve.resolve_cluster_for_job` is
 the read side, in strict order: an explicitly named cluster → the one the job
-recorded → the recorded `ssh_user` alone.
+recorded → the recorded `ssh_user` alone. `api.stop` and `api.open_log_target`
+share `api._resolve.resolve_workload_target`: by id, hosts are explicit →
+recorded → the named cluster's; by recipe, the discovery range; with metadata the
+connection is always the job's own, and `transport_prepared` says whether
+discovery already prepared that exact connection, so each is prepared once.
 
 Three properties are load-bearing:
 
@@ -3087,7 +3126,7 @@ Shared helpers used across multiple modules to avoid circular imports:
   `model_cache_path`, where it can only be refused — so a hostile id raises rather than rendering.
 - `coerce_value()` — type coercion for CLI string inputs (to int, float, bool)
 - `suppress_noisy_loggers()` — silences verbose HTTP/transport loggers
-- `resolve_ssh_user()` — SSH user resolution (cluster → config → env → fallback)
+- `resolve_ssh_user()` — SSH user resolution (cluster → config → local login via `getpass` → fallback)
 - `is_valid_ip()`, `parse_kv_output()`, `load_yaml()` — parsing helpers
 - `cli_formatters.py` — Presentation-layer formatting for recipe tables and CLI output
 
@@ -3191,6 +3230,10 @@ passing. `tests/test_features.py` unit-tests the gate directly
 (`K8sExecutor().is_multi_extension(...)`) and exercises exclusion end-to-end in a
 clean subprocess (SAF exposes `is_multi_extension` once at registration and the
 registry is process-global, so a plugin can't be re-hidden mid-process).
+
+**`api` never imports `sparkrun.daemon` for shared types**: the job-store
+`Conflict` lives in `core.coordination` (re-exported by `daemon.jobs`);
+`tests/test_api_daemon_layering.py` guards it.
 
 ### Retiring legacy readers
 
