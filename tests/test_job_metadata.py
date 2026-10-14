@@ -875,3 +875,45 @@ def test_check_job_rejects_malformed_metadata_hosts(monkeypatch, hosts):
     )
     with pytest.raises(ValueError, match="non-empty host names"):
         check_job_running(cluster_id="invalid-hosts")
+
+
+def test_remove_job_metadata_deletes_a_corrupt_record(tmp_path):
+    """A parse failure must never be read the same as foreign ownership.
+
+    ``load_job_metadata`` returns ``None`` both for another distribution's
+    record and for one that fails to parse — a truncated write, a stray
+    non-mapping document, invalid YAML.  Treating that ``None`` as "foreign,
+    leave it alone" means a corrupt record survives every ``stop`` and prune
+    forever (B5).  Only a *successful* parse naming another distribution may
+    be protected.
+    """
+    from sparkrun.orchestration.job_metadata import remove_job_metadata
+
+    cid = generate_cluster_id("c" * INTENT_ID_LEN, "d" * PLACEMENT_TOKEN_LEN)
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    digest = cid.removeprefix("sparkrun_")
+    path = jobs / f"{digest}.yaml"
+    # Syntactically invalid YAML: a truncated/interrupted write, the shape
+    # a corrupt record actually takes on disk.
+    path.write_text("cluster_id: [unterminated\n  distribution: sparkrun")
+
+    remove_job_metadata(cid, cache_dir=str(tmp_path))
+
+    assert not path.exists()
+
+
+def test_remove_job_metadata_still_protects_foreign_ownership(tmp_path):
+    """Regression guard: a genuinely foreign-owned record stays protected."""
+    from sparkrun.orchestration.job_metadata import remove_job_metadata
+
+    cid = generate_cluster_id("e" * INTENT_ID_LEN, "f" * PLACEMENT_TOKEN_LEN)
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    digest = cid.removeprefix("sparkrun_")
+    path = jobs / f"{digest}.yaml"
+    path.write_text(yaml.safe_dump({"cluster_id": cid, "distribution": "foreign"}))
+
+    remove_job_metadata(cid, cache_dir=str(tmp_path))
+
+    assert path.exists()

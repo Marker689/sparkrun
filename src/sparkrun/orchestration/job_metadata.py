@@ -809,10 +809,34 @@ def remove_job_metadata(
     cache_dir = _resolve_cache_dir(cache_dir, sctx)
     digest = _filename_digest(cluster_id)
     meta_path = Path(cache_dir) / "jobs" / f"{digest}.yaml"
-    if meta_path.exists() and load_job_metadata(cluster_id, cache_dir=cache_dir) is None:
+    if meta_path.exists() and _is_foreign_job_metadata(meta_path, cluster_id):
+        # Another distribution's record; not ours to delete.
         return
     meta_path.unlink(missing_ok=True)
     logger.debug("Removed job metadata %s", meta_path)
+
+
+def _is_foreign_job_metadata(meta_path: Path, cluster_id: str) -> bool:
+    """Whether *meta_path* positively reads as another distribution's record.
+
+    ``load_job_metadata`` returns ``None`` both for a foreign-owned record and
+    for one that failed to parse (truncated write, corrupt YAML) — a caller
+    that treats that ``None`` as "foreign, protect it" can never delete a
+    corrupt record, which then survives every ``stop`` and prune forever.
+    Only a successful parse that names another distribution is protected; a
+    parse failure is ours to clean up (with a warning, since the record is
+    lost either way).
+    """
+    try:
+        from sparkrun.utils import load_yaml
+
+        data = load_yaml(meta_path)
+    except Exception:
+        logger.warning("Job metadata %s is unreadable; removing it", meta_path, exc_info=True)
+        return False
+    if not isinstance(data, dict):
+        return False
+    return not owns_metadata({**data, "cluster_id": data.get("cluster_id") or cluster_id})
 
 
 #: Filename (under the cache root) of the last observed occupancy snapshot.
