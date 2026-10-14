@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from logging import Logger
 from typing import Any, TYPE_CHECKING
 
@@ -85,15 +84,10 @@ class EugrVllmRayRuntime(VllmRayRuntime):
     ) -> None:
         """Delegate to EugrBuilder for image building and mod injection.
 
-        Issues a deprecation warning since users should migrate to
-        ``vllm-ray`` runtime with ``builder: eugr``.
+        The deprecation itself is reported by ``recipe validate`` (and collapsed
+        into the launch summary) as ``deprecated-runtime``; this keeps a debug line.
         """
-        logger.warning("eugr-vllm runtime is deprecated. Use 'vllm-ray' runtime with 'builder: eugr' instead.")
-        warnings.warn(
-            "eugr-vllm runtime is deprecated. Use 'vllm-ray' runtime with 'builder: eugr' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        logger.debug("eugr-vllm runtime is deprecated. Use 'vllm-ray' runtime with 'builder: eugr' instead.")
         from sparkrun.core.bootstrap import get_builder
         from sparkrun.orchestration.primitives import build_ssh_kwargs
 
