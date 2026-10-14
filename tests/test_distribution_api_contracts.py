@@ -15,7 +15,10 @@ from test_benchmark_startup_collection import bench_env as bench_env
 @pytest.mark.parametrize("unit_present", [False, True])
 @pytest.mark.parametrize("foreign_artifact", ["recipe", "service_cluster", "cluster"])
 def test_uninstall_preserves_foreign_service_files(tmp_path, unit_present, foreign_artifact):
-    from sparkrun.cli._export import _render_uninstall_script, _service_artifacts
+    from sparkrun.orchestration.systemd_service import (
+        render_uninstall_script as _render_uninstall_script,
+        service_artifacts as _service_artifacts,
+    )
 
     paths = dict(
         zip(("recipe", "service_cluster", "cluster"), map(Path, _service_artifacts("review", "review", str(tmp_path))), strict=True)
@@ -39,7 +42,12 @@ def test_uninstall_preserves_foreign_service_files(tmp_path, unit_present, forei
 
 @pytest.mark.parametrize("legacy", [False, True])
 def test_service_cleanup_and_privileged_install_after_cleanup(tmp_path, legacy):
-    from sparkrun.cli._export import _render_install_script, _render_sudo_install_script, _render_uninstall_script, _service_artifacts
+    from sparkrun.orchestration.systemd_service import (
+        render_install_script as _render_install_script,
+        render_sudo_install_script as _render_sudo_install_script,
+        render_uninstall_script as _render_uninstall_script,
+        service_artifacts as _service_artifacts,
+    )
 
     def execute(script):
         script = script.replace("/etc/systemd/system/", str(tmp_path) + "/")
@@ -64,7 +72,10 @@ def test_service_cleanup_and_privileged_install_after_cleanup(tmp_path, legacy):
 def test_uninstall_serializes_with_user_install(tmp_path):
     import fcntl
     import os
-    from sparkrun.cli._export import _render_install_script, _render_uninstall_script
+    from sparkrun.orchestration.systemd_service import (
+        render_install_script as _render_install_script,
+        render_uninstall_script as _render_uninstall_script,
+    )
 
     install = _render_install_script("review", "name: review", "hosts: []", "review", str(tmp_path))
     uninstall = _render_uninstall_script("review", "review", str(tmp_path))

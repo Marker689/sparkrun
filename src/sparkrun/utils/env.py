@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 # Loggers that produce excessive output at DEBUG/INFO level.
 _NOISY_LOGGERS = (
@@ -22,9 +21,29 @@ def suppress_noisy_loggers() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def local_username() -> str:
+    """Return the local login name, cross-platform, or ``""`` when unknown.
+
+    ``os.environ["USER"]`` is POSIX-only (Windows sets ``USERNAME``), so a bare
+    ``USER`` lookup with a ``"root"`` default made every Windows control
+    machine connect as ``root``.  ``getpass.getuser`` consults ``LOGNAME`` /
+    ``USER`` / ``LNAME`` / ``USERNAME`` and then the password database.
+    """
+    import getpass
+
+    try:
+        return getpass.getuser() or ""
+    except Exception:  # no env var and no pwd entry (e.g. a container uid)
+        return ""
+
+
 def resolve_ssh_user(cluster_user: str | None, config, fallback: str = "root") -> str:
-    """Resolve SSH user from cluster definition, config, or OS environment."""
-    return cluster_user or config.ssh_user or os.environ.get("USER", fallback)
+    """Resolve SSH user from cluster definition, config, or the local login.
+
+    *fallback* applies only when the local login cannot be determined; pass
+    ``""`` to let the caller refuse rather than guess.
+    """
+    return cluster_user or getattr(config, "ssh_user", None) or local_username() or fallback
 
 
 def merge_env(*env_dicts: dict[str, str] | None) -> dict[str, str]:

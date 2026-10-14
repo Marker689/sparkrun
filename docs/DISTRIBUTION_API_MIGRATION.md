@@ -57,6 +57,9 @@ pin a sparkrun version if you depend on them:
 - The lifecycle helpers `api.wait_ready`, `api.post_launch` (returns
   `api.PostLaunchResult`) and `api.discovery_snapshot`.
 - `sparkrun.api.model_cache`.
+- `sparkrun.api.systemd_export` (the steps behind `export systemd`: `plan`,
+  `locate_host` / `bootstrap_host`, `render`, `install_files` / `install_unit` /
+  `start`, `render_uninstall` / `uninstall`, and their dataclasses).
 - The `sparkrun.api.setup` planning internals: `ManifestManager`,
   `SetupManifest`, `PhaseRecord`, `SetupPlan`, `PlannedStep`, `SetupStep`,
   `CheckContext`, `CheckItem`, `HostState`, `SetupActionContext`,

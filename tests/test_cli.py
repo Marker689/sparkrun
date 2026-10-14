@@ -623,7 +623,7 @@ class TestExportSystemdCommand:
 
     def test_render_systemd_unit(self):
         """Test that _render_systemd_unit produces correct unit file content."""
-        from sparkrun.cli._export import _render_systemd_unit
+        from sparkrun.orchestration.systemd_service import render_systemd_unit as _render_systemd_unit
         from sparkrun.core.recipe import Recipe
 
         recipe_file_data = yaml.safe_dump(_TEST_RECIPE_DATA)
@@ -661,7 +661,7 @@ class TestExportSystemdCommand:
 
     def test_render_install_script(self):
         """Test that _render_install_script embeds recipe and cluster YAML."""
-        from sparkrun.cli._export import _render_install_script
+        from sparkrun.orchestration.systemd_service import render_install_script as _render_install_script
 
         recipe_yaml = "model: test\nruntime: sglang\n"
         cluster_yaml = "name: test-systemd\nhosts:\n- 10.0.0.1\n"
@@ -682,7 +682,7 @@ class TestExportSystemdCommand:
 
     def test_render_uninstall_script(self):
         """Test that _render_uninstall_script stops, disables, and removes."""
-        from sparkrun.cli._export import _render_uninstall_script
+        from sparkrun.orchestration.systemd_service import render_uninstall_script as _render_uninstall_script
 
         script = _render_uninstall_script(
             slug="test-recipe",
@@ -699,7 +699,7 @@ class TestExportSystemdCommand:
 
     def test_render_sudo_install_script(self):
         """Test that _render_sudo_install_script writes unit and enables service."""
-        from sparkrun.cli._export import _render_sudo_install_script
+        from sparkrun.orchestration.systemd_service import render_sudo_install_script as _render_sudo_install_script
 
         unit_contents = "[Unit]\nDescription=test\n[Service]\nType=simple\n"
         script = _render_sudo_install_script(
@@ -737,7 +737,7 @@ class TestExportSystemdCommand:
         """Test that --service-name overrides the slug in generated output."""
         # Mock _detect_remote_sparkrun to avoid SSH
         monkeypatch.setattr(
-            "sparkrun.cli._export._detect_remote_sparkrun",
+            "sparkrun.orchestration.systemd_service.detect_remote_command",
             lambda host, ssh_kwargs, dry_run=False: ("/usr/local/bin/sparkrun", "/home/user"),
         )
 
@@ -751,7 +751,7 @@ class TestExportSystemdCommand:
     def test_export_systemd_dry_run(self, runner, monkeypatch):
         """Test dry-run mode prints unit file and scripts."""
         monkeypatch.setattr(
-            "sparkrun.cli._export._detect_remote_sparkrun",
+            "sparkrun.orchestration.systemd_service.detect_remote_command",
             lambda host, ssh_kwargs, dry_run=False: ("/usr/local/bin/sparkrun", "/home/user"),
         )
 
@@ -793,7 +793,7 @@ class TestExportSystemdCommand:
             lambda cid, cache_dir=None: meta if cid == cluster_id else None,
         )
         monkeypatch.setattr(
-            "sparkrun.cli._export._detect_remote_sparkrun",
+            "sparkrun.orchestration.systemd_service.detect_remote_command",
             lambda host, ssh_kwargs, dry_run=False: ("/usr/local/bin/sparkrun", "/home/user"),
         )
 
@@ -807,7 +807,7 @@ class TestExportSystemdCommand:
         from sparkrun.orchestration.ssh import RemoteResult
 
         monkeypatch.setattr(
-            "sparkrun.cli._export._detect_remote_sparkrun",
+            "sparkrun.orchestration.systemd_service.detect_remote_command",
             lambda host, ssh_kwargs, dry_run=False: ("/usr/local/bin/sparkrun", "/home/user"),
         )
 
@@ -866,11 +866,13 @@ class TestExportSystemdCommand:
                 return None, None  # first detect fails
             return "/home/user/.local/bin/sparkrun", "/home/user"
 
-        def mock_install(host, ssh_kwargs, dry_run=False):
-            return True
+        def mock_install(host, ssh_kwargs, *, channel, dry_run=False):
+            from sparkrun.orchestration.systemd_service import RemoteBootstrapResult
 
-        monkeypatch.setattr("sparkrun.cli._export._detect_remote_sparkrun", mock_detect)
-        monkeypatch.setattr("sparkrun.cli._export._install_remote_sparkrun", mock_install)
+            return RemoteBootstrapResult(success=True, requirement="sparkrun")
+
+        monkeypatch.setattr("sparkrun.orchestration.systemd_service.detect_remote_command", mock_detect)
+        monkeypatch.setattr("sparkrun.orchestration.systemd_service.bootstrap_remote_command", mock_install)
         monkeypatch.setattr("sparkrun.cli._export._do_install", lambda *args: None)
 
         result = runner.invoke(

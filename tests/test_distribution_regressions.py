@@ -339,7 +339,7 @@ def test_a_malformed_integration_selection_does_not_fail_initialization(tmp_path
 
 @pytest.mark.parametrize("owner", ["jetsonrun", "sparkrun", "legacy", "unrelated"])
 def test_systemd_install_checks_owner_before_replacement(tmp_path, owner):
-    from sparkrun.cli._export import _render_sudo_install_script
+    from sparkrun.orchestration.systemd_service import render_sudo_install_script as _render_sudo_install_script
 
     unit = tmp_path / "sparkrun-demo.service"
     original = {
@@ -348,7 +348,7 @@ def test_systemd_install_checks_owner_before_replacement(tmp_path, owner):
     }.get(owner, "# sparkrun.distribution=%s\n[Unit]\nDescription=previous\n" % owner)
     unit.write_text(original)
     replacement = "# sparkrun.distribution=sparkrun\n[Unit]\nDescription=replacement\n"
-    from sparkrun.cli._export import _service_artifacts
+    from sparkrun.orchestration.systemd_service import service_artifacts as _service_artifacts
 
     for artifact in _service_artifacts("demo", "demo", str(tmp_path)):
         path = Path(artifact)
@@ -369,7 +369,7 @@ def test_systemd_install_checks_owner_before_replacement(tmp_path, owner):
 
 @pytest.mark.parametrize("foreign_target", ["unit", "recipe", "cluster"])
 def test_service_user_install_preflights_all_artifacts(tmp_path, foreign_target):
-    from sparkrun.cli._export import _render_install_script
+    from sparkrun.orchestration.systemd_service import render_install_script as _render_install_script
 
     service_dir = tmp_path / ".config/sparkrun/services/demo"
     service_dir.mkdir(parents=True)

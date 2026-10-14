@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from sparkrun.core.application_profile import render_identity_text
 
-from sparkrun.core.application_profile import get_application_profile, resource_name, child_environment
-
 import logging
-import os
 import sys
 import json
-import textwrap
 from pathlib import Path
+from typing import NoReturn
 
 import click
 import yaml
@@ -28,14 +25,13 @@ from ._common import (
     dry_run_option,
     host_options,
     recipe_override_options,
-    resolve_cluster_config,
     json_option,
     print_json,
 )
 
-# NOTE: _resolve_hosts_or_exit is retained in _export.py because the internal
-# helpers (_resolve_recipe_for_systemd, export_running) use it conditionally
-# and do not map cleanly to the @with_host_context decorator pattern.
+# NOTE: _resolve_hosts_or_exit is retained in _export.py because export_running
+# uses it conditionally and does not map cleanly to the @with_host_context
+# decorator pattern.
 
 logger = logging.getLogger(__name__)
 
@@ -353,448 +349,8 @@ def _output_export(recipe, output_json, save_path, overrides=None, container_ima
 
 
 # ---------------------------------------------------------------------------
-# systemd export helpers
+# systemd export (renderer over sparkrun.api.systemd_export)
 # ---------------------------------------------------------------------------
-
-_SYSTEMD_UNIT_TEMPLATE = textwrap.dedent("""\
-    # sparkrun.distribution={owner}
-    [Unit]
-    Description={app_command} inference: {recipe_name} ({model})
-    After=network-online.target docker.service
-    Wants=network-online.target
-    Requires=docker.service
-
-    [Service]
-    Type=simple
-    User={ssh_user}
-    Group={ssh_user}
-    ExecStart={sparkrun_path} run {service_dir}/recipe.yaml \\
-        --cluster {cluster_name} --foreground --no-follow
-    Restart=on-failure
-    RestartSec=30
-    TimeoutStartSec=600
-    TimeoutStopSec=120
-    Environment=SPARKRUN_APPLICATION_PROFILE={profile_ref}
-    Environment=HOME={user_home}
-    Environment=PATH=/usr/local/bin:/usr/bin:/bin:{extra_path}
-    WorkingDirectory={user_home}
-    StandardOutput=journal
-    StandardError=journal
-    SyslogIdentifier={namespace}-{slug}
-
-    [Install]
-    WantedBy=multi-user.target
-""")
-
-
-def _render_systemd_unit(slug, recipe, cluster_name, ssh_user, sparkrun_path, user_home):
-    """Render a systemd unit file from template values."""
-    extra_path = os.path.dirname(sparkrun_path) if sparkrun_path else ""
-    service_dir = "%s/.config/%s/services/%s" % (user_home, get_application_profile().config_namespace, slug)
-    return _SYSTEMD_UNIT_TEMPLATE.format(
-        app_command=get_application_profile().command,
-        namespace=get_application_profile().resource_namespace,
-        owner=get_application_profile().id,
-        profile_ref=child_environment()["SPARKRUN_APPLICATION_PROFILE"],
-        recipe_name=recipe.name,
-        model=recipe.model,
-        slug=slug,
-        ssh_user=ssh_user,
-        sparkrun_path=sparkrun_path,
-        service_dir=service_dir,
-        cluster_name=cluster_name,
-        user_home=user_home,
-        extra_path=extra_path,
-    )
-
-
-def _service_owner_guard(path, *, unit=False):
-    """Reject foreign artifacts before installing or removing service files."""
-    from sparkrun.utils.shell import quote
-
-    legacy_check = 'grep -q "^Description=sparkrun inference:" "$_artifact"' if unit else "true"
-    return """_artifact={path}
-if [ -e "$_artifact" ]; then
-    _owner=$(sed -n 's/^# sparkrun.distribution=//p; s/^distribution: *//p' "$_artifact" | sort -u)
-    if [ "$_owner" != {owner} ]; then
-        if [ -n "$_owner" ] || [ {owner} != sparkrun ] || ! {legacy}; then
-            echo "Refusing to replace service artifact owned by another application: $_artifact" >&2
-            exit 1
-        fi
-    fi
-fi""".format(path=quote(path), owner=quote(get_application_profile().id), legacy=legacy_check)
-
-
-def _service_artifacts(slug, cluster_name, user_home):
-    root = "%s/.config/%s" % (user_home, get_application_profile().config_namespace)
-    return (
-        "%s/services/%s/recipe.yaml" % (root, slug),
-        "%s/services/%s/cluster.yaml" % (root, slug),
-        "%s/clusters/%s.yaml" % (root, cluster_name),
-    )
-
-
-def _service_guards(slug, cluster_name, user_home):
-    unit = "/etc/systemd/system/%s.service" % resource_name("-%s" % slug)
-    return "\n".join(
-        [_service_owner_guard(unit, unit=True), *(_service_owner_guard(p) for p in _service_artifacts(slug, cluster_name, user_home))]
-    )
-
-
-def _service_lock(user_home, *, unit_path=None):
-    """Lock the persistent home directory before the privileged unit lock.
-
-    Both phases can lock this inode, and service removal cannot unlink it.
-    Sharing it also serializes services referencing the same cluster file.
-    """
-    from sparkrun.utils.shell import quote
-
-    script = "exec 9<%s\nflock -x 9" % quote(user_home)
-    if unit_path is not None:
-        script += "\nexec 8>%s\nflock -x 8" % quote(unit_path + ".lock")
-    return script
-
-
-def _render_install_script(slug, recipe_yaml, cluster_yaml, cluster_name, user_home):
-    """Render user-level install script (no sudo needed)."""
-    service_dir = "%s/.config/%s/services/%s" % (user_home, get_application_profile().config_namespace, slug)
-    clusters_dir = "%s/.config/%s/clusters" % (user_home, get_application_profile().config_namespace)
-    return textwrap.dedent("""\
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        {lock}
-        {guards}
-        mkdir -p '{service_dir}' '{clusters_dir}'
-        _recipe_tmp=$(mktemp '{service_dir}/.recipe.XXXXXX')
-        _cluster_tmp=$(mktemp '{service_dir}/.cluster.XXXXXX')
-        _definition_tmp=$(mktemp '{clusters_dir}/.cluster.XXXXXX')
-        trap 'rm -f "$_recipe_tmp" "$_cluster_tmp" "$_definition_tmp"' EXIT
-
-        # Write baked recipe
-        cat > "$_recipe_tmp" << 'SPARKRUN_RECIPE_EOF'
-        # sparkrun.distribution={owner}
-        {recipe_yaml}
-        SPARKRUN_RECIPE_EOF
-
-        # Write cluster reference
-        cat > "$_cluster_tmp" << 'SPARKRUN_CLUSTER_EOF'
-        # sparkrun.distribution={owner}
-        {cluster_yaml}
-        SPARKRUN_CLUSTER_EOF
-
-        # Write cluster definition for sparkrun run --cluster
-        cp "$_cluster_tmp" "$_definition_tmp"
-        mv -f "$_recipe_tmp" '{service_dir}/recipe.yaml'
-        mv -f "$_cluster_tmp" '{service_dir}/cluster.yaml'
-        mv -f "$_definition_tmp" '{clusters_dir}/{cluster_name}.yaml'
-
-        echo "Service files installed to {service_dir}"
-    """).format(
-        lock=_service_lock(user_home),
-        guards=_service_guards(slug, cluster_name, user_home),
-        owner=get_application_profile().id,
-        service_dir=service_dir,
-        clusters_dir=clusters_dir,
-        cluster_name=cluster_name,
-        recipe_yaml=recipe_yaml,
-        cluster_yaml=cluster_yaml,
-    )
-
-
-def _render_sudo_install_script(slug, unit_contents, *, user_home, cluster_name):
-    """Render sudo install script (writes unit file, enables service)."""
-    unit_path = "/etc/systemd/system/%s.service" % resource_name("-%s" % slug)
-    return textwrap.dedent("""\
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        {lock}
-        {guards}
-        {required}
-        _unit_tmp=$(mktemp '{unit_path}.XXXXXX')
-        trap 'rm -f "$_unit_tmp"' EXIT
-        cat > "$_unit_tmp" << 'SPARKRUN_UNIT_EOF'
-        {unit_contents}
-        SPARKRUN_UNIT_EOF
-        chmod 644 "$_unit_tmp"
-        mv -f "$_unit_tmp" '{unit_path}'
-
-        # Reload systemd and enable service
-        systemctl daemon-reload
-        systemctl enable '{namespace}-{slug}'
-
-        echo "Service {namespace}-{slug} installed and enabled"
-    """).format(
-        namespace=get_application_profile().resource_namespace,
-        unit_path=unit_path,
-        lock=_service_lock(user_home, unit_path=unit_path),
-        guards=_service_guards(slug, cluster_name, user_home),
-        required="\n".join(
-            "test -f '%s' || { echo 'Service files missing; retry installation' >&2; exit 1; }" % p
-            for p in _service_artifacts(slug, cluster_name, user_home)
-        ),
-        slug=slug,
-        unit_contents=unit_contents,
-    )
-
-
-def _render_uninstall_script(slug, cluster_name, user_home):
-    """Render uninstall script (sudo: stop, disable, remove unit; user: remove service dir)."""
-    service_dir = "%s/.config/%s/services/%s" % (user_home, get_application_profile().config_namespace, slug)
-    cluster_file = "%s/.config/%s/clusters/%s.yaml" % (user_home, get_application_profile().config_namespace, cluster_name)
-    unit_path = "/etc/systemd/system/%s.service" % resource_name("-%s" % slug)
-    return textwrap.dedent("""\
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        SERVICE_NAME='{namespace}-{slug}'
-        UNIT_PATH='/etc/systemd/system/{namespace}-{slug}.service'
-
-        {lock}
-        {guards}
-
-        # Stop and disable if active
-        if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-            systemctl stop "$SERVICE_NAME"
-            echo "Stopped $SERVICE_NAME"
-        fi
-        if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-            systemctl disable "$SERVICE_NAME"
-            echo "Disabled $SERVICE_NAME"
-        fi
-
-        # Remove unit file
-        if [ -f "$UNIT_PATH" ]; then
-            rm -f "$UNIT_PATH"
-            systemctl daemon-reload
-            echo "Removed $UNIT_PATH"
-        fi
-
-        # Remove service directory and cluster definition
-        rm -rf '{service_dir}'
-        rm -f '{cluster_file}'
-        echo "Removed service files for {slug}"
-    """).format(
-        namespace=get_application_profile().resource_namespace,
-        lock=_service_lock(user_home, unit_path=unit_path),
-        guards=_service_guards(slug, cluster_name, user_home),
-        slug=slug,
-        service_dir=service_dir,
-        cluster_file=cluster_file,
-    )
-
-
-def _detect_remote_sparkrun(host, ssh_kwargs, dry_run=False):
-    """Detect sparkrun path and user home on a remote host.
-
-    Returns (sparkrun_path, user_home) on success, or (None, None) if not found.
-    """
-    from sparkrun.orchestration.ssh import run_remote_script
-
-    script = textwrap.dedent("""\
-        #!/usr/bin/env bash
-        set -euo pipefail
-        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-        SPARKRUN_PATH=$(which @APP_COMMAND@ 2>/dev/null || true)
-        if [ -z "$SPARKRUN_PATH" ]; then
-            echo "ERROR: sparkrun not found on PATH" >&2
-            exit 1
-        fi
-        echo "$SPARKRUN_PATH"
-        echo "$HOME"
-    """).replace("@APP_COMMAND@", get_application_profile().command)
-
-    if dry_run:
-        return "/usr/local/bin/" + get_application_profile().command, "/home/user"
-
-    result = run_remote_script(host, script, **ssh_kwargs, timeout=15)
-    if not result.success:
-        return None, None
-
-    lines = result.stdout.strip().splitlines()
-    if len(lines) < 2:
-        return None, None
-
-    return lines[0].strip(), lines[1].strip()
-
-
-def _install_remote_sparkrun(host, ssh_kwargs, dry_run=False):
-    """Bootstrap a fresh remote uv tool installation, only for explicit --install.
-
-    Never repair/replace an existing environment here: a missing PATH shim does
-    not mean its daemons have stopped. Replacements belong to setup install's
-    destination-aware runtime guard. Returns True on success, False on failure.
-    """
-    from sparkrun.orchestration.ssh import run_remote_script
-
-    from sparkrun.core.channels import channel_requirement
-    from sparkrun.core.config import SparkrunConfig
-    from sparkrun.utils.shell import quote
-    import re
-
-    requirement = channel_requirement(SparkrunConfig().self_update_channel)
-    package = re.sub(r"[-_.]+", "-", get_application_profile().package).lower()
-    script = (
-        textwrap.dedent("""\
-        #!/usr/bin/env bash
-        set -euo pipefail
-        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-        UV_PATH=$(which uv 2>/dev/null || true)
-        if [ -z "$UV_PATH" ]; then
-            echo "ERROR: uv not found — cannot auto-install sparkrun" >&2
-            echo "Install uv first: https://docs.astral.sh/uv/" >&2
-            exit 1
-        fi
-        TOOL_DIR=$("$UV_PATH" tool dir)
-        case "$TOOL_DIR" in
-            /*) ;;
-            *) echo "ERROR: Cannot locate the destination uv tools directory" >&2; exit 1 ;;
-        esac
-        if [ -e "$TOOL_DIR"/@PACKAGE@ ] || [ -L "$TOOL_DIR"/@PACKAGE@ ]; then
-            echo "ERROR: Existing uv environment found; automatic replacement is disabled." >&2
-            echo "Stop/drain its daemons and workers, then run the application's setup install command remotely." >&2
-            exit 1
-        fi
-        "$UV_PATH" tool install @REQUIREMENT@
-    """)
-        .replace("@PACKAGE@", quote(package))
-        .replace("@REQUIREMENT@", quote(requirement))
-    )
-
-    if dry_run:
-        click.echo("Would install on %s via: uv tool install %s (only if its uv environment is absent)" % (host, quote(requirement)))
-        return True
-
-    result = run_remote_script(host, script, **ssh_kwargs, timeout=120)
-    if result.stderr.strip():
-        click.echo(result.stderr.strip(), err=True)
-    return result.success
-
-
-def _resolve_recipe_for_systemd(
-    target,
-    config,
-    hosts,
-    hosts_file,
-    cluster_name,
-    options,
-    tensor_parallel,
-    pipeline_parallel,
-    data_parallel,
-    gpu_mem,
-    max_model_len,
-    image,
-    port,
-    served_model_name,
-    *,
-    sctx=None,
-):
-    """Resolve recipe, hosts, and overrides for the systemd command.
-
-    Returns (recipe, overrides, host_list, effective_cluster_name).
-    """
-    from sparkrun.orchestration.job_metadata import load_job_metadata
-    from sparkrun.core.recipe import Recipe
-
-    # If target is a cluster_id, reconstruct from job metadata
-    if (cluster_id := _is_cluster_id(target)) is not None:
-        meta = load_job_metadata(cluster_id, cache_dir=str(config.cache_dir))
-        if not meta:
-            click.echo("Error: No job metadata found for '%s'." % target, err=True)
-            sys.exit(1)
-
-        recipe_state = meta.get("recipe_state")
-        meta_overrides = meta.get("overrides", {}) or {}
-        effective_image = meta.get("effective_container_image")
-        meta_hosts = meta.get("hosts", [])
-
-        if recipe_state:
-            recipe = Recipe._deserialize(recipe_state)
-        else:
-            recipe_name = meta.get("recipe")
-            if not recipe_name:
-                click.echo("Error: Job metadata has no recipe name or state.", err=True)
-                sys.exit(1)
-            recipe, _, _ = _load_recipe(config, recipe_name)
-
-        if effective_image:
-            recipe.container = effective_image
-
-        # Use hosts from metadata if not overridden
-        if not hosts and not hosts_file and not cluster_name and meta_hosts:
-            host_list = meta_hosts
-        else:
-            host_list, _ = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config)
-
-        return recipe, meta_overrides, host_list
-
-    # Target is a recipe name
-    recipe, _, _ = _load_recipe(config, target, resolve=False)
-
-    # Build overrides from CLI options
-    extra_kw = {}
-    if port is not None:
-        extra_kw["port"] = port
-    if served_model_name is not None:
-        extra_kw["served_model_name"] = served_model_name
-
-    recipe, overrides = _apply_recipe_overrides(
-        options,
-        tensor_parallel=tensor_parallel,
-        pipeline_parallel=pipeline_parallel,
-        data_parallel=data_parallel,
-        gpu_mem=gpu_mem,
-        max_model_len=max_model_len,
-        image=image,
-        recipe=recipe,
-        **extra_kw,
-    )
-
-    host_list, _ = _resolve_hosts_or_exit(hosts, hosts_file, cluster_name, config)
-    host_list = _trim_hosts_via_api(host_list, recipe, overrides, sctx=sctx)
-
-    return recipe, overrides, host_list
-
-
-def _trim_hosts_via_api(host_list, recipe, overrides, *, sctx=None):
-    """Resolve ``host_list`` to the scheduler's effective hosts via ``api.schedule``.
-
-    Mirrors the placement-driven host selection ``api.run`` performs so
-    the systemd export targets the same hosts the launcher would have
-    used.  Returns the original list when there is no multi-host
-    parallelism to schedule.
-    """
-    if len(host_list) <= 1:
-        return host_list
-
-    import sparkrun.api as api
-    from sparkrun.core.parallelism import extract_parallelism
-    from sparkrun.core.scheduler import SchedulingRequest
-
-    parallelism = extract_parallelism(recipe.build_config_chain(overrides))
-    if not any(getattr(parallelism, k) > 1 for k in ("tensor_parallel", "pipeline_parallel", "data_parallel")):
-        return host_list
-    request = SchedulingRequest(
-        parallelism=parallelism,
-        hosts=tuple(host_list),
-        host_hardware=None,
-        layout=getattr(recipe, "layout", None),
-        resources=None,
-    )
-    result = api.schedule(request, sctx=sctx)
-    return list(result.assignment.hosts_used)
-
-
-def _build_cluster_yaml(cluster_name, hosts, ssh_user=None):
-    """Build a cluster definition YAML string."""
-    cluster_def = {
-        "name": cluster_name,
-        "hosts": hosts,
-    }
-    if ssh_user:
-        cluster_def["user"] = ssh_user
-    return yaml.safe_dump(cluster_def, default_flow_style=False)
 
 
 @export.command("systemd")
@@ -841,6 +397,9 @@ def export_systemd(
     paths. Installation can bootstrap a missing uv tool, but never replaces an
     existing environment. Use setup install on that host to repair/update it.
 
+    The service runs against a copy of the cluster (hosts, user, executor,
+    transport, scheduler), so placement is decided by run at each start.
+
     \b
     Examples:
       {app_command} export systemd qwen3-1.7b --cluster mylab
@@ -848,6 +407,10 @@ def export_systemd(
       {app_command} export systemd qwen3-1.7b --cluster mylab --uninstall
       {app_command} export systemd e5f6a7b8 --install
     """
+    from sparkrun import api
+    from sparkrun.api import systemd_export as svc
+    from sparkrun.cli._common import resolve_host_context
+
     if do_install and do_uninstall:
         click.echo("Error: --install and --uninstall are mutually exclusive.", err=True)
         sys.exit(1)
@@ -855,216 +418,177 @@ def export_systemd(
     if start:
         do_install = True
 
-    config, _ = _get_config_and_registry()
     sctx = _get_context(ctx)
+    config = sctx.config
 
-    # Resolve recipe, overrides, and hosts
-    recipe, overrides, host_list = _resolve_recipe_for_systemd(
-        target,
-        config,
-        hosts,
-        hosts_file,
-        cluster_name,
-        options,
-        tensor_parallel,
-        pipeline_parallel,
-        data_parallel,
-        gpu_mem,
-        max_model_len,
-        image,
-        port,
-        served_model_name,
-        sctx=sctx,
-    )
+    if (cluster_id := _is_cluster_id(target)) is not None:
+        # A recorded workload: its own hosts and cluster unless overridden.
+        source = {}
+        if hosts or hosts_file or cluster_name:
+            hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx.variables, sctx=sctx)
+            source = {"hosts": tuple(hctx.host_list), "cluster": hctx.cluster_name}
+        export_options = svc.SystemdExportOptions(job=cluster_id, service_name=service_name, dry_run=dry_run, **source)
+    else:
+        recipe, _, _ = _load_recipe(config, target, resolve=False)
+        extra_kw = {}
+        if port is not None:
+            extra_kw["port"] = port
+        if served_model_name is not None:
+            extra_kw["served_model_name"] = served_model_name
+        recipe, overrides = _apply_recipe_overrides(
+            options,
+            tensor_parallel=tensor_parallel,
+            pipeline_parallel=pipeline_parallel,
+            data_parallel=data_parallel,
+            gpu_mem=gpu_mem,
+            max_model_len=max_model_len,
+            image=image,
+            recipe=recipe,
+            **extra_kw,
+        )
+        hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx.variables, sctx=sctx)
+        export_options = svc.SystemdExportOptions(
+            recipe=recipe,
+            overrides=dict(overrides),
+            hosts=tuple(hctx.host_list),
+            cluster=hctx.cluster_name,
+            service_name=service_name,
+            dry_run=dry_run,
+        )
 
-    head_host = host_list[0]
-    slug = service_name or recipe.slug
-    systemd_cluster_name = "%s-systemd" % slug
-
-    # Resolve SSH user
-    from sparkrun.orchestration.primitives import build_ssh_kwargs
-    from ._common import _get_cluster_manager
-
-    cluster_mgr = _get_cluster_manager()
-    cc = resolve_cluster_config(cluster_name, hosts, hosts_file, cluster_mgr)
-    ssh_user = cc.user or config.ssh_user or os.environ.get("USER", "root")
-    ssh_kwargs = build_ssh_kwargs(config)
-    if ssh_user:
-        ssh_kwargs["ssh_user"] = ssh_user
-
-    # Generate artifacts
-    recipe_yaml = recipe.export(overrides=overrides)
-    cluster_yaml = _build_cluster_yaml(systemd_cluster_name, host_list, ssh_user=ssh_user)
+    try:
+        plan = svc.plan(export_options, sctx=sctx)
+    except api.JobNotFound:
+        _systemd_error("No job metadata found for '%s'." % target)
+    except api.SparkrunError as exc:
+        _systemd_error(exc)
 
     if do_uninstall:
-        _do_uninstall(slug, systemd_cluster_name, head_host, ssh_user, ssh_kwargs, dry_run)
+        _do_uninstall(plan)
         return
 
     # Rendering needs real deployment paths, but cannot authorize installation.
-    sparkrun_path, user_home = _detect_remote_sparkrun(head_host, ssh_kwargs, dry_run=dry_run)
-    if sparkrun_path is None:
+    host = svc.locate_host(plan)
+    if host is None:
+        head = plan.head_host
         if not do_install:
             raise click.ClickException(
                 render_identity_text(
                     "{app_command} not found on '%s'; no installation was attempted. "
                     "Install it on the head node, or re-run with --install to deploy "
-                    "(--dry-run previews artifacts with placeholder paths)." % head_host
+                    "(--dry-run previews artifacts with placeholder paths)." % head
                 )
             )
-        click.echo(render_identity_text("{app_command} not found on %s, attempting auto-install..." % head_host))
-        if not _install_remote_sparkrun(head_host, ssh_kwargs, dry_run=dry_run):
-            click.echo(render_identity_text("Error: Failed to install {app_command} on '%s'." % head_host), err=True)
+        click.echo(render_identity_text("{app_command} not found on %s, attempting auto-install..." % head))
+        try:
+            bootstrap = svc.bootstrap_host(plan)
+        except api.SparkrunError as exc:
+            _systemd_error(exc)
+        if bootstrap.dry_run:
+            from sparkrun.utils.shell import quote
+
+            click.echo(
+                "Would install on %s via: uv tool install %s (only if its uv environment is absent)" % (head, quote(bootstrap.requirement))
+            )
+        elif bootstrap.output:
+            click.echo(bootstrap.output, err=True)
+        if not bootstrap.success:
+            click.echo(render_identity_text("Error: Failed to install {app_command} on '%s'." % head), err=True)
             click.echo("  Use the application's guarded setup install command on the head node, then retry.", err=True)
             sys.exit(1)
-        sparkrun_path, user_home = _detect_remote_sparkrun(head_host, ssh_kwargs, dry_run=dry_run)
-        if sparkrun_path is None:
-            click.echo(render_identity_text("Error: {app_command} installed but not found on PATH on '%s'." % head_host), err=True)
+        host = svc.locate_host(plan)
+        if host is None:
+            click.echo(render_identity_text("Error: {app_command} installed but not found on PATH on '%s'." % head), err=True)
             sys.exit(1)
-        click.echo(render_identity_text("{app_command} installed on %s" % head_host))
+        click.echo(render_identity_text("{app_command} installed on %s" % head))
 
-    unit_contents = _render_systemd_unit(
-        slug,
-        recipe,
-        systemd_cluster_name,
-        ssh_user,
-        sparkrun_path,
-        user_home,
-    )
-    install_script = _render_install_script(
-        slug,
-        recipe_yaml,
-        cluster_yaml,
-        systemd_cluster_name,
-        user_home,
-    )
-    sudo_install_script = _render_sudo_install_script(slug, unit_contents, user_home=user_home, cluster_name=systemd_cluster_name)
+    artifacts = svc.render(plan, host)
 
     if not do_install:
-        # Dry-run mode: display all generated artifacts
+        # Review mode: display all generated artifacts
         click.echo("=" * 60)
-        click.echo(render_identity_text("systemd service: {resource_namespace}-%s" % slug))
-        click.echo("Head node: %s" % head_host)
-        click.echo("Cluster hosts: %s" % ", ".join(host_list))
+        click.echo(render_identity_text("systemd service: {resource_namespace}-%s" % plan.slug))
+        click.echo("Head node: %s" % plan.head_host)
+        click.echo("Cluster hosts: %s" % ", ".join(plan.service_cluster.hosts))
         click.echo("=" * 60)
         click.echo()
-        click.echo(render_identity_text("--- Unit file: /etc/systemd/system/{resource_namespace}-%s.service ---" % slug))
-        click.echo(unit_contents)
+        click.echo(render_identity_text("--- Unit file: /etc/systemd/system/{resource_namespace}-%s.service ---" % plan.slug))
+        click.echo(artifacts.unit_text)
         click.echo("--- Baked recipe ---")
-        click.echo(recipe_yaml)
-        click.echo("--- Cluster definition: %s ---" % systemd_cluster_name)
-        click.echo(cluster_yaml)
+        click.echo(plan.recipe_yaml)
+        click.echo("--- Cluster definition: %s ---" % plan.cluster_name)
+        click.echo(plan.cluster_yaml)
         click.echo("--- Install script (user-level) ---")
-        click.echo(install_script)
+        click.echo(artifacts.install_script)
         click.echo("--- Install script (sudo) ---")
-        click.echo(sudo_install_script)
+        click.echo(artifacts.sudo_install_script)
         click.echo("To deploy, re-run with --install")
         return
 
-    # --install mode
-    _do_install(slug, head_host, ssh_user, ssh_kwargs, install_script, sudo_install_script, start, dry_run)
+    _do_install(plan, artifacts, start)
 
 
-def _do_install(slug, head_host, ssh_user, ssh_kwargs, install_script, sudo_install_script, start, dry_run):
+def _systemd_error(exc) -> NoReturn:
+    """Print an export failure (with any remote stderr) and exit 1."""
+    click.echo("Error: %s" % exc, err=True)
+    detail = getattr(exc, "detail", "")
+    if detail:
+        click.echo("  %s" % detail, err=True)
+    sys.exit(1)
+
+
+def _do_install(plan, artifacts, start):
     """Deploy service files and systemd unit to head node."""
-    from sparkrun.orchestration.ssh import run_remote_script
-    from sparkrun.orchestration.sudo import run_sudo_script_on_host
+    from sparkrun import api
+    from sparkrun.api import systemd_export as svc
 
-    service_name = resource_name("-%s" % slug)
+    try:
+        # Step 1: User-level script (create dirs, write recipe + cluster YAML)
+        click.echo("Installing service files on %s..." % plan.head_host)
+        out = svc.install_files(plan, artifacts)
+        if out:
+            click.echo("  %s" % out)
 
-    # Step 1: User-level script (create dirs, write recipe + cluster YAML)
-    click.echo("Installing service files on %s..." % head_host)
-    r = run_remote_script(head_host, install_script, **ssh_kwargs, dry_run=dry_run)
-    if not r.success:
-        click.echo("Error: Failed to install service files on %s." % head_host, err=True)
-        if r.stderr.strip():
-            click.echo("  %s" % r.stderr.strip(), err=True)
-        sys.exit(1)
-    if r.stdout.strip():
-        click.echo("  %s" % r.stdout.strip())
+        # Step 2: Sudo script (write unit file, daemon-reload, enable)
+        click.echo("Installing systemd unit (requires sudo)...")
+        sudo_password = click.prompt("[sudo] password for %s" % plan.ssh_user, hide_input=True)
+        out = svc.install_unit(plan, artifacts, sudo_password=sudo_password)
+        if out:
+            click.echo("  %s" % out)
 
-    # Step 2: Sudo script (write unit file, daemon-reload, enable)
-    click.echo("Installing systemd unit (requires sudo)...")
-    sudo_password = click.prompt("[sudo] password for %s" % ssh_user, hide_input=True)
-    r = run_sudo_script_on_host(
-        head_host,
-        sudo_install_script,
-        sudo_password,
-        ssh_kwargs=ssh_kwargs,
-        dry_run=dry_run,
-    )
-    if not r.success:
-        click.echo("Error: Failed to install systemd unit on %s." % head_host, err=True)
-        if r.stderr.strip():
-            click.echo("  %s" % r.stderr.strip(), err=True)
-        sys.exit(1)
-    if r.stdout.strip():
-        click.echo("  %s" % r.stdout.strip())
-
-    # Step 3: Optionally start the service
-    if start:
-        click.echo("Starting %s..." % service_name)
-        start_script = "systemctl start '%s'" % service_name
-        r = run_sudo_script_on_host(
-            head_host,
-            start_script,
-            sudo_password,
-            ssh_kwargs=ssh_kwargs,
-            dry_run=dry_run,
-        )
-        if not r.success:
-            click.echo("Error: Failed to start %s." % service_name, err=True)
-            if r.stderr.strip():
-                click.echo("  %s" % r.stderr.strip(), err=True)
-            sys.exit(1)
-        click.echo("  %s started" % service_name)
+        # Step 3: Optionally start the service
+        if start:
+            click.echo("Starting %s..." % plan.service)
+            svc.start(plan, sudo_password=sudo_password)
+            click.echo("  %s started" % plan.service)
+    except api.SparkrunError as exc:
+        _systemd_error(exc)
 
     click.echo()
-    click.echo("Service %s installed on %s." % (service_name, head_host))
-    click.echo("  Status: systemctl status %s" % service_name)
-    click.echo("  Logs:   journalctl -u %s -f" % service_name)
+    click.echo("Service %s installed on %s." % (plan.service, plan.head_host))
+    click.echo("  Status: systemctl status %s" % plan.service)
+    click.echo("  Logs:   journalctl -u %s -f" % plan.service)
 
 
-def _do_uninstall(slug, cluster_name, head_host, ssh_user, ssh_kwargs, dry_run):
+def _do_uninstall(plan):
     """Remove service from head node."""
-    from sparkrun.orchestration.ssh import run_remote_command
-    from sparkrun.orchestration.sudo import run_sudo_script_on_host
+    from sparkrun import api
+    from sparkrun.api import systemd_export as svc
 
-    service_name = resource_name("-%s" % slug)
+    try:
+        uninstall_script = svc.render_uninstall(plan)
+        if plan.dry_run:
+            click.echo("[dry-run] Would uninstall %s from %s" % (plan.service, plan.head_host))
+            click.echo()
+            click.echo("--- Uninstall script ---")
+            click.echo(uninstall_script)
+            return
 
-    # Detect user home on the remote host
-    if dry_run:
-        user_home = "/home/%s" % ssh_user
-    else:
-        r = run_remote_command(head_host, "echo $HOME", **ssh_kwargs, timeout=10)
-        if not r.success:
-            click.echo("Error: Could not detect home directory on %s." % head_host, err=True)
-            sys.exit(1)
-        user_home = r.stdout.strip()
-
-    uninstall_script = _render_uninstall_script(slug, cluster_name, user_home)
-
-    if dry_run:
-        click.echo("[dry-run] Would uninstall %s from %s" % (service_name, head_host))
-        click.echo()
-        click.echo("--- Uninstall script ---")
-        click.echo(uninstall_script)
-        return
-
-    click.echo("Uninstalling %s from %s (requires sudo)..." % (service_name, head_host))
-    sudo_password = click.prompt("[sudo] password for %s" % ssh_user, hide_input=True)
-    r = run_sudo_script_on_host(
-        head_host,
-        uninstall_script,
-        sudo_password,
-        ssh_kwargs=ssh_kwargs,
-        dry_run=dry_run,
-    )
-    if not r.success:
-        click.echo("Error: Failed to uninstall %s on %s." % (service_name, head_host), err=True)
-        if r.stderr.strip():
-            click.echo("  %s" % r.stderr.strip(), err=True)
-        sys.exit(1)
-    if r.stdout.strip():
-        for line in r.stdout.strip().splitlines():
-            click.echo("  %s" % line)
-    click.echo("Service %s removed from %s." % (service_name, head_host))
+        click.echo("Uninstalling %s from %s (requires sudo)..." % (plan.service, plan.head_host))
+        sudo_password = click.prompt("[sudo] password for %s" % plan.ssh_user, hide_input=True)
+        out = svc.uninstall(plan, uninstall_script, sudo_password=sudo_password)
+    except api.SparkrunError as exc:
+        _systemd_error(exc)
+    for line in out.splitlines():
+        click.echo("  %s" % line)
+    click.echo("Service %s removed from %s." % (plan.service, plan.head_host))

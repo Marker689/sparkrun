@@ -30,7 +30,8 @@ party automation, the CLI itself) depend on.  Surfaces:
   Imported lazily, so ``import sparkrun.api`` stays cheap.
 - **Experimental** (may change in a minor release) — :mod:`sparkrun.api.workloads`,
   the lifecycle helpers ``wait_ready`` / ``post_launch`` / ``discovery_snapshot``
-  (:class:`PostLaunchResult`), :mod:`sparkrun.api.model_cache`, and the
+  (:class:`PostLaunchResult`), :mod:`sparkrun.api.model_cache`,
+  :mod:`sparkrun.api.systemd_export` (imported on demand), and the
   ``sparkrun.api.setup`` planning internals. See
   ``docs/DISTRIBUTION_API_MIGRATION.md``.
 

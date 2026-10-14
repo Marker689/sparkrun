@@ -17,7 +17,7 @@ def test_export_systemd_preserves_single_quotes(monkeypatch, tmp_path):
 
     # Mock detect_remote_sparkrun to avoid SSH
     monkeypatch.setattr(
-        "sparkrun.cli._export._detect_remote_sparkrun",
+        "sparkrun.orchestration.systemd_service.detect_remote_command",
         lambda host, ssh_kwargs, dry_run=False: ("/usr/local/bin/sparkrun", "/home/user"),
     )
 
@@ -57,8 +57,8 @@ def test_render_only_missing_remote_command_cannot_install(monkeypatch, tmp_path
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(yaml.safe_dump({"model": "test/model", "runtime": "vllm", "container": "test/image"}), encoding="utf-8")
     install = Mock(side_effect=AssertionError("render-only export cannot install"))
-    monkeypatch.setattr("sparkrun.cli._export._detect_remote_sparkrun", lambda *a, **kw: (None, None))
-    monkeypatch.setattr("sparkrun.cli._export._install_remote_sparkrun", install)
+    monkeypatch.setattr("sparkrun.orchestration.systemd_service.detect_remote_command", lambda *a, **kw: (None, None))
+    monkeypatch.setattr("sparkrun.orchestration.systemd_service.bootstrap_remote_command", install)
     result = CliRunner().invoke(main, ["export", "systemd", str(recipe), "--hosts", "example.invalid"])
     assert result.exit_code != 0
     assert "no installation was attempted" in result.output and "--install" in result.output
@@ -69,7 +69,7 @@ def test_render_only_missing_remote_command_cannot_install(monkeypatch, tmp_path
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("alternate_profile", [False, True])
 def test_remote_bootstrap_is_fresh_only_and_preserves_application_source(tmp_path, monkeypatch, existing, alternate_profile):
-    from sparkrun.cli._export import _install_remote_sparkrun
+    from sparkrun.orchestration.systemd_service import bootstrap_remote_command
     from sparkrun.core.application_profile import UpdateSource
     from test_application_profiles import alternate
 
@@ -105,19 +105,30 @@ def test_remote_bootstrap_is_fresh_only_and_preserves_application_source(tmp_pat
         return SimpleNamespace(success=result.returncode == 0, stderr=result.stderr)
 
     monkeypatch.setattr("sparkrun.orchestration.ssh.run_remote_script", transport)
-    assert _install_remote_sparkrun("unused.invalid", {}) is not existing
+    result = bootstrap_remote_command("unused.invalid", {}, channel="stable")
+    assert result.success is not existing and result.requirement == requirement
     if existing:
         assert not args.exists()
     else:
         assert args.read_text(encoding="utf-8").splitlines() == ["tool", "install", requirement]
 
 
-def test_remote_bootstrap_dry_run_is_read_only(monkeypatch, capsys):
-    from sparkrun.cli._export import _install_remote_sparkrun
+def test_remote_bootstrap_dry_run_is_read_only(monkeypatch, tmp_path):
+    from sparkrun.orchestration.systemd_service import bootstrap_remote_command
 
     run = Mock(side_effect=AssertionError("dry run cannot execute SSH"))
     monkeypatch.setattr("sparkrun.orchestration.ssh.run_remote_script", run)
-    assert _install_remote_sparkrun("unused.invalid", {}, dry_run=True)
-    output = capsys.readouterr().out
-    assert "uv tool install sparkrun" in output and "only if its uv environment is absent" in output
+    result = bootstrap_remote_command("unused.invalid", {}, channel="stable", dry_run=True)
+    assert result.success and result.dry_run and result.requirement == "sparkrun"
+    run.assert_not_called()
+
+    # The CLI renders the would-install line from that result.
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(yaml.safe_dump({"model": "test/model", "runtime": "vllm", "container": "test/image"}), encoding="utf-8")
+    found = iter([(None, None), ("/home/user/.local/bin/sparkrun", "/home/user")])
+    monkeypatch.setattr("sparkrun.orchestration.systemd_service.detect_remote_command", lambda *a, **kw: next(found))
+    monkeypatch.setattr("sparkrun.cli._export._do_install", lambda *args: None)
+    out = CliRunner().invoke(main, ["export", "systemd", str(recipe), "--hosts", "example.invalid", "--install", "--dry-run"])
+    assert out.exit_code == 0, out.output
+    assert "uv tool install sparkrun" in out.output and "only if its uv environment is absent" in out.output
     run.assert_not_called()
