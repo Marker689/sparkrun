@@ -18,19 +18,26 @@ def plugin_origin(module: str, directory: Path | None = None) -> Path | None:
     return physical_origin(module)
 
 
-def bundled_distribution(module: str, origin: Path | None) -> distributions.Distribution | None:
-    """Identify release-owned plugins, not arbitrary occupants of the namespace.
+def is_bundled_plugin(module: str, origin: Path | None) -> bool:
+    """True only for a release-owned plugin at its shipped location.
 
-    The explicit release inventory and physical path check also work for an
-    editable install, whose distribution RECORD does not list source files.
+    Namespace membership is not ownership: a separately installed package can
+    occupy ``sparkrun.plugins.<name>`` too. The explicit release inventory and
+    physical path check also work for an editable install, whose distribution
+    RECORD does not list source files.
     """
     from sparkrun.core.in_tree_plugins import BUNDLED_PLUGIN_NAMES
 
     name = module.removeprefix("sparkrun.plugins.")
     if module != f"sparkrun.plugins.{name}" or name not in BUNDLED_PLUGIN_NAMES or origin is None:
-        return None
+        return False
     expected = Path(__file__).resolve().parents[1] / "plugins" / name / "__init__.py"
-    if origin.resolve() != expected.resolve():
+    return origin.resolve() == expected.resolve()
+
+
+def bundled_distribution(module: str, origin: Path | None) -> distributions.Distribution | None:
+    """The owning distribution of a release-owned plugin (see :func:`is_bundled_plugin`)."""
+    if not is_bundled_plugin(module, origin):
         return None
     try:
         return distributions.distribution("sparkrun")

@@ -165,3 +165,33 @@ def test_an_unbound_plugin_is_skipped_loudly(plugin_package, caplog):
         assert load_in_tree_plugins(None, package="fake_plugins") == []
     assert "unflagged" in caplog.text
     assert "IN_TREE_PLUGIN_FEATURES" in caplog.text
+
+
+def test_only_release_owned_plugins_declare_at_the_in_tree_tier(plugin_package):
+    """Namespace membership is not ownership: a package that merely occupies the
+    in-tree plugin namespace must not be able to ship a trusted registry."""
+    from sparkrun.core.in_tree_plugins import in_tree_declaration_tier
+    from sparkrun.core.registry_defaults import DeclarationTier, iter_declared_registries, reset_declared_registries
+
+    assert in_tree_declaration_tier("sparkrun.plugins.lil") is DeclarationTier.IN_TREE
+    _write(
+        plugin_package,
+        "squatter",
+        """
+        from sparkrun.core.registry import RegistryEntry
+        from sparkrun.core.registry_defaults import register_default_registry
+
+        def register(v):
+            register_default_registry(
+                RegistryEntry(name="squatter", url="https://example.com/r.git", subpath="recipes", trusted=True),
+                owner="squatter",
+            )
+        """,
+    )
+    try:
+        assert load_in_tree_plugins(None, package="fake_plugins") == ["squatter"]
+        (declared,) = [d for d in iter_declared_registries() if d.entry.name == "squatter"]
+        assert declared.tier is DeclarationTier.OUT_OF_TREE
+        assert declared.effective_entry().trusted is False
+    finally:
+        reset_declared_registries()

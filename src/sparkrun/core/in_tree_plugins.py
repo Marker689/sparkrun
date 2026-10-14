@@ -57,7 +57,8 @@ BUNDLED_PLUGIN_NAMES = frozenset({"k8s", "lil", "oci_relay", "sparkarena", "lite
 #: that declared its own gate could only be consulted by importing it, which is
 #: exactly what the gate is meant to avoid.
 # SparkRoute and ColdSnap are not bundled, but keep their pre-import gates for
-# users who install their packages separately into this plugin namespace.
+# users who install their packages separately into this plugin namespace. Such
+# packages load at the out-of-tree declaration tier (in_tree_declaration_tier).
 IN_TREE_PLUGIN_FEATURES: dict[str, str | None] = {
     "litellm": None,
     "sparkroute": "gateway.sparkroute",
@@ -95,6 +96,19 @@ def plugin_application_profile_failure(name: str) -> str | None:
             "import a compatible plugin snapshot before using an alternate application profile"
         )
     return None
+
+
+def in_tree_declaration_tier(module: str) -> DeclarationTier:
+    """Declaration tier for a module found in the in-tree plugin namespace.
+
+    Only release-owned plugins at their shipped location get ``IN_TREE`` (which
+    lets a registry declaration ship trusted). A separately installed package
+    occupying ``sparkrun.plugins.<name>`` is third-party code like any other.
+    """
+    from sparkrun.core.managed_plugins import physical_origin
+    from sparkrun.core.plugin_metadata import is_bundled_plugin
+
+    return DeclarationTier.IN_TREE if is_bundled_plugin(module, physical_origin(module)) else DeclarationTier.OUT_OF_TREE
 
 
 def plugin_feature_flag(name: str) -> str | None:
@@ -187,7 +201,7 @@ def load_in_tree_plugins(v: "Variables", package: str | None = None) -> list[str
             load_and_register_plugin(
                 partial(importlib.import_module, dotted),
                 v,
-                tier=DeclarationTier.IN_TREE,
+                tier=in_tree_declaration_tier(dotted),
                 source=("in-tree", dotted, None),
                 identity=identities[name],
             )
