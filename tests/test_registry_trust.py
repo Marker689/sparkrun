@@ -266,6 +266,33 @@ class TestAddRegistryFromUrlTrustFlag:
         match = [e for e in loaded if e.name == "new1"][0]
         assert match.trusted is False
 
+    def test_a_later_reserved_name_adds_nothing(self, mgr):
+        """Validation covers the whole manifest before anything is saved, so a
+        reserved-prefix entry after a valid one cannot leave a half-added,
+        untrusted manifest behind."""
+        entries = [
+            RegistryEntry(name="fine", url="https://github.com/someone/recipes", subpath="r"),
+            RegistryEntry(name="official-mirror", url="https://github.com/someone/recipes", subpath="r2"),
+        ]
+        with mock.patch.object(mgr, "_discover_manifest_entries", return_value=entries):
+            with pytest.raises(RegistryError, match="nothing was changed"):
+                mgr.add_registry_from_url("https://github.com/someone/recipes", trust=True)
+        assert {e.name for e in mgr.list_registries(allow_discovery=False)}.isdisjoint({"fine", "official-mirror"})
+
+    def test_trust_applies_to_what_was_added_and_existing_names_are_kept(self, mgr):
+        mgr.add_registry(RegistryEntry(name="old", url="https://example.com/z", subpath="mine"))
+        entries = [
+            RegistryEntry(name="old", url="https://example.com/z", subpath="theirs"),
+            RegistryEntry(name="new", url="https://example.com/z", subpath="r"),
+        ]
+        with mock.patch.object(mgr, "_discover_manifest_entries", return_value=entries):
+            added = mgr.add_registry_from_url("https://example.com/z", trust=True)
+        assert [e.name for e in added] == ["new"]
+        loaded = {e.name: e for e in mgr._load_registries_from_file()}
+        assert loaded["new"].trusted is True
+        assert loaded["old"].trusted is False
+        assert loaded["old"].subpath == "mine"
+
 
 # ---------------------------------------------------------------------------
 # One-time migration of legacy registries.yaml

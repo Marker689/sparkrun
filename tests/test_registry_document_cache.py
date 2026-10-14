@@ -96,3 +96,29 @@ def test_a_concurrent_replace_is_not_cached_as_ours(manager, monkeypatch):
     manager._save_registries(manager._load_registries())
     monkeypatch.setattr(reg.os, "replace", real_replace)
     assert manager.get_registry("a").subpath == "theirs"
+
+
+@pytest.mark.skipif(not hasattr(reg.os, "umask") or reg.os.name != "posix", reason="POSIX umask")
+def test_writing_never_touches_the_process_umask(tmp_path, monkeypatch):
+    """Reading the umask means setting it to 0, which races every other thread
+    creating files in a long-lived host (sidecar, proxy daemon)."""
+    import os
+    import stat
+
+    previous = os.umask(0o027)
+    try:
+
+        def _forbidden(_value):
+            raise AssertionError("os.umask must not be called while writing registries.yaml")
+
+        monkeypatch.setattr(reg.os, "umask", _forbidden)
+        path = tmp_path / "fresh" / "registries.yaml"
+        reg._write_registries_document(path, {"registries": []})
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640  # 0644 with the umask applied by the kernel
+        path.chmod(0o600)
+        reg._write_registries_document(path, {"registries": [{"name": "a"}]})
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600  # an existing file keeps its mode
+        assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+    finally:
+        monkeypatch.undo()
+        os.umask(previous)

@@ -1066,23 +1066,28 @@ def _write_registries_document(path: Path, data: Any) -> None:
     concurrent writer that replaced it in between must not have our copy served
     under its key.
     """
-    import tempfile
+    import secrets
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = path.stat().st_mode & 0o777
     except FileNotFoundError:
-        mode = 0o644 & ~_current_umask()
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".%s." % path.name, suffix=".tmp")
+        mode = None
+    # A new file is created 0644 and the kernel applies the process umask.
+    # Reading the umask means setting it (os.umask), which races every other
+    # thread creating files in a long-lived host (sidecar, proxy daemon).
+    tmp = str(path.parent / (".%s.%s.tmp" % (path.name, secrets.token_hex(8))))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     try:
         with os.fdopen(fd, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
             f.flush()
             ours = os.fstat(f.fileno()).st_ino
-        try:
-            os.chmod(tmp, mode)  # keep the file's mode; mkstemp creates 0600. (os.fchmod is POSIX-only on 3.12.)
-        except OSError as error:
-            logger.debug("Could not set the mode of %s: %s", path, error)
+        if mode is not None:
+            try:
+                os.chmod(tmp, mode)  # keep an existing file's mode. (os.fchmod is POSIX-only on 3.12.)
+            except OSError as error:
+                logger.debug("Could not set the mode of %s: %s", path, error)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -1098,12 +1103,6 @@ def _write_registries_document(path: Path, data: Any) -> None:
         _DOCUMENT_CACHE[str(path)] = (key, deepcopy(data))
     else:
         _DOCUMENT_CACHE.pop(str(path), None)
-
-
-def _current_umask() -> int:
-    mask = os.umask(0)
-    os.umask(mask)
-    return mask
 
 
 def _document_bool(raw: dict, key: str, default: bool) -> bool:
@@ -2388,30 +2387,53 @@ class RegistryManager:
                 registries untrusted until an explicit opt-in.
 
         Returns:
-            List of RegistryEntry objects added.
+            List of RegistryEntry objects added. Names that already exist are
+            skipped (and logged), not replaced.
 
         Raises:
-            RegistryError: If clone fails, no manifest found, or URL is invalid.
+            RegistryError: If clone fails, no manifest found, the URL is
+                invalid, or any declared entry fails validation. Validation
+                covers the whole manifest before anything is written, so a
+                failure adds nothing.
         """
         try:
             validate_git_url(url)
         except ValueError as exc:
             raise RegistryError("Invalid registry URL: %s" % exc) from exc
         entries = self._discover_manifest_entries(url)
+        problems = []
+        seen: set[str] = set()
+        for entry in entries:
+            try:
+                validate_git_url(entry.url)
+                assert_safe_registry_entry(entry)
+                validate_registry_name(entry.name, entry.url)
+            except (ValueError, RegistryError) as exc:
+                problems.append("%s: %s" % (entry.name, exc))
+            if entry.name in seen:
+                problems.append("%s: declared more than once" % entry.name)
+            seen.add(entry.name)
+        if problems:
+            raise RegistryError("The manifest at %s cannot be added; nothing was changed. %s" % (url, "; ".join(problems)))
+
+        registries = self._load_registries(allow_discovery=False)
+        existing = {r.name for r in registries}
         added = []
         for entry in entries:
-            validate_registry_name(entry.name, entry.url)
-            try:
-                self.add_registry(entry)
-                added.append(entry)
-                logger.info("Added registry '%s' from manifest", entry.name)
-            except RegistryError:
+            if entry.name in existing:
                 logger.warning("Registry '%s' already exists, skipping", entry.name)
-        if trust and added:
-            # Flip the trust bit on every newly-added entry and persist.
-            for entry in added:
-                self.trust_registry(entry.name)
+                continue
+            if trust:
                 entry.trusted = True
+            registries.append(entry)
+            added.append(entry)
+        if added:
+            # One write: the new entries and their trust land together or not at all.
+            names = {entry.name for entry in added}
+            suppressed = [name for name in self._load_suppressed() if name not in names]
+            self._save_registries(registries, suppressed=suppressed)
+            for entry in added:
+                logger.info("Added registry '%s' from manifest%s", entry.name, " (trusted)" if entry.trusted else "")
         return added
 
     @staticmethod
