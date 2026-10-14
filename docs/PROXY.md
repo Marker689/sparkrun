@@ -395,14 +395,14 @@ Expected provider configuration, preparation, shutdown, and launch failures rais
 
 ### Gateway plugin contract
 
-`sparkrun.proxy.contracts` is the supported import for `ProxyModel`,
-`GatewayOperationError`, `GatewayQueryError`, and optional console/credential protocols. `ProxyModel` is
+Gateway providers import `GatewaySupervisor`, `register_gateway`, `ProxyModel`,
+`GatewayOperationError`, `GatewayQueryError`, and the optional console/credential
+protocols from `sparkrun.plugins`, the plugin author surface. `ProxyModel` is
 the same immutable class exported by `api.proxy`; providers and callers do not
 need separate copies of the model record.
 
 ```python
-from sparkrun.proxy.supervisor import GatewaySupervisor
-from sparkrun.proxy.contracts import ProxyModel, GatewayQueryError
+from sparkrun.plugins import GatewayQueryError, GatewaySupervisor, ProxyModel
 
 class ExampleGateway(GatewaySupervisor):
     gateway_name = "example"

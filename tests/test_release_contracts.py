@@ -97,9 +97,9 @@ def test_real_worker_marks_bad_plugin_result_failed(binding, monkeypatch):
 def execute(args, sctx, prompt): return {"count": "invalid"}
 def loader(): return execute
 def register(v):
-    from sparkrun.plugins import DaemonOp, register_daemon_op
+    from sparkrun.plugins import DaemonOp, register_plugin_daemon_op
     from sparkrun.api._wire import object_schema
-    register_daemon_op(DaemonOp("run", loader, result_schema=object_schema({"count": {"type": "integer"}}, ["count"])))
+    register_plugin_daemon_op(DaemonOp("run", loader, result_schema=object_schema({"count": {"type": "integer"}}, ["count"])))
 """)
     binding.config_path.write_text(
         "features:\n  daemon: true\n  core.external_plugins: true\nplugins:\n  paths:\n    - " + str(plugin) + "\n"

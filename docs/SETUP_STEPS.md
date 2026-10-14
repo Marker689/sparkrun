@@ -31,9 +31,8 @@ Declare feature definitions on the plugin as usual, then register its steps in
 Click. For example:
 
 ```python
-from sparkrun.core.features import FeatureFlag
-from sparkrun.core.setup_models import CheckItem, OK, WARN
-from sparkrun.core.setup_steps import SetupStep, register_setup_step
+from sparkrun.api.setup import CheckItem, OK, WARN, SetupStep
+from sparkrun.plugins import FeatureFlag, register_setup_step
 
 FEATURE_DEFINITIONS = (
     FeatureFlag("setup.steps.example_service", "Check example service", default=True),
@@ -59,7 +58,7 @@ any host. The hardware integration explicitly composes reusable core and plugin
 steps in its `HardwarePlatformPlugin.setup_plans` declaration:
 
 ```python
-from sparkrun.core.setup_plans import SetupPlan
+from sparkrun.api.setup import SetupPlan
 
 # Inside the hardware platform implementation (alongside matches(), etc.):
 setup_plans = (
@@ -192,7 +191,7 @@ owned plan's eligibility unchanged, or a nonempty reason to exclude that step.
 It cannot enable a step or suppress mandatory hardware identification.
 
 ```python
-from sparkrun.core.setup_steps import register_setup_constraint
+from sparkrun.plugins import register_setup_constraint
 
 
 def constrain_setup(key, state, context):
@@ -289,7 +288,8 @@ for its caller. Action callbacks must return one of `ok`, `warn`, `fail`, or `sk
 
 The caller-facing models, status constants, probe/plan helpers, apply dispatcher,
 and recording runners are exported by `sparkrun.api.setup`. They are the same
-core types; plugin registration remains in `core.setup_steps`.
+core types; plugin registration (`register_setup_step`,
+`register_setup_constraint`) is imported from `sparkrun.plugins`.
 
 ```python
 import getpass

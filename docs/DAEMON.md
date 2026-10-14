@@ -505,12 +505,12 @@ Duplicate selected IDs across sources fail before plugin imports, with both
 origins in the error.
 
 `owner` is optional in declarations; an explicit value must match the loader's
-ID. The existing `register_daemon_op` function enforces the same binding rules.
-Registration outside a loader context fails. Embedded applications can use the
+ID. Registration outside a loader context fails. Embedded applications can use the
 public `application_daemon_registration()` context manager, which assigns
 `app-<application-profile-id>`. Core operations use a separate internal context.
 Equivalent declarations from the same provider can be repeated; conflicting
-handlers or metadata are rejected. Failed plugin imports/hooks roll back daemon
+handlers or metadata raise `PluginConflictError`, the rule every plugin registry
+follows. Failed plugin imports/hooks roll back daemon
 registries alongside the other plugin registries. These are contribution
 ownership rules for trusted Python extensions, not a sandbox for plugin code.
 

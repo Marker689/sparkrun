@@ -131,6 +131,46 @@ This document covers the seams a *cross-cutting* integration uses — one that i
 not "a runtime" or "an executor" and so has no single extension point of its
 own.
 
+## Import surface
+
+`sparkrun.plugins` is the single supported import path for plugin authors.
+Everything this document tells you to register with, subclass, or receive from a
+hook is re-exported there and listed in `sparkrun.plugins.__all__`:
+
+```python
+from sparkrun.plugins import RegistryEntry, register_default_registry, register_recipe_item
+```
+
+The modules that define those names (`sparkrun.core.*`, `sparkrun.proxy.*`,
+`sparkrun.orchestration.*` and so on) are internal: they remain importable, but
+they may move between releases without notice. The operational APIs a plugin
+*calls* rather than registers with are the separately documented
+`sparkrun.api` (including `sparkrun.api.setup`) and `sparkrun.application`; see
+the [0.4 migration guide](DISTRIBUTION_API_MIGRATION.md).
+
+## Registration conflicts
+
+Every in-process registry exposed here (recipe items and formats, registry
+declarations, CLI commands and options, gateways, feature flags, platforms, KV
+strategies, run handlers, benchmark integrations, workload lifecycles, daemon
+operations and routes, setup steps, image and model providers, hardware probes,
+diagnostics) follows one rule:
+
+- registering an **equal** value again is a no-op, so a module imported or a
+  `register(v)` hook run twice is harmless;
+- **anything else** raises `PluginConflictError`: a different value, a
+  different owner, and also the *same* owner with a changed definition. To change
+  a registration, register the new value under a new name; registries do not
+  silently replace entries.
+
+Equality compares callables by definition (module, qualified name, code,
+defaults and closure), so a re-imported module's functions are equal to the
+originals. A conflict fails the registering plugin's load (its contributions
+are rolled back) and is recorded: launches that could depend on it are refused
+with both owners named, while help, version and inventory keep working.
+Validation errors that are not conflicts (an invalid name, the built-in recipe
+format, an unsupported API version) keep their `ValueError`-family types.
+
 ## Owning a top-level recipe key
 
 A plugin may own a top-level recipe key without adding its schema to `Recipe`
@@ -275,7 +315,7 @@ rank and resolved compilation-cache paths.
 
 Context is isolated per invocation and reset on errors. Plugins that dispatch
 hooks directly can pass `launch_context=HookLaunchContext(...)` to
-`run_pre_exec`; supply the full selected host order even for a subset of
+`run_pre_exec` (both from `sparkrun.plugins`); supply the full selected host order even for a subset of
 targets. Direct callers without launch context receive ranks derived from
 their supplied host list and empty values for unavailable launch metadata.
 Hooks dispatched in another thread need their context passed explicitly.
@@ -292,7 +332,7 @@ instance and recipe template source are not mutated with rendered values.
 
 Custom runtimes using these shared paths inherit interpolation. A runtime
 implementing its own launch path must call
-`core.env_templates.render_launch_env(recipe, host, volumes, runtime_cache, executor)`
+`render_launch_env(recipe, host, volumes, runtime_cache, executor)` (from `sparkrun.plugins`)
 inside the standard launch scope and merge the result at the recipe environment
 tier for both creation and serving. Raw calls to `runtime.run()` without that
 prepared context reject active templates. Separate threads need explicit
@@ -314,8 +354,8 @@ must return exactly `recipe.env_templates`' keys as resolved strings without
 NULs; values retain recipe environment precedence. Materialization performs no
 implicit asset probes. The caller owns any probing its resolver performs.
 Without a resolver, materialization still rejects active templates. The pure
-`core.env_templates.env_template_launch_fields` and `render_env_template`
-helpers let strategies inspect requirements and reuse interpolation syntax.
+`env_template_launch_fields` and `render_env_template`
+helpers (from `sparkrun.plugins`) let strategies inspect requirements and reuse interpolation syntax.
 
 ColdSnap resolves fresh capture environment after image/model preparation.
 `launch.runtime_cache_dir` is its capsule cache at
@@ -337,7 +377,7 @@ execution strategy or its preparation DAG. A plugin that needs to contribute
 build inputs can register a separate, recipe-local callback:
 
 ~~~python
-from sparkrun.core.build_preparation import BuildContext
+from sparkrun.plugins import BuildContext, register_recipe_item
 
 
 def prepare_build(context: BuildContext):
@@ -451,6 +491,62 @@ Nothing is fetched until something clones it, so suggest `sparkrun registry
 update` after your plugin is first enabled rather than paying a clone inside
 the next `sparkrun run`.
 
+## Serving another launcher's manifests (recipe formats)
+
+A registry entry names its `format` (default `sparkrun`). A plugin that
+understands another launcher's manifests registers a `RecipeFormat`, and every
+registry declaring that format is then listed, resolved and loaded through it.
+What `load()` returns is an ordinary v2 recipe dictionary, so `run`, `export`,
+`-o` and validation need nothing format-specific. The bundled `lil` plugin is
+the reference implementation.
+
+```python
+from sparkrun.plugins import RecipeFormat, RegistryEntry, register_default_registry, register_recipe_format
+
+
+def iter_files(root):
+    return sorted(root.glob("*/manifest.yaml"))
+
+
+def name_of(path, root):
+    return path.parent.name
+
+
+def load(path, *, registry_manager, offline, allow_local=True):
+    ...  # translate the manifest at *path* into a v2 recipe dict
+
+
+def register(v):
+    register_recipe_format(RecipeFormat(name="example", owner=__name__, iter_files=iter_files, name_of=name_of, load=load))
+    register_default_registry(
+        RegistryEntry(name="example", url="https://github.com/example/catalog.git", subpath="/", format="example"),
+        owner=__name__,
+    )
+```
+
+The fields:
+
+| Field | Contract |
+| --- | --- |
+| `name` | The `format:` value that selects this format. `sparkrun` is built in and cannot be registered. |
+| `owner` | The registering plugin, named in conflict errors. |
+| `iter_files(root)` | Every launchable manifest under a registry directory, sorted. Leave drafts and fragments out. |
+| `name_of(path, root)` | The name typed after `@registry/`. `root` is `None` for a manifest loaded by path from outside any registry. |
+| `load(path, *, registry_manager, offline, allow_local)` | Returns v2 recipe data. `offline=True` is the listing path and must not touch the network; degrade to what is known locally. `allow_local=False` (a URL-fetched or imported source) forbids reading files next to `path`. |
+| `claims(path, data)` | Optional. Recognizes a manifest by content, consulted only for a local path outside every registry. |
+
+Three rules shape the contract:
+
+- **Listing and lookup share one enumerator.** Lookup is built from `iter_files`
+  and `name_of`, so anything listed is runnable and vice versa.
+- **An unregistered format is inert, never misread.** Without the plugin, a
+  registry in that format lists and resolves nothing, and loading one of its
+  files raises rather than reading a foreign manifest as a sparkrun recipe.
+- **A foreign format needs trust.** A registry's own manifest chooses its
+  `format:`, so the format is honored only for a trusted registry or one
+  declared by a plugin; otherwise the registry is inert and `sparkrun registry
+  show` says why.
+
 ## Plugin state, capabilities, and lifecycle actions
 
 Use plugin controls for an entire integration, and feature controls for its
@@ -529,7 +625,7 @@ also make ownership available to management while a plugin is disabled.
 
 ```python
 # example_plugin/lifecycle.py
-from sparkrun.plugin_lifecycle import select_gateway
+from sparkrun.plugins import select_gateway
 
 
 def enable_feature(context):
@@ -538,8 +634,7 @@ def enable_feature(context):
 ```
 
 `PLUGIN_LIFECYCLE_API_VERSION = 1`, `LifecycleContext`, `LifecyclePlan`, and
-`select_gateway` are public in `sparkrun.plugin_lifecycle` and re-exported by
-`sparkrun.plugins`. Context includes the event, plugin ID, optional feature,
+`select_gateway` are imported from `sparkrun.plugins`. Context includes the event, plugin ID, optional feature,
 configuration snapshots and previous/current installation records where applicable.
 `LifecyclePlan.settings` proposes dotted settings below `plugins.<plugin-id>`;
 `messages` supplies user-facing feedback. The shared gateway helper validates the
@@ -656,17 +751,18 @@ Selected installed integrations use the existing class scan and `register(v)`
 hook. They do not require the `core.external_plugins` flag.
 Configured directory loading and its existing kill switch remain available.
 
-A module can expose `FEATURE_DEFINITIONS`, a sequence of `FeatureFlag` objects;
-these register before its implementations are gated. For CLI contributions,
-import `register_cli_command` from `sparkrun.core.cli_registry` and pass a lazy
-loader with an explicit name to keep API initialization console-free. Registration
+A module can expose `FEATURE_DEFINITIONS`, a sequence of `FeatureFlag` objects
+(from `sparkrun.plugins`); these register before its implementations are gated.
+For CLI contributions, import `register_cli_command` from `sparkrun.plugins` and
+pass a lazy loader with an explicit name to keep API initialization console-free. Registration
 must be local and inexpensive: no dependency installation, network, registry
 clones or hardware probes. Directory, bundled, and installed loaders roll back
 supported registry mutations from a failed import or registration hook. Arbitrary
 plugin I/O is outside this contract. The rollback adapter targets the project's pinned SAF version.
 
 Discovery is deterministic. Repeated registration of the same provider is
-idempotent. Distinct integration IDs/providers or concrete runtime, builder,
+idempotent (see [Registration conflicts](#registration-conflicts)). Distinct
+integration IDs/providers or concrete runtime, builder,
 executor, scheduler, transport, framework, telemetry scope or gateway selector claims cannot silently
 replace each other; diagnostics name both owners. Ordered platform matching is
 preserved, with duplicate platform names rejected. Required missing, disabled,
@@ -686,9 +782,8 @@ selected package still declares registries at the external trust tier; reviewed
 profile registry declarations are a separate explicit policy.
 
 The module's `SPARKRUN_PLUGIN_API_VERSION` declares its tested plugin contract
-as a literal integer, currently `1`. The host exposes the supported version as
-`sparkrun.core.registration.PLUGIN_API_VERSION`. Do not copy that constant into a
-plugin declaration dynamically: a newer host does not establish compatibility
+as a literal integer, currently `1`, which is also the version this host
+supports. Do not compute the declaration from a host constant: a newer host does not establish compatibility
 for an older plugin. Booleans, floats and strings are not version declarations.
 Every installed, directory, and bundled plugin module must declare this API
 version; all sources use the same compatibility check.
@@ -745,8 +840,7 @@ import json
 import shutil
 from copy import deepcopy
 from pathlib import Path
-from sparkrun.benchmarking.base import BenchmarkingPlugin
-from sparkrun.benchmarking.scheduler import BenchTask
+from sparkrun.plugins import BenchmarkingPlugin, BenchTask
 
 SPARKRUN_PLUGIN_API_VERSION = 1
 
@@ -808,9 +902,9 @@ for the wire format, lazy ID creation and migration behavior.
 
 ### Hardware inventory extensions
 
-An installed integration can register a platform with `register_platform` and
-extend the target probe through
-`core.hardware_probe_extensions.register_hardware_probe`. Device-specific shell
+An installed integration can register a `HardwarePlatformPlugin` with
+`register_platform` and extend the target probe through `register_hardware_probe`
+(all from `sparkrun.plugins`). Device-specific shell
 facts and the hardware enricher stay in the plugin. The normal fingerprint and
 combined accelerator/IB probes include selected providers, and failed installed
 plugin registration rolls back their probe registrations. See
@@ -830,9 +924,8 @@ result parsing, and scheduled tasks. A **benchmark integration** adds behavior
 around that measurement, such as publishing results. Integrations use the same
 execution path from the CLI and Python API.
 
-Register `BenchmarkIntegration` with
-`sparkrun.core.benchmark_integrations.register_benchmark_integration` in the
-plugin's `register(v)` hook. Its callbacks are:
+Register `BenchmarkIntegration` with `register_benchmark_integration` (both from
+`sparkrun.plugins`) in the plugin's `register(v)` hook. Its callbacks are:
 
 - `prepare(defaults, context) -> BenchmarkDefaults`: select measurement defaults
   before resolving a new invocation's recipe/profile/framework. `BenchmarkDefaults`
@@ -898,7 +991,7 @@ from `validate` are not persisted and do not overwrite the last accepted setting
 Store only JSON-compatible values, never credentials. Core copies and filters
 structured credential fields without interpreting serialized documents by key
 name. Plugins own validation and sanitization of documents they persist; use
-`public_recipe_text()` from `sparkrun.benchmarking.metadata` at an actual recipe
+`public_recipe_text()` from `sparkrun.plugins` at an actual recipe
 boundary. Arena sanitizes its saved `effective_recipe_text` before publication;
 malformed legacy content produces a fresh-run diagnostic without parser excerpts.
 Unavailable plugins' saved documents remain opaque until their owner is loaded.
@@ -911,8 +1004,8 @@ Every framework saves validated task results for completion retries;
 Dry runs invoke preview hooks without persisting
 integration data; each plugin must also honor `context.dry_run` for its own I/O.
 
-To contribute flags, register a `CliOptionSpec` from the Click-free
-`sparkrun.core.cli_registry`, targeting `benchmark.run` (generic and category
+To contribute flags, register a `CliOptionSpec` with `register_cli_options` (both
+Click-free, from `sparkrun.plugins`), targeting `benchmark.run` (generic and category
 commands) or `benchmark.resume`. Supply a lazy loader returning `click.Option`
 objects and a decoder returning a settings dict, or `None` when not selected.
 The host resolves options before parsing/help/completion, rejects parameter name
@@ -974,7 +1067,8 @@ An executor may set `config_class` to an `ExecutorConfig` subclass with a
 selects this class instead of keeping plugin-specific fields in core.
 
 Executors with destinations beyond the host list implement `resolve_target()`
-and return `ExecutorTarget` from `sparkrun.orchestration.executor`. Its derived
+and return `ExecutorTarget` (from `sparkrun.plugins`, beside `Executor` and
+`ExecutorConfig`). Its derived
 `destination_key` participates in deterministic workload placement identity;
 its read-only `config` carries destination and connection settings. Core retains
 this as `RunPlan.executor_target` and uses the scoped cluster for occupancy,
@@ -984,7 +1078,7 @@ mutable destination defaults. See [executor targets](EXECUTORS.md#operation-targ
 
 Plugins with a native control-plane launch may register a
 `RunHandler(executor, callback, feature_flag=...)` through
-`sparkrun.core.run_handlers.register_run_handler()`. The typed callback receives
+`register_run_handler()` (both from `sparkrun.plugins`). The typed callback receives
 `(options, sctx, *, plan: RunPlan, started_at: float, before_start)` and returns `RunResult`.
 The plan is the existing resolved recipe/cluster/placement/identity decision;
 handlers must not independently repeat placement. Core enforces execution-strategy
@@ -1016,7 +1110,7 @@ applies when the handler discovers reuse: return `already_running=True`, preserv
 verified existing metadata, and do not invoke the replacement callback.
 
 Native handlers persist `save_job_metadata(..., executor=resolved_executor,
-native_resource={...})` before submission. The executor owns the reference schema;
+native_resource={...})` (from `sparkrun.plugins`) before submission. The executor owns the reference schema;
 core stores it separately from the portable ID. Implement
 `Executor.stop_workload(cluster_id, *, metadata=None)` to confirm controller deletion
 and return a removed-resource count (zero when already absent). Raise on errors;
@@ -1028,9 +1122,9 @@ controller-owned sources through shared `api.logs(workload_id=...)` and
 `open_log_target()`. This hook owns availability/ownership checks, including
 completed or pending resources. `read_logs_cmd()` may return a local argv list
 for a control-plane client, bypassing SSH; string commands keep ordinary host
-dispatch. Native sources carry `LogResource` identity, checked by
+dispatch. Native sources carry `LogResource` identity (from `sparkrun.plugins`), checked by
 `validate_log_source(source, *, cancel, timeout)` before/after reading. Raise
-`LogSourceChanged` on replacement/restart and honor cancellation and deadlines.
+`LogSourceChanged` (also from `sparkrun.plugins`) on replacement/restart and honor cancellation and deadlines.
 See [LOGGING_API.md](LOGGING_API.md) for public source/filter/paging contracts.
 Executors whose hosts represent a control plane rather than a serving endpoint
 set `supports_host_endpoint = False`. Benchmarking rejects them before launch,
@@ -1075,7 +1169,7 @@ A registry that stores plugin contributions enlists its containers beside their
 module-level definitions:
 
 ```python
-from sparkrun.core.registration import enlist_registry_state, register_unique
+from sparkrun.plugins import enlist_registry_state, register_unique
 
 _ENTRIES = {}
 enlist_registry_state(globals(), "_ENTRIES")
@@ -1084,11 +1178,9 @@ enlist_registry_state(globals(), "_ENTRIES")
 # register_unique(_ENTRIES, name, spec, description="Example extension")
 ```
 
-Installed, directory, and bundled loaders share
-`core.registration.load_and_register_plugin()` for import, compatibility checks
-and registration in one transaction. Direct `load_plugin_module()` registration
-uses the same boundary. `core.registration.registry_transaction(v)` is available
-for explicit transactions over enlisted containers and SAF state. Only completed
+Installed, directory, and bundled loaders share one transaction for import,
+compatibility checks and registration, and direct module registration uses the
+same boundary. Only completed
 registration is reported as loaded. A failed hook rolls back its contributions
 before optional-plugin error handling continues to independent plugins.
 Setup dependency graphs are checked before committing module registration.
@@ -1096,7 +1188,8 @@ Same-module forward references are supported; dependencies on another module
 must already be registered. Unknown providers and cycles roll back the module
 instead of breaking all later setup planning. See [setup dependency policy](SETUP_STEPS.md).
 Nested mutable containers and registry imports during registration participate
-in rollback. Identical registrations are allowed; conflicting providers fail.
+in rollback. `register_unique` applies the shared
+[conflict rule](#registration-conflicts).
 Enlistment tracks the namespace entry, so deliberately replacing a container
 does not leave rollback pointing at its old value. Registration finishes before
 application workers start. It does not roll back arbitrary plugin I/O, and the
@@ -1162,10 +1255,11 @@ Publication-only retry payloads remain the integration's responsibility in
 
 ## Gateway extensions
 
-Use `sparkrun.proxy.gateway.register_gateway` for deferred engine registration.
-New engines implement the typed model-query contract in
-[`sparkrun.proxy.contracts`](PROXY.md#gateway-plugin-contract), using the same
-`ProxyModel` class returned by the public API. Console, console-credential
+Use `register_gateway` for deferred engine registration. New engines subclass
+`GatewaySupervisor` and implement the typed
+[model-query contract](PROXY.md#gateway-plugin-contract), using the same
+`ProxyModel` class returned by the public API. All three, and the optional
+console/credential protocols, come from `sparkrun.plugins`. Console, console-credential
 issuance, and admin-token management are separate optional protocols. Existing
 dictionary-returning providers must migrate their own response decoding to this
 typed contract; the supervisor supplies no legacy model adapter.
@@ -1178,11 +1272,11 @@ commit-pinned vendoring workflow.
 
 
 Image-provider consumers can reuse a prepared transport by passing `session=` to
-`core.image_distribution.try_image_pull`, `try_image_copy`, and
-`resolve_distributed_image`. This session is borrowed and is never closed by
+`try_image_pull`, `try_image_copy`, and `resolve_distributed_image` (from
+`sparkrun.plugins`). This session is borrowed and is never closed by
 those helpers, including on failure. Calls without a session retain their owned
-SSH-session lifecycle. Provider selection still uses `image_distribution_operation`
-with the operation's `config`; callers dispatching to separate threads must
+SSH-session lifecycle. Provider selection still uses `image_distribution_operation` (from
+`sparkrun.plugins`) with the operation's `config`; callers dispatching to separate threads must
 establish that scope in each thread. ColdSnap's Docker manager follows this
 contract for capsule pulls, inspections and launches.
 
