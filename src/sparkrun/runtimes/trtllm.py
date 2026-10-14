@@ -257,12 +257,20 @@ class TrtllmRuntime(RuntimePlugin):
         return build_rsh_wrapper(host_ip_map, ssh_key_path=ssh_key_path)
 
     @staticmethod
-    def _build_extra_config(recipe: Recipe, overrides: dict[str, Any] | None = None) -> str | None:
-        """Generate extra-llm-api-config.yml YAML content from recipe defaults.
+    def _build_extra_config(recipe: Recipe, overrides: dict[str, Any] | None = None, *, config: Any = None) -> str | None:
+        """Generate extra-llm-api-config.yml YAML content from the config chain.
 
-        Returns ``None`` if no extra config keys are present in the recipe.
+        *config* is an already-built ``recipe.build_config_chain(overrides)``
+        (what ``_pre_serve`` receives); otherwise the chain is built here from
+        *overrides*. Every caller must pass the launch's overrides one way or
+        the other: ``generate_command`` adds ``--extra_llm_api_options`` from
+        the same chain, so a file built from recipe defaults alone would be
+        missing (flag, no file) or stale (CLI ``-o`` value dropped).
+
+        Returns ``None`` if no extra config keys are present.
         """
-        config = recipe.build_config_chain(overrides)
+        if config is None:
+            config = recipe.build_config_chain(overrides)
         extra: dict[str, Any] = {}
 
         # print_iter_log
@@ -413,7 +421,7 @@ class TrtllmRuntime(RuntimePlugin):
 
         if recipe is None:
             return
-        extra_yaml = self._build_extra_config(recipe)
+        extra_yaml = self._build_extra_config(recipe, config=config_chain)
         if extra_yaml is None:
             return
 

@@ -492,6 +492,52 @@ def test_pre_serve_writes_extra_config():
         assert "backend: CUTLASS" in decoded
 
 
+def _solo_extra_config(recipe, overrides):
+    """Run solo ``_pre_serve`` with the chain the solo path builds; return the written YAML (or None)."""
+    import base64
+    import re
+    from unittest import mock
+
+    runtime = TrtllmRuntime()
+    with mock.patch("sparkrun.orchestration.ssh.run_remote_command") as mock_cmd:
+        mock_cmd.return_value = mock.Mock(success=True)
+        runtime._pre_serve(
+            [("10.0.0.1", "sparkrun_node_0")], {}, dry_run=False, recipe=recipe, config_chain=recipe.build_config_chain(overrides)
+        )
+    if not mock_cmd.called:
+        return None
+    exec_str = mock_cmd.call_args[0][1]
+    match = re.search(r"([A-Za-z0-9+/=]{40,})", exec_str)
+    decoded = base64.b64decode(match.group(1)).decode("utf-8") if match else exec_str
+    return yaml.safe_load(decoded.split("<< 'SPARKRUN_EOF'\n", 1)[1].split("SPARKRUN_EOF", 1)[0])
+
+
+def test_pre_serve_writes_override_only_extra_config():
+    """`-o free_gpu_memory_fraction=0.5` on a recipe declaring no extra keys: the flag is added, so the file must be too."""
+    recipe = Recipe.from_dict({"model": "nvidia/model", "runtime": "trtllm", "defaults": {"port": 8000}})
+    overrides = {"free_gpu_memory_fraction": 0.5}
+    assert "--extra_llm_api_options /tmp/extra-llm-api-config.yml" in TrtllmRuntime().generate_command(recipe, overrides, is_cluster=False)
+    assert _solo_extra_config(recipe, overrides) == {"kv_cache_config": {"free_gpu_memory_fraction": 0.5}}
+
+
+def test_pre_serve_override_beats_recipe_default():
+    recipe = Recipe.from_dict(
+        {"model": "nvidia/model", "runtime": "trtllm", "defaults": {"free_gpu_memory_fraction": 0.9, "moe_backend": "CUTLASS"}}
+    )
+    written = _solo_extra_config(recipe, {"free_gpu_memory_fraction": 0.5, "kv_cache_dtype": "fp8"})
+    assert written["kv_cache_config"] == {"free_gpu_memory_fraction": 0.5, "dtype": "fp8"}
+    assert written["moe_config"] == {"backend": "CUTLASS"}
+
+
+def test_extra_config_from_a_chain_matches_from_overrides():
+    """The solo path passes a chain, the cluster path and command generation pass overrides: same content."""
+    recipe = Recipe.from_dict({"model": "nvidia/model", "runtime": "trtllm", "defaults": {"cuda_graph_padding": True}})
+    overrides = {"moe_backend": "TRTLLM"}
+    via_chain = TrtllmRuntime._build_extra_config(recipe, config=recipe.build_config_chain(overrides))
+    assert via_chain == TrtllmRuntime._build_extra_config(recipe, overrides)
+    assert "backend: TRTLLM" in via_chain
+
+
 def test_pre_serve_skips_when_no_extra_config():
     """_pre_serve does not write config when no extra keys are present."""
     from unittest import mock
