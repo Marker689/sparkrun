@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -29,14 +27,6 @@ from sparkrun.proxy import (
     DEFAULT_PROXY_HOST,
     DEFAULT_PROXY_PORT,
 )
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - exercised via a masked-import test
-    # POSIX-only. This module is reached from SparkrunContext, i.e. essentially
-    # every invocation, so a hard import would make sparkrun unimportable on a
-    # Windows control node. See _write_lock for what degrades.
-    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +60,34 @@ class ProxyConfig:
         self._pending_bindings: object = _UNCHANGED
         self._pending_discovered_models: object = _UNCHANGED
 
-    def _read(self) -> dict[str, Any]:
-        """Parse the file as it is on disk right now ({} when absent/bad)."""
+    def _read(self, *, strict: bool = False) -> dict[str, Any]:
+        """Parse the file as it is on disk right now.
+
+        Absent is ``{}``.  An unreadable file is ``{}`` too when only reading,
+        but ``strict`` (the save path) raises instead: merging pending keys
+        into ``{}`` and writing that back would erase the bind host and master
+        key, and the next start would listen on every interface unauthenticated.
+        """
         if not self.config_path.exists():
             return {}
         try:
             with open(self.config_path) as f:
                 data = yaml.safe_load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            logger.debug("Failed to load proxy config: %s", self.config_path, exc_info=True)
+        except Exception as exc:
+            if strict:
+                raise ValueError(
+                    "Cannot update %s: the file could not be parsed (%s); fix or remove it first" % (self.config_path, exc)
+                ) from exc
+            logger.warning("Failed to load proxy config %s; using defaults: %s", self.config_path, exc)
             return {}
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            if strict:
+                raise ValueError("Cannot update %s: the document is not a mapping; fix or remove it first" % self.config_path)
+            logger.warning("Proxy config %s is not a mapping; using defaults", self.config_path)
+            return {}
+        return data
 
     def _load(self) -> None:
         self._data = self._read()
@@ -100,24 +107,10 @@ class ProxyConfig:
             yield
 
     def _write_atomic(self, data: dict[str, Any]) -> None:
-        """Replace the config in one step, never leaving a partial file."""
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".%s." % self.config_path.name,
-            dir=self.config_path.parent,
-        )
-        temporary = Path(temporary_name)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w") as stream:
-                descriptor = -1
-                yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.config_path)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
+        """Replace the config in one step, owner-only, never leaving a partial file."""
+        from sparkrun.utils.fs import atomic_private_write
+
+        atomic_private_write(self.config_path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
 
     def save(self) -> None:
         """Atomically merge this instance's pending changes into the file.
@@ -145,7 +138,7 @@ class ProxyConfig:
                 pending = yaml.safe_load(journal.read_text())
                 if not isinstance(pending, dict) or pending.get("state") != "committed":
                     raise ValueError("Interrupted plugin activation; run a plugin management command to recover")
-            latest = self._read() if has_pending else copy.deepcopy(self._data)
+            latest = self._read(strict=True) if has_pending else copy.deepcopy(self._data)
 
             if self._pending_proxy:
                 proxy = latest.setdefault("proxy", {})

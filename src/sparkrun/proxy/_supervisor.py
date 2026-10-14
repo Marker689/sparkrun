@@ -36,10 +36,6 @@ from typing import Any
 
 import yaml
 
-try:  # POSIX only; without it the state lock degrades to none (see _state_lock).
-    import fcntl
-except ImportError:  # pragma: no cover - Windows control node
-    fcntl = None  # type: ignore[assignment]
 from contextlib import contextmanager
 
 from sparkrun.proxy.contracts import ProxyModel, GatewayOperationError, GatewayQueryError

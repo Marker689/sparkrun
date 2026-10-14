@@ -124,15 +124,17 @@ def test_the_config_is_replaced_atomically_and_owner_only(config_path: Path):
     assert leftovers == []
 
 
-def test_a_corrupt_file_does_not_prevent_saving(config_path: Path):
+def test_a_corrupt_file_is_refused_not_replaced(config_path: Path):
+    """Saving over an unparseable file would drop its bind host and master key."""
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("{{{ not yaml")
 
     cfg = ProxyConfig(config_path)
     cfg.set_proxy(port=4000)
-    cfg.save()
+    with pytest.raises(ValueError, match="could not be parsed"):
+        cfg.save()
 
-    assert _read(config_path)["proxy"]["port"] == 4000
+    assert config_path.read_text() == "{{{ not yaml"
 
 
 # --------------------------------------------------------------------------
@@ -158,26 +160,22 @@ def test_the_module_imports_without_fcntl(monkeypatch):
     monkeypatch.delitem(sys.modules, "sparkrun.proxy.config", raising=False)
     monkeypatch.setattr(builtins, "__import__", blocked)
 
-    module = importlib.import_module("sparkrun.proxy.config")
-    assert module.fcntl is None
+    importlib.import_module("sparkrun.proxy.config")
 
     # Restore the real module for the rest of the session — it is process-global.
     monkeypatch.undo()
     importlib.reload(importlib.import_module("sparkrun.proxy.config"))
 
 
-def test_saving_still_works_with_no_fcntl(config_path: Path, monkeypatch):
-    """Proxy config delegates locking to the shared portable helper."""
+def test_saving_locks_through_the_shared_portable_helper(config_path: Path):
+    """Proxy config delegates locking to ``utils.fs.file_lock`` (msvcrt on Windows, flock elsewhere)."""
     import sparkrun.proxy.config as config_mod
-
-    monkeypatch.setattr(config_mod, "fcntl", None)
 
     cfg = config_mod.ProxyConfig(config_path)
     cfg.add_alias("fast", "model")
     cfg.save()
 
     assert _read(config_path)["aliases"] == {"fast": "model"}
-    # The portable lock remains active independently of the old module import.
     assert Path(str(config_path) + ".lock").exists()
 
 
