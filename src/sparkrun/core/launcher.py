@@ -1215,6 +1215,9 @@ def launch_inference(
             progress = sctx.progress
     if config is None:
         raise ValueError("launch_inference requires config or sctx")
+    # The runtime is a process-wide SAF singleton; this launch binds its
+    # executor on its own copy (see RuntimePlugin.executor).
+    runtime = copy.copy(runtime)
     p = progress  # short alias
     if execution_strategy is not None:
         from sparkrun.core.execution import validate_strategy_environment
@@ -1440,6 +1443,7 @@ def launch_inference(
     }
     executor = host_executors[host_list[0]]
     executor.bind_host_executors(host_executors)
+    runtime.executor = executor
 
     # Preflight: verify the host paths this launch will bind actually exist on
     # the substrate where the workload runs — pre-placed weights (whose
@@ -2079,7 +2083,7 @@ def launch_inference(
     effective_env = {**cluster_env, **(recipe.env or {})}
     from sparkrun.platforms import accelerator_defaults
 
-    runtime.platform_env_by_host = {
+    platform_env_by_host = {
         host: {
             str(k): str(value)
             for k, value in accelerator_defaults(
@@ -2173,6 +2177,7 @@ def launch_inference(
             backends=backends or None,
             trust=recipe_trusted,
             runtime_cache=runtime_cache_mounts,
+            platform_env_by_host=platform_env_by_host,
             **run_kwargs,
         )
 

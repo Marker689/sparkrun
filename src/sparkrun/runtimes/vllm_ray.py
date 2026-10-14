@@ -304,6 +304,7 @@ class VllmRayRuntime(VllmRuntimeBase):
         trust = kwargs.pop("trust", False)
         placement = kwargs.pop("placement", None)
         runtime_cache = kwargs.pop("runtime_cache", None)
+        platform_env_by_host = kwargs.pop("platform_env_by_host", None)
         combined_docker_opts = (self.get_extra_docker_opts() or []) + (extra_docker_opts or [])
 
         # Resolve the tri-state dashboard toggle now so the rest of the cluster
@@ -323,6 +324,7 @@ class VllmRayRuntime(VllmRuntimeBase):
             recipe=recipe,
             placement=placement,
             runtime_cache=runtime_cache,
+            platform_env_by_host=platform_env_by_host,
         )
         head_container = self._resolve_executor().container_name(cluster_id, "head")
         worker_container = self._resolve_executor().container_name(cluster_id, "worker")

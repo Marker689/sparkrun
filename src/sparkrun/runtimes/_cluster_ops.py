@@ -144,6 +144,7 @@ class ClusterContext:
         placement: "RankAssignment | None" = None,
         runtime_cache: "RuntimeCacheMounts | None" = None,
         images_by_node: "tuple[str, ...] | None" = None,
+        platform_env_by_host: dict[str, dict[str, str]] | None = None,
     ) -> ClusterContext:
         """Build context from runtime hooks and config.
 
@@ -182,8 +183,7 @@ class ClusterContext:
         )
 
         env_by_host = {
-            host: merge_env(all_env, platform_env, env, extra_env)
-            for host, platform_env in (getattr(runtime, "platform_env_by_host", None) or {}).items()
+            host: merge_env(all_env, platform_env, env, extra_env) for host, platform_env in (platform_env_by_host or {}).items()
         }
         if getattr(recipe, "env_templates", None):
             from sparkrun.core.env_templates import render_launch_env

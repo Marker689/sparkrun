@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import click
 
 from sparkrun.core.launcher import LaunchResult, ReadinessWatcher
@@ -102,8 +104,9 @@ def existing_launch(match, *, recipe, overrides, cluster, sctx) -> LaunchResult:
         )
     cluster = resolve_cluster_for_job(cluster, hosts, meta=meta, sctx=sctx)
     scoped, _ = scope_operation(cluster, sctx=sctx)
-    runtime = resolve_runtime(recipe, sctx=scoped)
-    runtime.executor = resolve_executor(
+    # A per-operation copy: the resolved runtime is a process-wide singleton.
+    runtime = copy.copy(resolve_runtime(recipe, sctx=scoped))
+    runtime.executor = executor = resolve_executor(
         recipe=recipe,
         runtime=runtime,
         cluster=cluster,
@@ -113,7 +116,7 @@ def existing_launch(match, *, recipe, overrides, cluster, sctx) -> LaunchResult:
         rootless=False,
         auto_user=False,
     )
-    if not runtime.executor.supports_host_endpoint:
+    if not executor.supports_host_endpoint:
         raise click.UsageError("This executor has no supported readiness endpoint; use --no-ready-wait.")
     effective = {**overrides}
     for key in ("port", "served_model_name"):

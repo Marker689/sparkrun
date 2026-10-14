@@ -165,9 +165,14 @@ class RuntimePlugin(Plugin, ABC):
     # the default via the unified chain.  No lazy DockerExecutor
     # fallback property — selection always flows through
     # :func:`sparkrun.orchestration.executor.resolve_executor`.
+    #
+    # Runtime plugins are SAF singletons shared by every operation in the
+    # process, so an operation that binds an executor does it on its own
+    # shallow copy (``launch_inference`` does): two launches in one
+    # long-lived process (desktop sidecar, proxy daemon) would otherwise
+    # race on this attribute.  Other per-launch state is passed to
+    # :meth:`run` rather than stored here.
     executor: Executor | None = None
-
-    platform_env_by_host: dict[str, dict[str, str]] | None = None
 
     def _resolve_executor(self) -> Executor:
         """Return the active executor, resolving via the unified chain if unset.
@@ -1313,6 +1318,7 @@ class RuntimePlugin(Plugin, ABC):
         backends: "dict[str, BackendBundle] | None" = None,
         trust: bool = False,
         runtime_cache: "RuntimeCacheMounts | None" = None,
+        platform_env_by_host: dict[str, dict[str, str]] | None = None,
         **kwargs,
     ) -> int:
         """Launch a workload -- delegates to solo or cluster implementation.
@@ -1353,6 +1359,9 @@ class RuntimePlugin(Plugin, ABC):
                 prompt for recipe-defined ``pre_exec`` hooks.  Resolved
                 upstream by :func:`sparkrun.core.launcher.resolve_recipe_trust`
                 (CLI ``--trust`` OR local recipe OR default-registry).
+            platform_env_by_host: Platform default env per host (the lowest
+                container-env tier), resolved by the launcher from each host's
+                hardware.
             **kwargs: Runtime-specific keyword arguments (e.g. ray_port,
                 dashboard_port, init_port, rpc_port).
 
@@ -1401,6 +1410,7 @@ class RuntimePlugin(Plugin, ABC):
                 backends=backends,
                 trust=trust,
                 runtime_cache=runtime_cache,
+                platform_env=(platform_env_by_host or {}).get(hosts[0] if hosts else "localhost", {}),
                 # TODO: kwargs?
             )
         return self._run_cluster(
@@ -1424,6 +1434,7 @@ class RuntimePlugin(Plugin, ABC):
             backends=backends,
             trust=trust,
             runtime_cache=runtime_cache,
+            platform_env_by_host=platform_env_by_host,
             **kwargs,
         )
 
@@ -1512,6 +1523,7 @@ class RuntimePlugin(Plugin, ABC):
         runtime_cache: "RuntimeCacheMounts | None" = None,
         mgmt_interface: str | None = None,
         placement=None,
+        platform_env: dict[str, str] | None = None,
     ) -> int:
         """Launch a single-node inference workload.
 
@@ -1559,7 +1571,7 @@ class RuntimePlugin(Plugin, ABC):
             runtime_cache.env if runtime_cache else {},
             self.get_common_env(),  # base env
             self.get_solo_env(),  # solo-specific
-            (self.platform_env_by_host or {}).get(host, {}),
+            platform_env or {},
             env,  # recipe (literal CLI overrides already suppress templates)
             template_env,
             self.get_extra_env(),  # tuning/other overrides
@@ -1953,6 +1965,7 @@ class RuntimePlugin(Plugin, ABC):
         placement = kwargs.pop("placement", None)
         runtime_cache = kwargs.pop("runtime_cache", None)
         images_by_node = kwargs.pop("images_by_node", None)
+        platform_env_by_host = kwargs.pop("platform_env_by_host", None)
         ctx = ClusterContext.build(
             runtime=self,
             hosts=hosts,
@@ -1968,6 +1981,7 @@ class RuntimePlugin(Plugin, ABC):
             placement=placement,
             runtime_cache=runtime_cache,
             images_by_node=images_by_node,
+            platform_env_by_host=platform_env_by_host,
         )
         if recipe is None:
             raise ValueError("Native cluster launch requires a recipe")

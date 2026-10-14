@@ -546,6 +546,7 @@ class LlamaCppRuntime(RuntimePlugin):
         trust = kwargs.pop("trust", False)
         placement = kwargs.pop("placement", None)
         runtime_cache = kwargs.pop("runtime_cache", None)
+        platform_env_by_host = kwargs.pop("platform_env_by_host", None)
         images_by_node = kwargs.pop("images_by_node", None)
 
         executor = self._resolve_executor()
@@ -563,6 +564,7 @@ class LlamaCppRuntime(RuntimePlugin):
             placement=placement,
             runtime_cache=runtime_cache,
             images_by_node=images_by_node,
+            platform_env_by_host=platform_env_by_host,
         )
         head_container = self._container_name(cluster_id, "head")
         worker_container_name = self._container_name(cluster_id, "worker")

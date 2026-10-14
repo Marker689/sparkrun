@@ -533,6 +533,7 @@ class TrtllmRuntime(RuntimePlugin):
         backends = kwargs.pop("backends", None)
         placement = kwargs.pop("placement", None)
         runtime_cache = kwargs.pop("runtime_cache", None)
+        platform_env_by_host = kwargs.pop("platform_env_by_host", None)
         trust = kwargs.pop("trust", False)
 
         executor = self._resolve_executor()
@@ -549,6 +550,7 @@ class TrtllmRuntime(RuntimePlugin):
             recipe=recipe,
             placement=placement,
             runtime_cache=runtime_cache,
+            platform_env_by_host=platform_env_by_host,
         )
         extra_docker_opts = self.get_extra_docker_opts()
 

@@ -274,10 +274,17 @@ def test_cluster_submission_uses_host_executor_and_env_precedence(monkeypatch, e
     from sparkrun.orchestration.executors.docker import DockerExecutor
 
     runtime = VllmDistributedRuntime()
-    runtime.platform_env_by_host = {"edge": {"TUNING": "edge"}, "server": {"TUNING": "server"}}
     monkeypatch.setattr(runtime, "get_common_env", lambda: {"TUNING": "runtime"})
     ctx = ClusterContext.build(
-        runtime, ["edge", "server"], "image", "sparkrun_fixture", {"TUNING": "user"} if explicit else {}, None, None, True
+        runtime,
+        ["edge", "server"],
+        "image",
+        "sparkrun_fixture",
+        {"TUNING": "user"} if explicit else {},
+        None,
+        None,
+        True,
+        platform_env_by_host={"edge": {"TUNING": "edge"}, "server": {"TUNING": "server"}},
     )
     executors = {h: DockerExecutor() for h in ctx.hosts}
     root = executors["edge"]
@@ -407,3 +414,26 @@ def test_broken_platform_cap_cannot_expand_the_budget(edge_platform, monkeypatch
     cluster, _ = placed(hardware("jetson-orin", 61.3))
     with pytest.raises(RuntimeError, match="platform memory policy failed"):
         resolved_hardware_for_scheduling(cluster, cluster.hosts)
+
+
+def test_solo_run_receives_the_heads_platform_env(monkeypatch):
+    """Per-host platform env is a run() argument, not state on the shared runtime singleton."""
+    from types import SimpleNamespace
+    from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
+
+    runtime = VllmDistributedRuntime()
+    captured = {}
+    monkeypatch.setattr(runtime, "_run_solo", lambda **kwargs: captured.update(kwargs) or 0)
+    recipe = SimpleNamespace(build_config_chain=lambda overrides: {})
+    rc = runtime.run(
+        ["edge"],
+        "image",
+        "serve",
+        recipe,
+        {},
+        backends={},
+        platform_env_by_host={"edge": {"TUNING": "edge"}, "other": {"TUNING": "other"}},
+    )
+    assert rc == 0
+    assert captured["platform_env"] == {"TUNING": "edge"}
+    assert "platform_env_by_host" not in vars(runtime)

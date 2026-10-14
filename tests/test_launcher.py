@@ -432,6 +432,14 @@ def test_launch_inference_threads_backends_to_runtime_run(monkeypatch, tmp_path,
     assert "nv-host" in threaded
     assert isinstance(threaded["nv-host"].collective, NcclBackend)
 
+    # Per-launch state reaches run() and stays off the shared runtime
+    # singleton (two launches in one process would otherwise race on it).
+    assert "nv-host" in _StubRuntime.last_kwargs["platform_env_by_host"]
+    assert result.runtime is not runtime
+    assert result.runtime.executor is _StubRuntime.last_kwargs["executor"]
+    assert "executor" not in vars(runtime)
+    assert "platform_env_by_host" not in vars(runtime)
+
     if reuse_hardware:
         assert transfer_calls[0]["observed_ib"].comm_env.get_env("nv-host")["NCCL_NET"] == "IB"
         assert "610.43.02 detected" in caplog.text
