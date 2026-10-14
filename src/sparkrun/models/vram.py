@@ -120,13 +120,6 @@ class VRAMEstimate:
     kv_cache_per_gpu_gb: float | None = None
     """KV allocation per GPU: explicit budget when supplied, otherwise estimated demand."""
 
-    @property
-    def fits_dgx_spark(self) -> bool:
-        """Deprecated explicit Spark-only comparison; never used for target fit."""
-        from sparkrun.core._platform_compat import legacy_spark_fit
-
-        return legacy_spark_fit(self)
-
     def fit_budget_gb(self, nominal_gb: float, scheduling_fraction: float) -> float:
         """Memory-fit reporting uses the active runtime budget and scheduling cap."""
         fraction = scheduling_fraction

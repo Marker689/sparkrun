@@ -758,6 +758,8 @@ without reading a broken config file.
 | `validate_ib_connectivity({host: ip})` | Pass `{host: [ip, ...]}`. The return value still maps each reachable host to one verified IP. |
 | `prepare_images(..., overrides, source_image=...)` | Pass the already resolved recipe; source selection belongs to the shared image planner. |
 | `RuntimePlugin.resolve_container(recipe, overrides)` | `resolve_container(recipe, host_hardware=...)`; apply image overrides to the recipe before resolution. Customize defaults with `default_image_for`, not a recipe-selection override. |
+| `models.vram.VRAMEstimate.fits_dgx_spark` | `models.fit.check_fit` for the selected target. For an explicit Spark-only comparison, `est.total_per_gpu_gb <= est.fit_budget_gb(DGX_SPARK_MEMORY_GB, DGX_SPARK_SCHEDULING_FRACTION)` with both constants from `platforms.dgx_spark`. |
+| `core.launcher.apply_platform_runtime_flag_defaults`, `core.launcher.resolve_platform_env_defaults` | `resolve_platform_runtime_flags(runtime_name, {host: hardware}, config_chain)` and `resolve_platform_env_by_host(runtime, {host: hardware}, declared_env)`, which the launch and `api.materialize` use. Neither mutates the recipe. |
 
 Private benchmark shells no longer accept both `fresh` and a resolved mode, or
 unused runtime/config cleanup arguments. Frontends should call the public

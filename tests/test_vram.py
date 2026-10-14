@@ -401,12 +401,15 @@ class TestEstimateVram:
         # model: 10/2 = 5, KV: 0.0001*10000/2 = 0.5, total = 5.5
         assert abs(est.total_per_gpu_gb - 5.5) < 0.01
 
-    def test_fits_dgx_spark_property(self):
+    def test_spark_fit_budget(self):
+        from sparkrun.platforms.dgx_spark import DGX_SPARK_MEMORY_GB, DGX_SPARK_SCHEDULING_FRACTION
+
+        budget = (DGX_SPARK_MEMORY_GB, DGX_SPARK_SCHEDULING_FRACTION)
         est_small = estimate_vram(model_vram=10.0, tensor_parallel=1)
-        assert est_small.fits_dgx_spark is True
+        assert est_small.total_per_gpu_gb <= est_small.fit_budget_gb(*budget)
 
         est_big = estimate_vram(model_vram=150.0, tensor_parallel=1)
-        assert est_big.fits_dgx_spark is False
+        assert est_big.total_per_gpu_gb > est_big.fit_budget_gb(*budget)
 
     def test_default_kv_dtype_is_none(self):
         """When no kv_dtype is passed, the estimate uses bfloat16 for computation but

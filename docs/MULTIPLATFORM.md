@@ -76,8 +76,9 @@ memory estimate, separate from the allocation admission rules below.
 
 Spark's capacity and 0.90 policy constants live in its platform plugin. Generic
 estimator JSON no longer contains `fits_dgx_spark` or `dgx_spark_fit_budget_gb`.
-The old Python `fits_dgx_spark` property and capacity constant imports remain
-through deprecated compatibility adapters; internal code must not use them.
+The old Python `fits_dgx_spark` property is removed (use `check_fit` for the
+selected target). The capacity constant imports remain through deprecated
+compatibility adapters; internal code must not use them.
 
 ### GPU allocation admission
 

@@ -36,7 +36,7 @@ def test_default_vram_gb_alias_matches_dgx_constant():
 
 
 # --------------------------------------------------------------------------
-# Homogeneous DGX — matches today's fits_dgx_spark answer
+# Homogeneous DGX — matches the Spark platform's fit budget
 # --------------------------------------------------------------------------
 
 
@@ -61,17 +61,22 @@ def test_check_fit_dgx_three_hosts_fits():
         assert detail.ok is True
 
 
-def test_check_fit_dgx_matches_legacy_fits_dgx_spark():
-    """For homogeneous DGX, check_fit.ok mirrors VRAMEstimate.fits_dgx_spark."""
+def test_check_fit_dgx_matches_the_spark_fit_budget():
+    """For homogeneous DGX, check_fit.ok mirrors the Spark platform's fit budget."""
+    from sparkrun.platforms.dgx_spark import DGX_SPARK_MEMORY_GB, DGX_SPARK_SCHEDULING_FRACTION
+
     cluster = ClusterDefinition(name="dgx", hosts=["s1"])
     placement = pack(ParallelismConfig(), cluster.hosts)
 
     fits = _estimate(per_gpu_gb=80.0)
     exceeds = _estimate(per_gpu_gb=200.0)
 
-    assert fits.fits_dgx_spark is True
+    def within_spark_budget(est):
+        return est.total_per_gpu_gb <= est.fit_budget_gb(DGX_SPARK_MEMORY_GB, DGX_SPARK_SCHEDULING_FRACTION)
+
+    assert within_spark_budget(fits) is True
     assert check_fit(fits, cluster, placement).ok is True
-    assert exceeds.fits_dgx_spark is False
+    assert within_spark_budget(exceeds) is False
     assert check_fit(exceeds, cluster, placement).ok is False
 
 
