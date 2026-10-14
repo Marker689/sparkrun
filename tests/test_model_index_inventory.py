@@ -14,7 +14,7 @@ from sparkrun.models import acquisition, manifest
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactRequest
 
 SHA = "a" * 40
-LIMIT = 16 * 1024 * 1024
+LIMIT = 128 * 1024 * 1024
 
 
 @pytest.fixture(params=[False, True], ids=["controller", "delegated"])
@@ -33,11 +33,14 @@ def resolver(request, monkeypatch):
     fetch = Mock(side_effect=download)
     monkeypatch.setattr("huggingface_hub.hf_hub_download", fetch)
 
-    def set_payload(size):
+    def set_payload(size=None, *, weight_map=None):
         nonlocal raw
-        raw = raw.ljust(size, b" ")
-        index.size = size
-        index.blob_id = hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest()
+        if weight_map is not None:
+            raw = json.dumps({"weight_map": weight_map}).encode()
+        if size is not None:
+            raw = raw.ljust(size, b" ")
+        index.size = len(raw)
+        index.blob_id = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
 
     def execute(host, shell, **kwargs):
         program = shell.split("<<'SPARKRUN_HUB_ADAPTER'\n", 1)[1].rsplit("\nSPARKRUN_HUB_ADAPTER", 1)[0]
@@ -71,19 +74,36 @@ def test_invalid_index_size_reports_actual_reason_without_download(resolver, siz
     assert "https://huggingface.co" in message
     if size is None:
         assert "size metadata is missing" in message and "exceed" not in message
+        assert "128 MiB inventory limit" in message
         assert "file selection all" not in message  # Full inventory also requires known sizes.
     elif size == LIMIT + 1:
-        assert str(size) + " bytes" in message and "exceeding the 16 MiB" in message
+        assert str(size) + " bytes" in message and "exceeding the 128 MiB" in message
     else:
         assert "size metadata is invalid" in message
     resolver.fetch.assert_not_called()
 
 
-@pytest.mark.parametrize("size", [251269, LIMIT])
+@pytest.mark.parametrize("size", [251269, 39449519, LIMIT])
 def test_valid_index_including_limit_is_authenticated_and_selected(resolver, size):
-    # The smaller case matches the reported Ornith base index's actual byte size.
+    # Real Ornith base/NVFP4 index sizes, plus the inclusive upper bound.
     resolver.set_payload(size)
     assert resolver.resolve()["weight_map"] == {"tensor": "model.safetensors"}
+    resolver.fetch.assert_called_once()
+
+
+def test_large_moe_weight_map_round_trips_without_truncation(resolver):
+    # Exercise a large parsed map and delegated JSON response, not just padding.
+    # Match the reported export's 60 layers, 512 experts, and 12 tensors/expert.
+    weight_map = {
+        f"model.language_model.layers.{layer}.mlp.experts.{expert}.{projection}.{tensor}": f"model-{layer * 24 // 60 + 1:05d}-of-00024.safetensors"
+        for layer in range(60)
+        for expert in range(512)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+        for tensor in ("weight", "weight_scale", "weight_scale_2", "input_scale")
+    }
+    resolver.set_payload(weight_map=weight_map)
+    assert 16 * 1024 * 1024 < resolver.index.size < LIMIT
+    assert resolver.resolve()["weight_map"] == weight_map
     resolver.fetch.assert_called_once()
 
 

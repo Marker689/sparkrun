@@ -77,9 +77,11 @@ Unfamiliar nested component trees remain included to avoid discarding separate
 vision/encoder weights. No shard count is inferred from safetensors filenames.
 Without a root index, the complete repository inventory is selected.
 
-Index-based selection accepts at most **16 MiB for the index JSON itself**;
+Index-based selection accepts at most **128 MiB for the index JSON itself**;
 this is an inventory parsing bound, not a limit on weight files, total model
-size, or VRAM. Missing index-size metadata is reported separately from an
+size, or VRAM. Quantized MoE exports can list each expert's weights and scales
+separately; Ornith-1.5-397B NVFP4, for example, has a 37.62 MiB index with
+369,891 tensor mappings. Missing index-size metadata is reported separately from an
 oversized index, with the repository, resolved revision, and endpoint. The
 same checks apply to controller and delegated acquisition. Selection `all`
 skips index-based filtering and can include additional weight formats; it does
@@ -106,7 +108,7 @@ configured SSH credentials; `--cache-dir` is the target's HF home, not `hub/`.
 # Metadata only, offline and read-only; no recursive cache traversal.
 sparkrun model-cache inspect org/model --revision COMMIT --cache-dir /models/hf
 
-# Resolve authoritative inventory online (plus a small index, at most 16 MiB).
+# Resolve authoritative inventory online (plus an index, at most 128 MiB).
 sparkrun model-cache resolve org/model --revision COMMIT --output manifest.json
 
 # Import trusted inventory for an existing/offline cache. Import is not repair.

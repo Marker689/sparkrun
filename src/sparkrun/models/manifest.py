@@ -135,7 +135,7 @@ def fetch_inventory(request: ModelArtifactRequest, *, token: str | None = None, 
 
 
 def read_weight_index(repo, revision, endpoint, token, entry):
-    """Read and authenticate the small index, independent of stale cache files.
+    """Read and authenticate a bounded index, independent of stale cache files.
 
     Also embedded verbatim in the pinned remote adapter.
     """
@@ -147,16 +147,19 @@ def read_weight_index(repo, revision, endpoint, token, entry):
 
     # This function is shared with the generated adapter: keep admission and
     # diagnostics here so local and delegated acquisition enforce one policy.
-    limit = 16 * 1024 * 1024
+    # Quantized MoE exports can enumerate each expert's weights and scales
+    # separately: Ornith-1.5-397B NVFP4 has a 37.62 MiB index.
+    limit_mib = 128
+    limit = limit_mib * 1024 * 1024
     label = f"{repo}@{revision}/{entry['path']} (endpoint {endpoint})"
     size = entry.get("size")
     if size is None:
-        raise ValueError(f"safetensors index size metadata is missing for {label}; cannot enforce the 16 MiB inventory limit")
+        raise ValueError(f"safetensors index size metadata is missing for {label}; cannot enforce the {limit_mib} MiB inventory limit")
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
         raise ValueError(f"safetensors index size metadata is invalid for {label}: {size!r}")
     if size > limit:
         raise ValueError(
-            f"safetensors index {label} is {size} bytes ({size / 1024**2:.2f} MiB), exceeding the 16 MiB inventory limit; "
+            f"safetensors index {label} is {size} bytes ({size / 1024**2:.2f} MiB), exceeding the {limit_mib} MiB inventory limit; "
             "use file selection all only if the full repository is intended"
         )
     with TemporaryDirectory(prefix="sparkrun-index-") as directory:
