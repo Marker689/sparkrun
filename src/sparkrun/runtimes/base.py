@@ -156,6 +156,27 @@ class RuntimePlugin(Plugin, ABC):
     that has not opted in.
     """
 
+    # --- Per-node env ---
+    supports_per_node_env: bool = True
+    """Whether a multi-node launch may give each node different env values.
+
+    Recipe env templates (``{launch.node_rank}`` and friends) render per node.
+    A runtime that starts every rank from one process with one environment
+    (``trtllm``'s ``mpirun`` on the head) cannot honor that, so it opts out and
+    :func:`sparkrun.core.launcher.launch_inference` refuses such a launch
+    before replacing a running workload.
+    """
+
+    # --- Launch materialization ---
+    replica_service_domains: bool = False
+    """Whether each data-parallel replica is its own service in ``api.materialize``.
+
+    When set, a ``tp*pp*dp`` world is split into ``dp`` service domains of
+    ``tp*pp`` workers, and every launch unit of one service must run the same
+    number of local workers (vLLM's distributed service requires both). When
+    unset, the whole world is one service.
+    """
+
     # --- Executor ---
     #
     # The active executor is set by :meth:`run` (which receives one
@@ -1126,6 +1147,16 @@ class RuntimePlugin(Plugin, ABC):
         # Remove lines that are only whitespace (left behind after removal)
         command = re.sub(r"\n\s*\n", "\n", command)
         return command
+
+    def presynced_gguf_overrides(self, recipe: Recipe, cache_dir: str) -> dict[str, Any]:
+        """Extra serve overrides for a GGUF model pre-synced into *cache_dir*.
+
+        Called by the launcher after it has pointed ``model`` at the resident
+        GGUF file (not under ``--dry-run``, and not for pre-placed weights), so
+        a runtime can resolve companion files beside it, e.g. llama.cpp's
+        multimodal projector. The base runtime needs none.
+        """
+        return {}
 
     def is_delegating_runtime(self) -> bool:
         """True if this runtime delegates entirely to external scripts.

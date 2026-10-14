@@ -647,6 +647,53 @@ def test_llama_cpp_issue_204_commandless_equivalent():
         assert fragment in cmd, fragment
 
 
+def _vision_recipe(**extra):
+    return Recipe.from_dict({"model": "unsloth/Qwen3-VL-8B-Instruct-GGUF:Q4_K_M", "runtime": "llama-cpp", "container": "img", **extra})
+
+
+def test_presynced_gguf_overrides_resolve_the_projector(monkeypatch):
+    """The launcher asks the runtime for GGUF companions; llama.cpp supplies mmproj."""
+    seen = {}
+
+    def _resolve(model, cache_dir, selector=None):
+        seen.update(model=model, cache_dir=cache_dir, selector=selector)
+        return _MMPROJ
+
+    monkeypatch.setattr("sparkrun.models.download.resolve_mmproj_container_path", _resolve)
+    got = LlamaCppRuntime().presynced_gguf_overrides(_vision_recipe(mmproj="F16"), "/hf")
+    assert got == {"_mmproj_path": _MMPROJ, "mmproj": _MMPROJ}
+    assert seen == {"model": "unsloth/Qwen3-VL-8B-Instruct-GGUF:Q4_K_M", "cache_dir": "/hf", "selector": "F16"}
+
+
+@pytest.mark.parametrize("selector", [False, "none", "off", "disabled"])
+def test_presynced_gguf_overrides_honor_a_disabled_projector(monkeypatch, selector):
+    def _unexpected(*a, **kw):
+        raise AssertionError("a disabled projector must not be resolved")
+
+    monkeypatch.setattr("sparkrun.models.download.resolve_mmproj_container_path", _unexpected)
+    assert LlamaCppRuntime().presynced_gguf_overrides(_vision_recipe(mmproj=selector), "/hf") == {}
+
+
+def test_presynced_gguf_overrides_without_a_projector(monkeypatch):
+    monkeypatch.setattr("sparkrun.models.download.resolve_mmproj_container_path", lambda *a, **kw: None)
+    assert LlamaCppRuntime().presynced_gguf_overrides(_vision_recipe(), "/hf") == {}
+
+
+def test_other_runtimes_add_no_gguf_companions():
+    from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
+
+    assert VllmDistributedRuntime().presynced_gguf_overrides(_vision_recipe(mmproj="F16"), "/hf") == {}
+
+
+def test_only_mpi_runtimes_refuse_per_node_env():
+    from sparkrun.runtimes.trtllm import TrtllmRuntime
+    from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
+
+    assert TrtllmRuntime.supports_per_node_env is False
+    assert LlamaCppRuntime.supports_per_node_env is True
+    assert VllmDistributedRuntime.supports_per_node_env is True
+
+
 class TestLlamaCppFollowLogs:
     """Test LlamaCppRuntime.follow_logs()."""
 

@@ -78,6 +78,8 @@ class TrtllmRuntime(RuntimePlugin):
 
     runtime_name = "trtllm"
     default_image_prefix = "nvcr.io/nvidia/tensorrt-llm/release"
+    # mpirun starts every rank from the head with one environment.
+    supports_per_node_env = False
 
     def cluster_strategy(self) -> str:
         """TRT-LLM uses native clustering with MPI orchestration."""

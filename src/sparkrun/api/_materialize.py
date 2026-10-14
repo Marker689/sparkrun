@@ -181,7 +181,7 @@ def materialize(
 
     assignments: list[tuple[int, str, int, int]] = []
     replica_size = parallelism.tensor_parallel * parallelism.pipeline_parallel
-    standard_vllm_layout = spec_engine == "vllm" and replica_size > 0 and world_size == replica_size * parallelism.data_parallel
+    replica_services = runtime.replica_service_domains and replica_size > 0 and world_size == replica_size * parallelism.data_parallel
     claimed_devices: set[tuple[str, int]] = set()
     for worker_rank in range(world_size):
         host, gpu = (
@@ -192,7 +192,7 @@ def materialize(
         if (host, gpu) in claimed_devices:
             raise ValueError("materialized launches do not support workers sharing accelerator %s on %s" % (gpu, host))
         claimed_devices.add((host, gpu))
-        service_index = worker_rank // replica_size if standard_vllm_layout else 0
+        service_index = worker_rank // replica_size if replica_services else 0
         assignments.append((worker_rank, host, gpu, service_index))
 
     # A launch unit may own several local workers, but never crosses a service
@@ -210,14 +210,17 @@ def materialize(
     for key in unit_keys:
         service_units.setdefault(key[0], []).append(key)
 
-    # A vLLM distributed service uses one homogeneous local process count for
-    # every participating launch unit. Keep the execution-graph schema more
-    # general, but reject layouts this adapter cannot launch faithfully.
-    if spec_engine == "vllm":
+    # A replica service (vLLM's distributed service) uses one homogeneous local
+    # process count for every participating launch unit. Keep the
+    # execution-graph schema more general, but reject layouts this adapter
+    # cannot launch faithfully.
+    if runtime.replica_service_domains:
         for service_index, keys in service_units.items():
             local_worker_counts = {len(workers_by_unit[key]) for key in keys}
             if len(local_worker_counts) != 1:
-                raise ValueError("vLLM service %d requires the same number of local workers on every launch unit" % service_index)
+                raise ValueError(
+                    "%s service %d requires the same number of local workers on every launch unit" % (runtime.runtime_name, service_index)
+                )
 
     units: list[ResolvedLaunchUnit] = []
     workers: list[ResolvedWorker] = []

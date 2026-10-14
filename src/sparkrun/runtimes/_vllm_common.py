@@ -22,6 +22,7 @@ class VllmRuntimeBase(RuntimePlugin):
 
     readiness_styles = (OPENAI_CHAT_STREAM, OPENAI_RESPONSES_STREAM, ANTHROPIC_MESSAGES_STREAM)
     readiness_health_path = "/health"
+    replica_service_domains = True
 
     def native_api_options(self) -> list[str]:
         return ["chat_completions", "responses", "messages"]

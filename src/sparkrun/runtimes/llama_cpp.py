@@ -122,6 +122,24 @@ class LlamaCppRuntime(RuntimePlugin):
         """llama.cpp uses native RPC-based distribution, not Ray."""
         return "native"
 
+    def presynced_gguf_overrides(self, recipe, cache_dir: str) -> dict[str, Any]:
+        """Resolve the multimodal projector (mmproj) beside a pre-synced GGUF.
+
+        The selector lives in ``runtime_config`` (the top-level ``mmproj:`` key
+        is swept there). The resolved container path lands in the override
+        layer so ``{mmproj}`` substitutes and ``--mmproj`` is auto-injected.
+        """
+        from sparkrun.models.download import resolve_mmproj_container_path
+
+        selector = recipe.runtime_config.get("mmproj")
+        if selector is not None and str(selector).lower() in ("false", "none", "off", "no", "0", "disable", "disabled"):
+            return {}
+        path = resolve_mmproj_container_path(recipe.model, cache_dir, selector=None if selector is None else str(selector))
+        if not path:
+            return {}
+        logger.info("mmproj projector resolved, container path: %s", path)
+        return {"_mmproj_path": path, "mmproj": path}
+
     def managed_rendezvous_flags(self) -> tuple[str, ...]:
         """``--rpc`` carries the worker address list, built from the placement.
 
