@@ -232,16 +232,8 @@ def open_log_target(
         SparkrunError: Neither ``workload_id`` nor ``recipe`` was given, or
             *scope* is not a valid value.
     """
-    from sparkrun.api._resolve import (
-        discover_cluster_id_by_intent,
-        scope_operation,
-        prepare_transport,
-        resolve_cluster,
-        resolve_cluster_for_job,
-        resolve_recipe,
-    )
+    from sparkrun.api._resolve import prepare_transport, resolve_workload_target, scope_operation
     from sparkrun.orchestration.executor import resolve_executor
-    from sparkrun.orchestration.job_metadata import generate_intent_id, load_job_metadata
 
     # Persistent metadata and runtime naming still use the internal cluster_id.
     cluster_id = workload_id
@@ -255,49 +247,21 @@ def open_log_target(
 
     cache_dir = str(resolve_configured_cache_dir(cache_dir, config=sctx.config if sctx is not None else None))
 
-    resolved_recipe = None
-    if not cluster_id:
-        if recipe is None:
-            raise SparkrunError("Log resolution requires workload_id or recipe+hosts")
-        cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
+    target_spec = resolve_workload_target(
+        workload_id=cluster_id,
+        recipe=recipe,
+        hosts=hosts,
+        overrides=overrides,
+        cluster=cluster,
+        cache_dir=cache_dir,
+        operation="Log resolution",
+        sctx=sctx,
+    )
+    cluster_id, meta, target_hosts, cluster_def, resolved_recipe = target_spec[:5]
+    # A native resource is read through its executor's control plane, which
+    # needs no host transport; everything else reads over the job's connection.
+    if not target_spec.transport_prepared and not (meta and meta.get("native_resource") is not None):
         prepare_transport(cluster_def)
-        resolved_recipe = resolve_recipe(recipe, sctx=sctx)
-        from sparkrun.api._resolve import resolve_operation_target
-
-        cluster_def, _ = resolve_operation_target(recipe=resolved_recipe, cluster=cluster_def, sctx=sctx)
-        target_hosts = list(cluster_def.hosts)
-        cluster_id = discover_cluster_id_by_intent(
-            generate_intent_id(resolved_recipe, overrides=overrides),
-            target_hosts,
-            cluster_def=cluster_def,
-            cache_dir=cache_dir,
-            sctx=sctx,
-        )
-        meta = load_job_metadata(cluster_id, cache_dir=cache_dir)
-        # Discovery ran against the invocation's cluster; the reads below run
-        # against the job's own, which its metadata may name (see
-        # ``resolve_cluster_for_job``).  Re-prepare the transport only if that
-        # actually changed which cluster we are talking to.
-        job_cluster = resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx)
-        if (job_cluster.name, job_cluster.user) != (cluster_def.name, cluster_def.user):
-            cluster_def = job_cluster
-            prepare_transport(cluster_def)
-    else:
-        meta = load_job_metadata(cluster_id, cache_dir=cache_dir)
-        if hosts:
-            target_hosts = list(hosts)
-        elif meta and meta.get("hosts"):
-            target_hosts = list(meta["hosts"])
-        elif cluster is not None:
-            target_hosts = list(resolve_cluster(cluster, sctx=sctx).hosts)
-        else:
-            raise JobNotFound("No hosts known for workload_id %r" % workload_id)
-        # No explicit cluster → recover the one the job was launched on, so
-        # the log reads connect as that launch did rather than as this
-        # control node's own login (issue #277).
-        cluster_def = resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx)
-        if not (meta and meta.get("native_resource") is not None):
-            prepare_transport(cluster_def)
 
     runtime = _resolve_runtime_for_job(meta, cluster_id, recipe=resolved_recipe, sctx=sctx)
     from sparkrun.core._executor_destination import metadata_executor_overrides

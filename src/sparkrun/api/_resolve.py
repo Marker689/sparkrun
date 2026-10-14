@@ -29,7 +29,7 @@ from sparkrun.core.application_profile import resource_name
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from sparkrun.api._errors import HostsUnreachable, RecipeNotFound, SparkrunError
 
@@ -480,6 +480,120 @@ def discover_cluster_id_by_intent(
             workload_ids=matches,
         )
     return matches[0]
+
+
+class WorkloadTarget(NamedTuple):
+    """The resolved address of one existing workload (see :func:`resolve_workload_target`)."""
+
+    workload_id: str
+    meta: dict | None
+    hosts: list[str]
+    cluster: "ClusterDefinition"
+    recipe: "Recipe | None"
+    #: True when *cluster*'s transport was already prepared during discovery,
+    #: so the caller need not prepare it a second time.
+    transport_prepared: bool
+
+
+def resolve_workload_target(
+    *,
+    workload_id: str | None,
+    recipe: "str | Recipe | None",
+    hosts: tuple[str, ...] | list[str] | None,
+    overrides: dict | None,
+    cluster: "str | ClusterDefinition | None",
+    cache_dir: str,
+    operation: str,
+    sctx: "SparkrunContext | None" = None,
+) -> WorkloadTarget:
+    """Resolve which workload an operation on an *existing* job addresses.
+
+    The shared front half of ``api.stop`` and ``api.open_log_target``:
+
+    - **By id**: hosts are explicit ``hosts`` > the job's recorded hosts >
+      the named ``cluster``'s hosts; none of those is :class:`JobNotFound`.
+    - **By recipe**: the intent is discovered on the invocation's cluster
+      (``resolve_cluster(cluster, hosts)``) and its hosts are the discovery
+      range.
+
+    Either way the connection then comes from the *job*
+    (:func:`resolve_cluster_for_job`, issue #277) whenever metadata exists: the
+    recorded cluster supplies connection identity only, never hosts — those
+    stay the user's or the job's own.  Without metadata, an id-form target
+    still recovers what it can (an explicit cluster, else an anonymous one),
+    while a recipe-form target keeps the invocation's cluster.
+
+    Transport preparation is left to the caller, which knows whether its
+    operation needs one; ``transport_prepared`` reports when discovery already
+    prepared exactly this connection.
+
+    Raises:
+        SparkrunError: neither ``workload_id`` nor ``recipe`` was given.
+        JobNotFound: no hosts can be determined, or no running workload
+            matches the recipe.
+        AmbiguousWorkload: the recipe matches several running workloads.
+    """
+    from sparkrun.api._errors import JobNotFound
+    from sparkrun.orchestration.job_metadata import generate_intent_id, load_job_metadata
+
+    if workload_id:
+        meta = load_job_metadata(workload_id, cache_dir=cache_dir)
+        if hosts:
+            target_hosts = list(hosts)
+        elif meta and meta.get("hosts"):
+            target_hosts = list(meta["hosts"])
+        elif cluster is not None:
+            target_hosts = list(resolve_cluster(cluster, sctx=sctx).hosts)
+        elif meta is None:
+            raise JobNotFound("No job metadata found for workload_id %r and no hosts provided" % workload_id)
+        else:
+            target_hosts = []
+        if not target_hosts:
+            raise JobNotFound("No hosts known for workload_id %r" % workload_id)
+        return WorkloadTarget(
+            workload_id,
+            meta,
+            target_hosts,
+            resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx),
+            None,
+            False,
+        )
+
+    if recipe is None:
+        raise SparkrunError("%s requires workload_id or recipe+hosts" % operation)
+    cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
+    resolved_recipe = resolve_recipe(recipe, sctx=sctx)
+    cluster_def, _ = resolve_operation_target(recipe=resolved_recipe, cluster=cluster_def, sctx=sctx)
+    target_hosts = list(cluster_def.hosts)
+    # Prepares the invocation cluster's transport for the status sweep.
+    found = discover_cluster_id_by_intent(
+        generate_intent_id(resolved_recipe, overrides=overrides),
+        target_hosts,
+        cluster_def=cluster_def,
+        cache_dir=cache_dir,
+        sctx=sctx,
+    )
+    meta = load_job_metadata(found, cache_dir=cache_dir)
+    prepared = True
+    if meta:
+        # Discovery ran against the invocation's cluster; the operation runs
+        # against the job's, which its metadata may name even when this
+        # invocation didn't.  Hosts stay the discovery range.
+        job_cluster = resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx)
+        prepared = _connection_identity(job_cluster) == _connection_identity(cluster_def)
+        cluster_def = job_cluster
+    return WorkloadTarget(found, meta, target_hosts, cluster_def, resolved_recipe, prepared)
+
+
+def _connection_identity(cluster: "ClusterDefinition") -> tuple:
+    """What transport preparation depends on: which cluster, as whom, through what."""
+    return (
+        cluster.name,
+        cluster.user,
+        cluster.transport,
+        cluster.provider_ref,
+        tuple(cluster.hosts),
+    )
 
 
 __all__ = [

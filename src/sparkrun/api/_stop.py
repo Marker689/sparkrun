@@ -22,7 +22,7 @@ from sparkrun.core.coordination import operation_boundary
 import logging
 from typing import TYPE_CHECKING
 
-from sparkrun.api._errors import JobNotFound, SparkrunError
+from sparkrun.api._errors import SparkrunError
 from sparkrun.api._models import StopResult
 
 if TYPE_CHECKING:
@@ -68,86 +68,31 @@ def stop(
         sctx: Optional shared :class:`SparkrunContext` for chained
             api calls (registry/cluster manager + config sharing).
     """
-    from sparkrun.api._resolve import (
-        discover_cluster_id_by_intent,
-        scope_operation,
-        resolve_cluster,
-        resolve_cluster_for_job,
-        resolve_recipe,
-    )
+    from sparkrun.api._resolve import resolve_workload_target, scope_operation
     from sparkrun.orchestration.executor import resolve_executor
-    from sparkrun.orchestration.job_metadata import (
-        generate_intent_id,
-        load_job_metadata,
-    )
 
     from sparkrun.core.config import resolve_configured_cache_dir
 
-    cluster_id = workload_id
     cache_dir = str(resolve_configured_cache_dir(cache_dir, config=sctx.config if sctx is not None else None))
 
-    # Derive cluster_id from recipe+hosts when not given explicitly.
-    if not cluster_id:
-        if recipe is None:
-            raise SparkrunError("api.stop requires workload_id or recipe+hosts")
-        cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
-        resolved_recipe = resolve_recipe(recipe, sctx=sctx)
-        from sparkrun.api._resolve import resolve_operation_target
-
-        cluster_def, _ = resolve_operation_target(recipe=resolved_recipe, cluster=cluster_def, sctx=sctx)
-        intent_id = generate_intent_id(resolved_recipe, overrides=overrides)
-        target_hosts = list(cluster_def.hosts)
-
-        # Status-driven discovery: ask the executor what's running on
-        # the supplied hosts and filter for cluster_ids matching the
-        # computed intent.  Load-aware schedulers may have placed the
-        # workload on a different host set than ``hosts`` — that's the
-        # whole point of separating intent from placement.  Here we
-        # accept that the *user's* host scope is the authoritative
-        # discovery range.
-        cluster_id = discover_cluster_id_by_intent(
-            intent_id,
-            target_hosts,
-            cluster_def=cluster_def,
-            cache_dir=cache_dir,
-            sctx=sctx,
-        )
-        meta = load_job_metadata(cluster_id, cache_dir=cache_dir)
-        # Discovery ran against the *invocation's* cluster; teardown runs
-        # against the *job's*, which the metadata may name even when this
-        # invocation didn't (see ``resolve_cluster_for_job``).  Hosts stay as
-        # resolved above — only the connection identity is recovered.
-        if meta:
-            cluster_def = resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx)
-    else:
-        # cluster_id given — load metadata to recover hosts/executor.
-        meta = load_job_metadata(cluster_id, cache_dir=cache_dir)
-        if meta is None and not hosts and cluster is None:
-            raise JobNotFound("No job metadata found for cluster_id %r and no hosts provided" % cluster_id)
-
-        # Determine target hosts: explicit > metadata > error.
-        if hosts:
-            target_hosts = list(hosts)
-        elif meta and meta.get("hosts"):
-            target_hosts = list(meta["hosts"])
-        elif cluster is not None:
-            target_hosts = list(resolve_cluster(cluster, sctx=sctx).hosts)
-        else:
-            target_hosts = []
-
-        if not target_hosts:
-            raise JobNotFound("No hosts known for cluster_id %r" % cluster_id)
-
-        # Now that we know the hosts, build a cluster definition for
-        # downstream consumers.  With no explicit cluster this is where the
-        # job's own recorded cluster (SSH user, executor pin, transport) is
-        # recovered — the alternative is an anonymous definition that
-        # connects as the control node's login (issue #277).
-        cluster_def = resolve_cluster_for_job(cluster, target_hosts, meta=meta, sctx=sctx)
+    # Recipe form: status-driven discovery of the intent over the user's host
+    # scope (a load-aware scheduler may have placed it on any of them).  Both
+    # forms then reach the job through its own recorded connection (#277).
+    target_spec = resolve_workload_target(
+        workload_id=workload_id,
+        recipe=recipe,
+        hosts=hosts,
+        overrides=overrides,
+        cluster=cluster,
+        cache_dir=cache_dir,
+        operation="api.stop",
+        sctx=sctx,
+    )
+    cluster_id, meta, target_hosts, cluster_def = target_spec[:4]
 
     # Provider refresh may update connection/executor settings. Resolve only
     # after that refresh; SSH transports are a no-op here.
-    sctx, _ = scope_operation(cluster_def, sctx=sctx)
+    sctx, _ = scope_operation(cluster_def, sctx=sctx, prepare=not target_spec.transport_prepared)
 
     # Resolve the executor — prefer recipe-encoded selection from metadata
     # so we use the same executor that launched the workload.
