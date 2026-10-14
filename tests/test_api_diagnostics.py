@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import Mock
 
 import pytest
@@ -61,6 +61,7 @@ def test_captures_isolate_concurrent_logs_feedback_and_propagated_fanout(sctx, t
     root = logging.getLogger()
     level, handlers = root.level, list(root.handlers)
     barrier = Barrier(2)
+    left_finished = Event()
 
     def run(label):
         context = copy(sctx)
@@ -68,14 +69,19 @@ def test_captures_isolate_concurrent_logs_feedback_and_propagated_fanout(sctx, t
         path = tmp_path / (label + ".ndjson")
         with api.capture_diagnostics(path, sctx=context) as capture:
             barrier.wait(timeout=10)
-            logging.getLogger("test.capture").warning("only-" + label)
+            logging.getLogger("test.capture").debug("only-" + label)
             CURRENT.get().feedback({"type": "feedback", "message": "structured-" + label})
             with ThreadPoolExecutor(1) as pool:
-                submit(pool, logging.getLogger("test.capture").warning, "fanout-" + label).result()
+                submit(pool, logging.getLogger("test.capture").info, "fanout-" + label).result()
             with api.capture_diagnostics(tmp_path / "ignored-nested.ndjson", sctx=context) as nested:
                 assert capture is nested
+            if label == "right":
+                assert left_finished.wait(timeout=10)
+                logging.getLogger("test.capture").debug("after-left-capture-closed")
             assert capture.result is None
         assert capture.result is not None
+        if label == "left":
+            left_finished.set()
         return path.read_text()
 
     with ThreadPoolExecutor(2) as pool:
@@ -85,8 +91,113 @@ def test_captures_isolate_concurrent_logs_feedback_and_propagated_fanout(sctx, t
             assert prefix + label in text
             assert prefix + other not in text
     assert root.level == level and root.handlers == handlers
+    assert "after-left-capture-closed" in right and "after-left-capture-closed" not in left
     assert CURRENT.get() is None
     assert not (tmp_path / "ignored-nested.ndjson").exists()
+
+
+@pytest.mark.parametrize("console_level", [25, logging.WARNING, logging.DEBUG])
+def test_capture_includes_debug_without_changing_console_or_feedback(sctx, tmp_path, console_level):
+    from io import StringIO
+
+    root = logging.getLogger()
+    old_level = root.level
+    output = StringIO()
+    console = logging.StreamHandler(output)  # NOTSET: follows the application's logger threshold.
+    logger = logging.getLogger("test.capture.verbose")
+    console.addFilter(logging.Filter(logger.name))
+    original_filters = list(console.filters)
+    old_logger_level = logger.level
+    root.addHandler(console)
+    root.setLevel(console_level)
+    logger.setLevel(logging.NOTSET)
+    events = []
+    sctx.operation = OperationState(events=events.append)
+    path = tmp_path / "verbose.ndjson"
+    levels = [logging.DEBUG, 15, logging.INFO, 25, logging.WARNING]
+    try:
+        with api.capture_diagnostics(path, sctx=sctx):
+            sctx.operation.secrets.add("diagnostic-secret")
+            for level in levels:
+                logger.log(level, "level-%d diagnostic-secret", level)
+            with ThreadPoolExecutor(1) as pool:
+                pool.submit(logger.debug, "unrelated thread detail").result()
+        assert root.level == console_level
+        assert console.level == logging.NOTSET and console.filters == original_filters
+        expected = ["level-%d diagnostic-secret" % level for level in levels if level >= console_level]
+        if console_level == logging.DEBUG:
+            expected.append("unrelated thread detail")
+        assert output.getvalue().splitlines() == expected
+        captured = [row for row in records(path) if row["_type"] == "log" and row["logger"] == logger.name]
+        assert len(captured) == len(levels)
+        assert captured[0]["level"] == "DEBUG"
+        assert all("[redacted]" in row["message"] for row in captured)
+        assert "diagnostic-secret" not in path.read_text()
+        assert "unrelated thread detail" not in path.read_text()
+        assert [event["message"] for event in events] == [
+            "level-%d diagnostic-secret" % level for level in levels if level >= max(25, console_level)
+        ]
+    finally:
+        root.removeHandler(console)
+        root.setLevel(old_level)
+        logger.setLevel(old_logger_level)
+
+
+def test_capture_preserves_explicit_logger_levels_and_restores_after_failure(sctx, tmp_path):
+    from io import StringIO
+
+    root = logging.getLogger()
+    old_level = root.level
+    console = logging.StreamHandler(StringIO())
+    logger = logging.getLogger("test.capture.explicit")
+    old_logger_level = logger.level
+    path = tmp_path / "explicit.ndjson"
+    original = RuntimeError("original failure")
+    root.addHandler(console)
+    root.setLevel(logging.WARNING)
+    logger.setLevel(logging.DEBUG)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            with api.capture_diagnostics(path, sctx=sctx):
+                logger.debug("explicit debug still reaches console")
+                logger.setLevel(logging.WARNING)
+                logger.info("explicitly suppressed detail")
+                logger.warning("explicit warning")
+                raise original
+        assert caught.value is original
+        assert root.level == logging.WARNING and logger.level == logging.WARNING
+        assert not console.filters
+        assert console.stream.getvalue().splitlines() == ["explicit debug still reaches console", "explicit warning"]
+        assert "explicit debug still reaches console" in path.read_text()
+        assert "explicitly suppressed detail" not in path.read_text()
+    finally:
+        root.removeHandler(console)
+        root.setLevel(old_level)
+        logger.setLevel(old_logger_level)
+
+
+def test_log_attachment_failure_restores_configuration_and_closes_file(sctx, tmp_path, monkeypatch):
+    from sparkrun.diagnostics import _logging
+
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
+    filters = {handler: list(handler.filters) for handler in handlers}
+    attach = _logging.attach
+    attached = []
+
+    def fail(handler):
+        attached.append(handler)
+        attach(handler)
+        raise RuntimeError("attachment failed")
+
+    monkeypatch.setattr(_logging, "attach", fail)
+    with pytest.raises(RuntimeError, match="attachment failed"):
+        with api.capture_diagnostics(tmp_path / "attachment.ndjson", sctx=sctx):
+            pytest.fail("capture must fail before work starts")
+    assert root.level == level and root.handlers == handlers
+    assert all(handler.filters == filters[handler] for handler in handlers)
+    assert attached[0]._writer._fh is None
+    assert CURRENT.get() is None
 
 
 def test_capture_limits_keep_valid_completion_and_do_not_change_original_exception(sctx, tmp_path):

@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 class _DiagnosticsLogHandler(logging.Handler):
     """Logging handler that captures records into an NDJSON writer.
 
-    Captures only records attributed to this operation, at the application's
-    existing logging level. It never changes process-wide verbosity.
+    Captures DEBUG and higher records attributed to this operation. Shared
+    admission keeps ordinary handlers at their configured verbosity.
     Records are emitted as ``log`` events in the diagnostics file.
     """
 
@@ -61,7 +61,8 @@ class RunDiagnosticsCollector:
             diag.phase_end("launch")
             diag.emit_summary()
 
-    Logging is scoped to the current operation and preserves configured levels.
+    Logging captures DEBUG for the current operation while preserving console
+    verbosity and explicit per-logger suppression.
     Public callers should use ``api.capture_diagnostics`` for bundle lifecycle,
     section results, redaction, and bounded storage.
     """
@@ -96,20 +97,21 @@ class RunDiagnosticsCollector:
         operation = self._operation_scope.__enter__()
         try:
             self._writer.open()
+            self._log_handler = _DiagnosticsLogHandler(self._writer, operation)
+            self._log_handler.setFormatter(logging.Formatter("%(message)s"))
+            from sparkrun.diagnostics._logging import attach
+
+            attach(self._log_handler)
         except BaseException:
-            self._operation_scope.__exit__(None, None, None)
-            self._operation_scope = None
+            self.close()
             raise
-        self._log_handler = _DiagnosticsLogHandler(self._writer, operation)
-        self._log_handler.setFormatter(logging.Formatter("%(message)s"))
-        root = logging.getLogger()
-        root.addHandler(self._log_handler)
         return self
 
     def close(self) -> None:
         if self._log_handler is not None:
-            root = logging.getLogger()
-            root.removeHandler(self._log_handler)
+            from sparkrun.diagnostics._logging import detach
+
+            detach(self._log_handler)
             self._log_handler = None
         self._writer.close()
         if self._operation_scope is not None:

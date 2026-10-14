@@ -271,6 +271,8 @@ def test_named_cluster_survives_explicit_host_subset(runner, cluster_env, busy_c
 def test_native_handler_result_needs_no_private_launch_handle(
     runner, cluster_env, busy_cluster_status, monkeypatch, tmp_path, dry_run, diagnostics, no_ready_wait
 ):
+    import logging
+
     from sparkrun import api
     from sparkrun.core.hardware import default_dgx_spark_hardware
 
@@ -280,6 +282,8 @@ def test_native_handler_result_needs_no_private_launch_handle(
     monkeypatch.setattr("sparkrun.core.hardware_probe.probe_hosts", probe)
 
     def native_run(options, *, sctx, plan):
+        logging.getLogger("sparkrun.test.native_run").debug("diagnostic-debug-launch-detail")
+        logging.getLogger("sparkrun.test.native_run").info("diagnostic-info-launch-detail")
         assert options.trust is False
         options.recipe.post_commands = ["native handler owns these hooks"]
         return api.RunResult(
@@ -314,6 +318,8 @@ def test_native_handler_result_needs_no_private_launch_handle(
     result = runner.invoke(main, args)
     assert result.exit_code == (0 if dry_run or no_ready_wait else 1), result.output + repr(result.exception)
     assert "native serve --port 9001" in result.output
+    assert "diagnostic-debug-launch-detail" not in result.output
+    assert "diagnostic-info-launch-detail" not in result.output
     if dry_run:
         probe.assert_not_called()
     else:
@@ -327,3 +333,5 @@ def test_native_handler_result_needs_no_private_launch_handle(
         records = [json.loads(line) for line in (tmp_path / "run.ndjson").read_text().splitlines()]
         assert next(r for r in records if r["_type"] == "run_launch_result")["rc"] == 0
         assert records[-1]["_type"] == "bundle_complete"
+        captured = {r["level"]: r["message"] for r in records if r["_type"] == "log" and r["logger"] == "sparkrun.test.native_run"}
+        assert captured == {"DEBUG": "diagnostic-debug-launch-detail", "INFO": "diagnostic-info-launch-detail"}

@@ -69,11 +69,17 @@ new reads; an interruption during collection still attempts cleanup.
 behavior. When no cleanup is required, capture can collect failure tails at exit
 for workloads recorded by planning or launch.
 
-Capture preserves the application's logging levels. It records logs attributed
-to its operation; it does not turn on global DEBUG logging or capture unrelated
-requests. Background work needs the usual operation context propagation (shared
-fan-out uses `sparkrun.core.operation.submit`). Structured feedback uses the public
-[plugin feedback interface](FEEDBACK.md).
+Capture includes DEBUG and higher logs for its operation independently of CLI
+verbosity; `--collect-diagnostics` does not require `-vvv`. Console output and
+existing application handlers retain their normal thresholds. Capture temporarily
+lowers the root logger's admission threshold and restores it after the last
+overlapping capture closes. Explicit named-logger thresholds (including noisy
+HTTP/transport suppression) and `logging.disable()` remain in effect. Configure
+application logging before starting captures.
+
+Bundles exclude unrelated requests. Background work needs the usual operation
+context propagation (shared fan-out uses `sparkrun.core.operation.submit`).
+Structured feedback uses the public [plugin feedback interface](FEEDBACK.md).
 
 ## Format, limits, and failure behavior
 

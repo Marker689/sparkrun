@@ -18,7 +18,8 @@ def capture_diagnostics(
     captures reuse the outer bundle (including its destination and limits).
     Opening a new output file can fail before work begins; collection failures
     after opening are recorded without changing the operation's outcome.
-    Existing files are never overwritten. Logging preserves application levels.
+    Existing files are never overwritten. Includes DEBUG logs for this operation
+    without increasing console verbosity; explicit named-logger limits still apply.
     """
     return capture(output_path, sctx=sctx, max_bytes=max_bytes, log_tail=log_tail, dry_run=dry_run)
 

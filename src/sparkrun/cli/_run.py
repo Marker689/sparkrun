@@ -219,7 +219,7 @@ def _report_readiness_outcome(readiness) -> None:
     default=None,
     type=click.Path(),
     hidden=HIDE_ADVANCED_OPTIONS,
-    help="Collect diagnostics to NDJSON file",
+    help="Collect diagnostics, including DEBUG logs, to an NDJSON file without increasing console verbosity",
 )
 @click.option(
     "--timings/--no-timings",
