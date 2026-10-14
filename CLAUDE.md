@@ -183,15 +183,19 @@ wrote always wins:
 
 | Hook                                   | Scope                        | Folded in by                                              |
 |----------------------------------------|------------------------------|-----------------------------------------------------------|
-| `default_image(runtime)`               | container image              | `RuntimePlugin.default_image_for()`                        |
-| `default_runtime_flags(runtime, accel)`| recipe `defaults` (serve flags) | `launcher.apply_platform_runtime_flag_defaults` (`setdefault`) |
-| `default_env(runtime, accel, family=)` | container env                | `launcher.resolve_platform_env_defaults` (lowest env tier) |
-| `default_executor_config(executor)`    | `ExecutorConfig`             | `executor.resolve_executor(host_hardware=…)`, layer 9      |
+| `default_image(runtime)`               | container image              | `RuntimePlugin.default_image_for()`, per host via `images.resolve_runtime_image_plan` |
+| `default_runtime_flags(runtime, accel)`| recipe `defaults` (serve flags) | `launcher.resolve_platform_runtime_flags` (keys absent from the config chain only) |
+| `default_env(runtime, accel, family=)` | container env                | `platforms.accelerator_defaults` per host in `launch_inference` (lowest env tier, `platform_env_by_host`) |
+| `default_executor_config(executor)`    | `ExecutorConfig`             | `executor.resolve_executor(host_hardware=…)`, layer 9, one executor per host |
 | `default_max_gpu_memory_utilization`   | usable-memory cap            | `core.limits`                                              |
 | `default_compute_capability(accel)`    | compute capability / `arch`  | `platforms.resolve_compute_capability`                     |
 
-All are keyed off the **head host's** hardware — one image / serve command /
-executor is built per launch, so a representative host is the right scope.
+Each is resolved over the hardware the launch was **placed on**, through
+`platforms.accelerator_defaults` (which merges the defaults of every assigned
+device and raises on a conflict an explicit setting does not resolve). Image,
+env and executor are per host; serve flags are one command, so
+`resolve_platform_runtime_flags` requires every host to agree and raises
+otherwise ("set it explicitly or change placement").
 `default_env` receives the runtime *family* (`get_family()`, e.g. `"vllm"` for
 vllm-ray / vllm-distributed / eugr-vllm) alongside the exact name, so a platform
 can target a family without enumerating variants; exact name wins over family.
@@ -233,8 +237,8 @@ pool cannot be attributed to one of several. A 128 GB Spark measures 119.7 GiB
 ### In-Tree Plugins (`plugins/` + `core/in_tree_plugins.py`)
 
 `sparkrun.plugins` is the **mate of the out-of-tree plugin system**: same
-registration path (`external_plugins.load_plugin_module` — SAF subclass scan,
-then the `register(v)` hook), different source. A first-party integration
+registration path (`registration.load_and_register_plugin` — SAF subclass
+scan, then the `register(v)` hook), different source. A first-party integration
 therefore has no capability an external one lacks.
 
 It is for **cross-cutting integrations only** — things that span several
@@ -246,19 +250,28 @@ executor" on its own. Packages that map cleanly onto one extension point
 `benchmarking`) stay where they are with their own `find_types_in_modules` scan
 in `core/bootstrap.py`.
 
-**Every in-tree plugin is gated by a feature flag** — the same reason
-`executor.docker` and `gateway.litellm` carry one despite shipping on. The flag
-is checked *before* the import, so turning a plugin off costs nothing at all:
-no import, no commands, no registrations. It is the plugin's **own** flag, not
-a separate presence flag — a dual-flag scheme was considered and rejected as
-incoherent (no point loading a plugin whose capability won't be used, and none
-in enabling that capability without the plugin).
+**Whether a plugin loads is decided before its import**, so turning one off
+costs nothing at all: no import, no commands, no registrations. One policy
+covers bundled, directory, managed and installed plugins
+(`core/plugin_policy.py:plugin_state`), first hit wins: `plugins.enabled.<id>`
+in `config.yaml` (what `plugins enable` / `disable` write) → the legacy `integrations:`
+mapping → the application profile's selected / required integrations → a
+legacy whole-plugin feature flag (`LEGACY_PLUGIN_FLAGS`, or the plugin's
+`IN_TREE_PLUGIN_FEATURES` entry when it declares no manifest) → the default
+(on for in-tree and directory plugins, off for installed packages). Directory
+and managed plugins additionally need `core.external_plugins`.
 
-The binding lives in `in_tree_plugins.IN_TREE_PLUGIN_FEATURES` (data, not a
-plugin attribute) because the flag must resolve *without importing* the module
-it gates. A plugin missing an entry or a registered flag is skipped loudly,
-since unknown flags fail closed and the silent version would put the symptom
-far from its cause.
+Loading and capability are separate. A plugin's capability flags (e.g.
+`gateway.litellm`) come from its `SPARKRUN_PLUGIN_MANIFEST`, which
+`plugin_manifest.read_declarations` reads as a literal **without importing the
+module**; an enabled capability cannot load a disabled plugin.
+`in_tree_plugins.IN_TREE_PLUGIN_FEATURES` is now the inventory of known in-tree
+module names plus those legacy bindings: a module under `sparkrun.plugins`
+without an entry is skipped loudly, since the silent version would put the
+symptom far from its cause. Namespace membership is not ownership: only
+`BUNDLED_PLUGIN_NAMES` at their shipped location load at the in-tree
+declaration tier (`in_tree_declaration_tier`); a separately installed package in
+`sparkrun.plugins.<name>` (SparkRoute, ColdSnap) is third-party code.
 
 One consequence worth knowing: `PluggableGroup` attaches plugin commands once
 per process, so the gate is effectively read once per CLI invocation (the test
@@ -1438,9 +1451,8 @@ user typed at launch. Three reasons not to widen it to the fingerprint:
 2. Eviction stops working for the common relaunch (tweak one flag → a
    different intent → the old deployment is never replaced and keeps the GPUs).
 3. The fingerprint is not stable across the launch boundary:
-   `launch_inference` calls `apply_platform_runtime_flag_defaults`, which
-   `setdefault`s platform flags into `recipe.defaults` keyed off the **head
-   host's** hardware — so the config chain it hashes differs before vs. after
+   `launch_inference` folds `resolve_platform_runtime_flags` into
+   `recipe.defaults`, keyed off the **placed hosts'** hardware — so the config chain it hashes differs before vs. after
    launch, and is placement-dependent. Fine as a provenance digest derived once
    and threaded down; unusable as a lookup key.
 
@@ -1957,9 +1969,11 @@ command for the rest.
 ### Inference Gateway (`proxy/` + `api/proxy/`)
 
 The **gateway** is the process fronting every discovered inference endpoint
-behind one OpenAI-compatible API. Core ships one implementation — `ProxyEngine`
-(LiteLLM) — and bundles the SparkRoute plugin outside the `sparkrun.proxy` tree.
-Installed plugins can register additional implementations. One word throughout: **gateway** is
+behind one OpenAI-compatible API. The default implementation, `ProxyEngine`
+(LiteLLM), ships as the bundled `litellm` plugin
+(`plugins/litellm/engine.py`); `sparkrun.proxy` keeps only the shared registry,
+contracts and process supervision. SparkRoute is a separately installed plugin,
+and any installed plugin can register another implementation. One word throughout: **gateway** is
 the pluggable family, `proxy` is the user-facing command.
 
 Three mechanisms, deliberately separate:
@@ -1970,17 +1984,20 @@ Three mechanisms, deliberately separate:
   point because an engine is *constructed with arguments* (host, port, master
   key, state dir) rather than resolved as a stateless singleton — the same
   reason `platforms` and `models/kv` stayed in-process. Registration carries a
-  **loader**, not the class, so `proxy.engine` can import this module without a
+  **loader**, not the class, so an engine module can import this one without a
   cycle and registering costs nothing at import time. Repeated registration of
   an equal provider is a no-op; anything else claiming that name raises
   `PluginConflictError`. Distinct providers need distinct names.
-  litellm registers in core, not from a plugin: `proxy` must resolve to
-  *something* with every plugin absent.
-- **Availability** — `gateway.<name>` feature flag. `gateway.litellm` defaults
-  on for all channels. SparkRoute and ColdSnap are separately installed plugins;
-  enabling a flag does not install their code. Explicit config/env overrides
-  take precedence; see `docs/SPARKROUTE.md`. OCI Relay remains bundled and its
-  `plugins.oci_relay` flag defaults on for every channel; explicit overrides win.
+  litellm registers from its bundled plugin's `register(v)`, which is on by
+  default (no loading gate), so `proxy` resolves to *something* without any
+  installed plugin.
+- **Availability** — `gateway.<name>` feature flag, under the umbrella
+  `gateway` flag (off → every `gateway.*` resolves off). `gateway.litellm` is
+  declared in the litellm plugin's manifest and defaults on for **every**
+  channel. SparkRoute is not bundled: installing its plugin brings its
+  `gateway.sparkroute` flag, off by default, and enabling a flag does not
+  install code. Explicit config/env overrides take precedence; see
+  `docs/SPARKROUTE.md`.
 - **Selection** — exactly one gateway is used at a time, arbitrated in
   `resolve_gateway()`: an explicit name (`proxy.gateway:` in `proxy.yaml`, or
   `--gateway`) must be known *and* enabled; with no name, the default wins when
@@ -2202,8 +2219,9 @@ jobs from identically-configured ones a human started, and refuse to tear the
 latter down. `RunPlan.recipe_fingerprint` is derived in `api.plan` and threaded
 through `launch_inference` to **all three** `save_job_metadata` call sites —
 each rewrites the file wholesale, so a site that forgot would erase it a phase
-later. It must be pre-launch: `apply_platform_runtime_flag_defaults` mutates
-`recipe.defaults` keyed off the head host's hardware *before* metadata is
+later. It must be pre-launch: `launch_inference` folds the platform flags
+(`resolve_platform_runtime_flags`) into `recipe.defaults`, keyed off the placed
+hosts' hardware, *before* metadata is
 saved, so a digest taken inside the launcher is placement-dependent and the
 caller that later matches on it can never reproduce the value.
 
@@ -3131,10 +3149,9 @@ hard-codes `"docker"` when no layer names an executor — `_default_executor_nam
 returns docker when enabled, else the sole enabled executor, else raises "name
 one / set `default_executor`" (never silently runs on a disabled backend).
 
-**Gateway gates**: `gateway.litellm` defaults on for stable/beta;
-`gateway.sparkroute` defaults on for alpha. Both remain overridable. Exclusivity
-("one gateway at a time") is arbitrated at *resolution*, not by the flag
-registry. See Inference Gateway above and `docs/SPARKROUTE.md`.
+**Gateway gates**: see Inference Gateway above for the defaults (stated once
+there). Exclusivity ("one gateway at a time") is arbitrated at *resolution*, not
+by the flag registry.
 
 **Visibility-only gate**: `cli.setup.features` (via `channel_defaults`, **on for
 `beta`/`alpha`, off for `stable`**) is different — it does NOT gate execution.
