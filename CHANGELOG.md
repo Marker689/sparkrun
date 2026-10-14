@@ -451,6 +451,54 @@ system, gateway registry, and execution-strategy extension points shipped in
   fields are isolated per file during browsing and reported as typed errors during
   exact resolution.
 
+## [0.3.10] — 2026-09-24
+
+### Fixed
+
+- Fixed model distribution transferring no weights when a host's HF cache uses
+  huggingface_hub's shared blob store (1.32 and later, on by default): both
+  transfer paths now pass `--copy-unsafe-links`, materialising the blob links
+  that leave the model directory while keeping the in-tree snapshot links as
+  links, with one copy per repo blob on the destination. Weight-existence
+  checks reject dangling links, and GGUF weights/projectors are filtered before
+  fallback or precision selection. Re-sync repairs previously broken targets
+  without deleting the cache. These presence checks do not establish complete
+  snapshots or read permissions; cross-repo deduplication remains source-side
+  (#299, #300).
+
+## [0.3.9] — 2026-09-13
+
+### Added
+
+- Bundled the SparkRoute gateway as an in-tree plugin (`gateway.sparkroute`). On
+  the alpha channel it is enabled by default and replaces LiteLLM behind
+  `sparkrun proxy`; stable and beta keep LiteLLM. Recipes may carry passive
+  SparkRoute configuration, which sparkrun preserves without interpreting.
+- Recipe plugins can register passive recipe items: preserved, exported and
+  carried in job metadata, but not consumed by the launch.
+- Added cached recipe catalogs, exact local recipe selections, and registry
+  management and capacity operations for controller clients. Discovered proxy
+  endpoints carry named clusters, recipe revisions and the runtime's native APIs.
+- Added `sparkrun setup plugins list` (advanced) showing plugin modules with
+  their version, source and gate state, without importing gated-off plugins.
+  `setup features list` and `setup plugins list` accept `--json`.
+
+### Changed
+
+- `setup rdma-test`'s perftest suite is enabled on every channel. The NCCL and
+  `all` suites have their own `cli.setup.rdma_test.nccl` gate, on by default only
+  on alpha (beta previously had them). Gated suites are omitted from help.
+
+### Fixed
+
+- `proxy load` and `proxy unload` go through the shared run/stop APIs, keep the
+  workload's cluster targeting, and retire stopped recipes. `proxy unload`
+  completes recipe names like `load`.
+- A proxy restart waits for the previous gateway process to exit.
+- Startup readiness measurements use the runtime APIs a recipe configures.
+- A tab after a line-continuation backslash in `command:` or a hook command no
+  longer breaks the rendered shell command.
+
 ## [0.3.8] — 2026-09-07
 
 ### Added
@@ -682,21 +730,6 @@ system, gateway registry, and execution-strategy extension points shipped in
 ### Fixed
 
 - Quoted remote log-reading commands so SSH preserves the intended shell command.
-
-## [0.3.10] — 2026-09-24
-
-### Fixed
-
-- Fixed model distribution transferring no weights when a host's HF cache uses
-  huggingface_hub's shared blob store (1.32 and later, on by default): both
-  transfer paths now pass `--copy-unsafe-links`, materialising the blob links
-  that leave the model directory while keeping the in-tree snapshot links as
-  links, with one copy per repo blob on the destination. Weight-existence
-  checks reject dangling links, and GGUF weights/projectors are filtered before
-  fallback or precision selection. Re-sync repairs previously broken targets
-  without deleting the cache. These presence checks do not establish complete
-  snapshots or read permissions; cross-repo deduplication remains source-side
-  (#299, #300).
 
 ## [0.3.0] — 2026-07-30
 
