@@ -163,6 +163,7 @@ def _wait_ready_for_workload(workload_id: str, *, timeout: float | None, sctx: "
             runtime=runtime,
             cluster_id=target.workload_id,
             host_list=list(target.hosts),
+            # Placement's own rule (``api._hosts``): a single-host launch is solo.
             is_solo=len(target.hosts) == 1,
             port=port,
             ssh_kwargs=ssh_kwargs,
