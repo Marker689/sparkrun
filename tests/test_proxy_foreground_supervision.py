@@ -17,6 +17,7 @@ import threading
 import time
 
 import pytest
+import yaml
 
 
 from sparkrun.api.proxy._ops import _foreground_exit_status
@@ -460,6 +461,58 @@ def test_cleanup_ignores_repeated_signals():
         os.kill(os.getpid(), signal.SIGINT)  # would raise KeyboardInterrupt otherwise
         time.sleep(0.05)
     assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_unreadable_state_file_is_a_crash_not_a_stop(engine, procs):
+    """B1: a transient read error (permissions, EIO, a truncated/corrupt
+    write) must never read as a clean stop -- that silently defeats
+    `Restart=on-failure`. A deliberate stop unlinks the file (_clear_state);
+    a present-but-unparseable file is something else entirely."""
+    gateway = _exiter(0)
+    procs.append(gateway)
+    engine._save_state(gateway.pid)
+    # Present, but no longer parseable -- never the shape a clean stop leaves.
+    engine.state_file.write_text("not: [valid, yaml")
+    status = engine.supervise_foreground(gateway)
+    assert status != 0
+
+
+def test_read_autodiscover_pid_tolerates_a_malformed_value(engine):
+    """B2: unlike its sibling ``_read_pid``, ``_read_autodiscover_pid`` called
+    ``int()`` unguarded -- a malformed value must not raise out of
+    ``stop_autodiscover``."""
+    engine._save_state(12345, autodiscover_pid=99999)
+    state = engine.get_state()
+    state["autodiscover_pid"] = "not-a-pid"
+    engine.state_file.write_text(yaml.safe_dump(state))
+
+    assert engine._read_autodiscover_pid() is None
+    engine.stop_autodiscover()  # must not raise
+
+
+def test_launch_background_closes_its_log_handle_on_success(engine, monkeypatch):
+    """B3: ``_launch_background`` must close its own fd on the success path
+    too (only error paths did), or the long-lived daemon leaks one handle per
+    restart."""
+    opened = []
+    real_open = open
+
+    def spy_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if str(path) == str(engine.log_path):
+            opened.append(handle)
+        return handle
+
+    monkeypatch.setattr("builtins.open", spy_open)
+    pid = engine._launch_background([sys.executable, "-c", "import time; time.sleep(5)"], env=dict(os.environ))
+    try:
+        assert pid is not None
+        assert opened, "log file was never opened"
+        assert opened[0].closed, "log file handle leaked on the success path"
+    finally:
+        if pid is not None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
 
 
 @pytest.fixture(autouse=True)

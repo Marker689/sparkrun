@@ -312,9 +312,12 @@ class GatewayState:
 
     def _read_autodiscover_pid(self) -> int | None:
         """Read the auto-discover PID from the state file."""
-        state = self.get_state()
-        if state and "autodiscover_pid" in state and not _from_previous_boot(state):
-            return int(state["autodiscover_pid"])
+        try:
+            state = self.get_state()
+            if state and "autodiscover_pid" in state and not _from_previous_boot(state):
+                return int(state["autodiscover_pid"])
+        except Exception:
+            pass
         return None
 
     def current_pid(self) -> int | None:
@@ -555,24 +558,30 @@ class GatewaySupervisor(GatewayState):
             return None
 
         # Wait briefly and verify the process survived startup
-        time.sleep(RESTART_STARTUP_GRACE)
-        poll = proc.poll()
-        if poll is not None:
-            log_file.close()
-            # Process already exited — show error
-            try:
-                tail = log_path.read_text()[-2000:]
-            except OSError:
-                tail = ""
-            logger.error(
-                "Gateway exited immediately (code %d). Log tail:\n%s",
-                poll,
-                tail,
-            )
-            return None
+        try:
+            time.sleep(RESTART_STARTUP_GRACE)
+            poll = proc.poll()
+            if poll is not None:
+                # Process already exited — show error
+                try:
+                    tail = log_path.read_text()[-2000:]
+                except OSError:
+                    tail = ""
+                logger.error(
+                    "Gateway exited immediately (code %d). Log tail:\n%s",
+                    poll,
+                    tail,
+                )
+                return None
 
-        self._proc = proc
-        return proc.pid
+            self._proc = proc
+            return proc.pid
+        finally:
+            # The child already holds its own duplicate of this fd (Popen
+            # dup2'd it before exec), so closing our copy here never affects
+            # it — only the long-lived daemon's own fd table, which otherwise
+            # leaks one handle per restart.
+            log_file.close()
 
     def _await_exit(self, pid: int, timeout: float) -> bool:
         """Wait for gateway *pid* to exit, reaping it when it is our child.
@@ -696,6 +705,15 @@ class GatewaySupervisor(GatewayState):
         while True:
             state = self.get_state()
             if state is None:
+                if self.state_file.exists():
+                    # The file is there but unreadable (permissions, EIO, a
+                    # truncated/corrupt write) or belongs to another
+                    # application — never the shape a deliberate stop leaves,
+                    # which unlinks the file via _clear_state.  Reading this
+                    # as a clean stop would make `Restart=on-failure` never
+                    # fire for a transient read error.
+                    logger.error("Gateway state file %s is unreadable; treating exit as a crash", self.state_file)
+                    return "crashed", None
                 # Cleared by a stop (a failed restart records restart_failed
                 # instead, so this is never a crash).
                 return "stopped", None
