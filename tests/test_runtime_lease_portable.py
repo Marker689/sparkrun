@@ -13,6 +13,11 @@ import pytest
 from sparkrun.core import runtime_lease as leases
 from sparkrun.core.config import SparkrunConfig
 
+# These exercise the production lease-root resolution, sandboxing its inputs
+# (_account_home, tempfile.gettempdir) themselves rather than via the suite's
+# test-only redirect.
+pytestmark = pytest.mark.usefixtures("real_runtime_state")
+
 
 @contextmanager
 def worker(tmp_path, config, *, legacy=None):

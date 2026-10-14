@@ -218,6 +218,58 @@ def isolate_stateful(tmp_path: Path, monkeypatch):
         pytest.fail(describe_escapes(telemetry_attempts), pytrace=False)
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_state(tmp_path: Path, monkeypatch):
+    """Point runtime-lease coordination state at a per-test directory.
+
+    ``core/runtime_lease.py`` keys it off the *OS account* home and ignores
+    HOME/XDG/TMPDIR by design, so ``isolate_stateful`` does not reach it: tests
+    wrote leases into the developer's real ``~/.sparkrun-runtime``, and any live
+    lease there (another suite, an orphaned worker, a real daemon) made every
+    core-update guard test refuse. Workers and ``python -c`` children must meet
+    the test process in the same directory, hence an environment variable
+    rather than a monkeypatch; it is honored only under pytest (see the module
+    docstring). Tests of the production resolution use ``real_runtime_state``.
+    """
+    import os
+    from contextlib import ExitStack
+
+    from sparkrun.core import runtime_lease
+
+    with ExitStack() as stack:
+        if os.name != "nt":
+            root = tmp_path / "runtime-state"
+            root.mkdir(mode=0o700)
+        else:
+            # Private storage refuses pytest's shared temp parent on Windows
+            # (see daemon_test_directory), so own a secured root instead.
+            from tempfile import TemporaryDirectory
+            from sparkrun.utils.windows import secure_path
+
+            root = Path(stack.enter_context(TemporaryDirectory(prefix="sparkrun-runtime-tests-")))
+            secure_path(root)
+        monkeypatch.setenv(runtime_lease.TEST_STATE_ROOT_ENV, str(root))
+        # pytest >= 8.2 exports this for the session; set it for older ones.
+        if not os.environ.get(runtime_lease.TEST_SESSION_MARKER_ENV):
+            monkeypatch.setenv(runtime_lease.TEST_SESSION_MARKER_ENV, pytest.__version__)
+        yield root
+
+
+@pytest.fixture
+def real_runtime_state(isolate_runtime_state, monkeypatch):
+    """Restore production lease-root resolution; callers sandbox its inputs.
+
+    Such a test must patch ``runtime_lease._account_home`` and
+    ``tempfile.gettempdir`` itself. The fixed POSIX legacy temp roots are
+    emptied here, since no test can patch ``/tmp`` and a real legacy directory
+    there would otherwise reach the test's update guard.
+    """
+    from sparkrun.core import runtime_lease
+
+    monkeypatch.delenv(runtime_lease.TEST_STATE_ROOT_ENV, raising=False)
+    monkeypatch.setattr(runtime_lease, "_LEGACY_TEMP_ROOTS", ())
+
+
 _LOCALITY_BINDINGS = (
     "sparkrun.utils.net.is_local_host",
     "sparkrun.utils.is_local_host",

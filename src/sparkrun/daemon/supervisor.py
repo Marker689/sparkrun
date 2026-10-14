@@ -42,8 +42,12 @@ def launch(binding, job, *, systemd=False):
         # systemd-run client's environment. Preserve explicit opt-outs/routing.
         for key, value in worker_environment().items():
             command.append(f"--setenv={key}={value}")
-        # Editable development installs need their import path as well.
-        for key in ("PYTHONPATH", "XDG_RUNTIME_DIR", "SPARKRUN_NO_EXTERNAL_PLUGINS"):
+        from sparkrun.core.runtime_lease import TEST_SESSION_MARKER_ENV, TEST_STATE_ROOT_ENV
+
+        # Editable development installs need their import path as well. The
+        # test-only lease root must reach workers too, or a suite's worker
+        # would take its lease in the developer's real runtime directory.
+        for key in ("PYTHONPATH", "XDG_RUNTIME_DIR", "SPARKRUN_NO_EXTERNAL_PLUGINS", TEST_STATE_ROOT_ENV, TEST_SESSION_MARKER_ENV):
             if key in env:
                 command.append(f"--setenv={key}={env[key]}")
         subprocess.run([*command, "--", *argv], env=env, check=True, capture_output=True, timeout=20)

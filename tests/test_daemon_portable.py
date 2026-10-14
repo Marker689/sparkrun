@@ -406,7 +406,7 @@ def test_allow_insecure_does_not_accept_partial_tls(binding, option):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX OS account directory aliases")
-def test_runtime_lease_canonicalizes_account_home(tmp_path, monkeypatch):
+def test_runtime_lease_canonicalizes_account_home(tmp_path, monkeypatch, real_runtime_state):
     from sparkrun.core.runtime_lease import environment_state
 
     target = tmp_path / "real-temp"

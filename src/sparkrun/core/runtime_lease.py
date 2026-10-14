@@ -1,4 +1,21 @@
-"""Pin managed generations while a daemon/worker uses their files."""
+"""Pin managed generations while a daemon/worker uses their files.
+
+Coordination state lives at ``<OS account home>/.sparkrun-runtime/<environment>``.
+The account home is read from the OS user database, never from ``HOME`` /
+``USERPROFILE`` / ``XDG_*`` / ``TMPDIR``: a daemon started by a service manager
+and an updater run from a shell routinely disagree on those, and a lease the
+core-update guard cannot find is a lease that does not exist.
+
+Test isolation is the one sanctioned relocation. The suite must not write into
+the developer's real root, and a live lease there (another suite, an orphaned
+worker, a real daemon) must not fail it -- but its subprocesses must still meet
+the test process in *one* directory, so an in-process monkeypatch cannot do it.
+``SPARKRUN_TEST_RUNTIME_STATE_ROOT`` replaces the account home **and** drops the
+legacy temp roots, and is honored only while ``PYTEST_VERSION`` is also set
+(pytest exports it for the whole session, so children inherit it). Neither is an
+ordinary setting, and a stray export of the first in a shell is inert outside
+pytest, so the guarantee above is unchanged for anything that is not a test run.
+"""
 
 from __future__ import annotations
 
@@ -190,6 +207,25 @@ def _account_home():
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
+#: Test-only relocation (see module docstring). Both must be present.
+TEST_STATE_ROOT_ENV = "SPARKRUN_TEST_RUNTIME_STATE_ROOT"
+TEST_SESSION_MARKER_ENV = "PYTEST_VERSION"
+
+#: Fixed POSIX temp roots older releases used; see _legacy_environment_states.
+_LEGACY_TEMP_ROOTS = ("/tmp", "/var/tmp", "/usr/tmp")
+
+
+def _test_state_root():
+    """The test suite's redirected root, or None outside a pytest session."""
+    root = os.environ.get(TEST_STATE_ROOT_ENV)
+    if not root or not os.environ.get(TEST_SESSION_MARKER_ENV):
+        return None
+    root = Path(root)
+    if not root.is_absolute():
+        raise RuntimeError("%s must be an absolute path" % TEST_STATE_ROOT_ENV)
+    return root
+
+
 def _environment_name(prefix=None):
     from sparkrun.core.process_identity import user_identity
 
@@ -206,7 +242,7 @@ def environment_state(prefix=None):
     """
     from sparkrun.daemon.state import private_directory
 
-    home = _account_home()
+    home = _test_state_root() or _account_home()
     if not home.is_absolute():
         raise RuntimeError("OS account home must be an absolute path for runtime coordination")
     return private_directory(home.resolve() / ".sparkrun-runtime" / _environment_name(prefix))
@@ -222,9 +258,11 @@ def _legacy_environment_states(prefix=None):
     import tempfile
     from sparkrun.daemon.state import private_directory
 
+    if _test_state_root() is not None:
+        return []
     roots = {Path(tempfile.gettempdir()).resolve()}
     if os.name != "nt":
-        roots.update(Path(path).resolve() for path in ("/tmp", "/var/tmp", "/usr/tmp"))
+        roots.update(Path(path).resolve() for path in _LEGACY_TEMP_ROOTS)
     else:
         roots.add(_account_home().resolve() / "AppData" / "Local" / "Temp")
     return [private_directory(path) for root in sorted(roots) if (path := root / _environment_name(prefix)).exists()]

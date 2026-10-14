@@ -3216,6 +3216,7 @@ stubs registry downloads; other fixtures control locality, metadata, and test-sp
 | `DEFAULT_CACHE_DIR` → `tmp_path` (+ `pending_ops`, `tuning._common`, which bind it at import) | reading *live* state — `ProxyEngine` defaults `state_dir` to `DEFAULT_CACHE_DIR/proxy`, so a test would report on (and `stop()` would SIGTERM) a really-running proxy |
 | `BOOTSTRAP_REGISTRY_URLS` → `[]`                               | first-run manifest discovery git-cloning three GitHub repos                                          |
 | `RegistryManager._clone_or_pull` → stub                        | every other registry `git clone` / `fetch`                                                           |
+| `SPARKRUN_TEST_RUNTIME_STATE_ROOT` → per-test dir (`isolate_runtime_state`) | writing leases into the real `~/.sparkrun-runtime`, and a live lease there (another suite, an orphaned worker, a real daemon) failing every core-update guard test |
 
 Registry git previously cost seconds per test, hidden by an already-populated real registry cache. Locality detection
 and advisory Hub metadata also introduced repeated DNS, HTTP, and subprocess delays. Profile with
@@ -3237,6 +3238,17 @@ Consequences for writing tests:
   test provides a response. This keeps budget/cache/fallback behavior active without switching product offline policy.
   Model/revision tests supply their own public Hub-client mocks; weight downloads still need explicit mocks.
 - Use `idle_occupancy` for tests that do not exercise scheduling admission. Occupancy tests supply their own snapshots.
+- **Runtime-lease state is redirected by an environment variable, not a monkeypatch**, because daemon workers and
+  `python -c` children must meet the test process in the same directory. `core/runtime_lease.py` resolves its root
+  from the OS account database and ignores HOME/XDG/TMPDIR on purpose; the test variable is the one exception, and it
+  is honored only while `PYTEST_VERSION` is also set (pytest exports it for the session), so a stray export is inert
+  outside a test run. Under it the legacy temp roots are empty too. Tests of the production resolution request
+  `real_runtime_state` and patch `_account_home` / `tempfile.gettempdir` themselves. A spawner that builds a child
+  environment from scratch (the systemd worker path) must forward both variables.
+- **Detached children are a test's to kill.** Daemon workers run in their own session by design, so stopping the test
+  server leaves them running; the `binding` fixture in `test_daemon.py` kills whatever still names the binding's
+  config path (and its descendants) at teardown, which also runs on failure and Ctrl-C. A test whose child ignores
+  SIGTERM kills it in a `finally`. Only a SIGKILLed pytest still leaks, and then into its own temp dirs.
 - Stub backoff or grace-period sleeps when asserting retry counts or termination escalation. Keep real elapsed-time
   checks in tests whose contract is concurrency, deadlines, or cancellation. Mock hardware/diagnostic probes and
   external-tool version detection in CLI wiring tests.
