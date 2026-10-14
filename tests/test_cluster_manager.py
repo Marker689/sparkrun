@@ -1528,3 +1528,48 @@ class TestClusterDistributionPrefs:
         cfg = resolve_cluster_config("shared", "h9,h10", None, manager)
         assert cfg.preserve_model_perms is True
         assert cfg.skip_model_fan_out is False
+
+
+def test_cluster_file_is_written_atomically_and_owner_only(tmp_path: Path):
+    """B4: cluster definitions carry executor_config/ssh user, so the file
+    must never be left world/group-readable under a permissive umask, and a
+    reader must never observe a half-written document."""
+    import stat
+
+    manager = ClusterManager(tmp_path)
+    manager.create("test-cluster", ["host1", "host2"], user="alice", executor_config={"entrypoint": ""})
+
+    cluster_path = tmp_path / "clusters" / "test-cluster.yaml"
+    assert stat.S_IMODE(cluster_path.stat().st_mode) == 0o600
+
+    # Update rewrites the same path; still atomic and private afterwards.
+    manager.update("test-cluster", description="updated")
+    assert stat.S_IMODE(cluster_path.stat().st_mode) == 0o600
+    assert manager.get("test-cluster").description == "updated"
+
+
+def test_set_default_cluster_marker_is_written_atomically_and_owner_only(tmp_path: Path):
+    """B4: the default-cluster marker shares the same non-atomic-write defect."""
+    import stat
+
+    manager = ClusterManager(tmp_path)
+    manager.create("test-cluster", ["host1"])
+    manager.set_default("test-cluster")
+
+    assert stat.S_IMODE(manager.default_file.stat().st_mode) == 0o600
+    assert manager.get_default() == "test-cluster"
+
+
+def test_list_clusters_skips_a_corrupt_file_with_a_warning(tmp_path: Path, caplog):
+    """A genuinely corrupt cluster file must not break listing every cluster."""
+    import logging
+
+    manager = ClusterManager(tmp_path)
+    manager.create("good-cluster", ["host1"])
+    (tmp_path / "clusters" / "broken.yaml").write_text("hosts: [unterminated\n  user: oops")
+
+    with caplog.at_level(logging.WARNING):
+        clusters = manager.list_clusters()
+
+    assert [c.name for c in clusters] == ["good-cluster"]
+    assert any("broken.yaml" in record.message for record in caplog.records)

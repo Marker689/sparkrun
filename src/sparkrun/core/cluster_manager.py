@@ -15,6 +15,7 @@ import yaml
 
 from sparkrun.core.hardware import HostHardware, resolve_hardware
 from sparkrun.core.status_observation import ExecutorCoverage
+from sparkrun.utils.fs import atomic_private_write
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -959,7 +960,7 @@ class ClusterManager:
         # Verify cluster exists
         self.get(name)
 
-        self.default_file.write_text(name)
+        atomic_private_write(self.default_file, name)
         logger.info("Set default cluster to '%s'", name)
 
     @locked_document
@@ -1053,8 +1054,8 @@ class ClusterManager:
         if cluster_def.distribution and not cluster_def.distribution.is_default():
             data["distribution"] = cluster_def.distribution.to_dict()
 
-        with cluster_path.open("w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        content = yaml.dump(data, default_flow_style=False, sort_keys=False)
+        atomic_private_write(cluster_path, content)
 
         logger.debug("Wrote cluster definition to %s", cluster_path)
 
