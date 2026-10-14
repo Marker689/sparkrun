@@ -43,11 +43,11 @@ def test_implicit_context_finds_configured_jobs(job, monkeypatch, initialized, o
         monkeypatch.setattr("sparkrun.api._resolve.resolve_cluster_for_job", boundary)
         # Stop at host resolution; never contact a host or stop a real workload.
         with pytest.raises(RuntimeError, match="metadata resolved"):
-            getattr(api, operation)(cluster_id=cluster_id)
+            getattr(api, operation)(workload_id=cluster_id)
         assert boundary.call_args.kwargs["meta"]["cluster_id"] == cluster_id
         if context is not None:
             with pytest.raises(RuntimeError, match="metadata resolved"):
-                getattr(api, operation)(cluster_id=cluster_id, sctx=context)
+                getattr(api, operation)(workload_id=cluster_id, sctx=context)
     assert (bootstrap._variables is not None) == initialized
     assert resolve_configured_cache_dir() == root
 

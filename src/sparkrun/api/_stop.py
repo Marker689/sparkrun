@@ -20,6 +20,7 @@ from __future__ import annotations
 from sparkrun.core.coordination import operation_boundary
 
 import logging
+import warnings
 from typing import TYPE_CHECKING
 
 from sparkrun.api._errors import JobNotFound, SparkrunError
@@ -37,21 +38,29 @@ logger = logging.getLogger(__name__)
 @operation_boundary(mutation=True)
 def stop(
     *,
-    cluster_id: str | None = None,
+    workload_id: str | None = None,
     recipe: "str | Recipe | None" = None,
     hosts: list[str] | tuple[str, ...] | None = None,
     overrides: dict | None = None,
     cluster: "str | ClusterDefinition | None" = None,
     cache_dir: str | None = None,
     discovered: "ClusterStatus | None" = None,
+    dry_run: bool = False,
     sctx: "SparkrunContext | None" = None,
+    cluster_id: str | None = None,
 ) -> StopResult:
     """Stop a running sparkrun workload.
 
-    Either ``cluster_id`` *or* (``recipe`` + a host source) is required.
-    When both are provided, ``cluster_id`` wins.
+    Either ``workload_id`` *or* (``recipe`` + a host source) is required.
+    When both are provided, ``workload_id`` wins.
 
     Args:
+        workload_id: The workload's id (``RunResult.cluster_id``).
+        dry_run: Resolve the target, hosts and executor exactly as a real stop
+            would, then return without tearing anything down
+            (``result.dry_run`` is true, ``containers_removed`` is 0).
+            Discovery still contacts the hosts.
+        cluster_id: Deprecated spelling of ``workload_id``.
         discovered: Optional status snapshot for exact per-host container names.
             Reuses discovery during eviction instead of inferring ranks from
             the surviving host count. The snapshot must cover the requested
@@ -77,12 +86,13 @@ def stop(
 
     from sparkrun.core.config import resolve_configured_cache_dir
 
+    cluster_id = _resolve_workload_id(workload_id, cluster_id)
     cache_dir = str(resolve_configured_cache_dir(cache_dir, config=sctx.config if sctx is not None else None))
 
     # Derive cluster_id from recipe+hosts when not given explicitly.
     if not cluster_id:
         if recipe is None:
-            raise SparkrunError("api.stop requires cluster_id or recipe+hosts")
+            raise SparkrunError("api.stop requires workload_id or recipe+hosts")
         cluster_def = resolve_cluster(cluster, hosts, sctx=sctx)
         resolved_recipe = resolve_recipe(recipe, sctx=sctx)
         from sparkrun.api._resolve import resolve_operation_target
@@ -191,6 +201,10 @@ def stop(
                 "Stop discovery does not cover the requested executor destination and hosts; refresh status before teardown."
             )
 
+    if dry_run:
+        logger.info("Dry run: would stop %s on %s", cluster_id, ", ".join(target_hosts))
+        return StopResult(cluster_id=cluster_id, hosts_targeted=tuple(target_hosts), containers_removed=0, dry_run=True)
+
     try:
         native_removed = executor.stop_workload(cluster_id, metadata=meta)
         if native_removed is not None and (type(native_removed) is not int or native_removed < 0):
@@ -243,6 +257,16 @@ def stop(
         errors=tuple(errors),
         hosts_failed=hosts_failed,
     )
+
+
+def _resolve_workload_id(workload_id: str | None, cluster_id: str | None) -> str | None:
+    """Accept the deprecated ``cluster_id`` keyword as a spelling of ``workload_id``."""
+    if cluster_id is None:
+        return workload_id
+    if workload_id is not None and workload_id != cluster_id:
+        raise ValueError("api.stop got both workload_id and cluster_id; pass only workload_id")
+    warnings.warn("api.stop(workload_id=...) is deprecated; use workload_id=", DeprecationWarning, stacklevel=4)
+    return cluster_id
 
 
 def _stop_containers(cluster_id, target_hosts, cluster_def, executor, sctx, *, discovered=None):

@@ -115,7 +115,7 @@ def test_api_recovery_across_entry_directories_preserves_destination(tmp_path, m
         assert alive(pid)
         if legacy:
             with pytest.raises(api.SparkrunError, match="Recorded native destination is unsupported or unanchored"):
-                api.stop(cluster_id=cid, sctx=sctx)
+                api.stop(workload_id=cid, sctx=sctx)
             assert load_job_metadata(cid, sctx=sctx) is not None and alive(pid)
             # Even an old complete cached observation with exactly matching
             # strings must not authorize absence or reuse after migration.
@@ -138,7 +138,7 @@ def test_api_recovery_across_entry_directories_preserves_destination(tmp_path, m
             assert bash(recovery.stop_cmd(name)).returncode == 0
             assert not alive(pid) and not record.exists()
         else:
-            result = api.stop(cluster_id=cid, sctx=sctx)
+            result = api.stop(workload_id=cid, sctx=sctx)
             assert result.success and result.containers_removed == 1
             assert load_job_metadata(cid, sctx=sctx) is None
             assert not alive(pid) and not record.exists()
@@ -163,7 +163,7 @@ def test_saved_relative_destination_key_cannot_fall_back_to_default_stop(bench_e
     path.write_text(yaml.safe_dump(metadata))
     monkeypatch.setattr("sparkrun.api._stop._stop_containers", lambda *a, **kw: pytest.fail("unanchored stop must not dispatch"))
     with pytest.raises(SparkrunError, match="Recorded native destination is unsupported or unanchored"):
-        stop(cluster_id=cid, sctx=env.sctx)
+        stop(workload_id=cid, sctx=env.sctx)
     assert load_job_metadata(cid, sctx=env.sctx) is not None
 
 

@@ -61,11 +61,11 @@ def test_native_targets_have_independent_ids_and_lifecycle(lifecycle_env, dimens
         saved["executor_config"]["k8s_namespace"],
     ) == env.target
     env.calls.clear()
-    stopped = stop(cluster_id=first.cluster_id, sctx=replace(env.sctx, timing=None))
+    stopped = stop(workload_id=first.cluster_id, sctx=replace(env.sctx, timing=None))
     assert stopped.success and stopped.containers_removed == 1
     assert not env.objects[env.target] and env.objects[second_target]
     assert load_job_metadata(second.cluster_id, cache_dir=str(env.sctx.config.cache_dir))
-    assert stop(cluster_id=second.cluster_id, sctx=replace(env.sctx, timing=None)).success
+    assert stop(workload_id=second.cluster_id, sctx=replace(env.sctx, timing=None)).success
     assert not env.objects[second_target]
     assert load_job_metadata(first.cluster_id, cache_dir=str(env.sctx.config.cache_dir)) is None
 

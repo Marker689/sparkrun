@@ -53,7 +53,7 @@ def _evict(status, cluster, *, target_hosts, stop_results=None, stop_side_effect
         calls.append(kwargs)
         if stop_side_effect is not None:
             raise stop_side_effect
-        return (stop_results or {}).get(kwargs["cluster_id"], _StopOk(kwargs["cluster_id"]))
+        return (stop_results or {}).get(kwargs["workload_id"], _StopOk(kwargs["workload_id"]))
 
     with (
         patch("sparkrun.orchestration.executor.query_status_for_cluster", return_value=status),
@@ -97,7 +97,7 @@ def test_prior_deployment_on_target_hosts_is_evicted(cluster):
 
     assert evicted == [PRIOR]
     assert len(calls) == 1
-    assert calls[0]["cluster_id"] == PRIOR
+    assert calls[0]["workload_id"] == PRIOR
     assert calls[0]["hosts"] == ["h1", "h2", "h3", "h4"]
 
 
@@ -178,7 +178,7 @@ def test_mixed_snapshot_evicts_only_the_overlapping_sibling(cluster):
     evicted, calls = _evict(status, cluster, target_hosts=["h1"])
 
     assert evicted == [PRIOR]
-    assert [c["cluster_id"] for c in calls] == [PRIOR]
+    assert [c["workload_id"] for c in calls] == [PRIOR]
 
 
 # --------------------------------------------------------------------------

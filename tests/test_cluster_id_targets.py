@@ -62,5 +62,5 @@ def test_stop_accepts_status_short_canonical_id() -> None:
     assert result.exit_code == 0, result.output
     api_stop.assert_called_once()
     call_kwargs = api_stop.call_args.kwargs
-    assert call_kwargs["cluster_id"] == _FULL_CANONICAL
+    assert call_kwargs["workload_id"] == _FULL_CANONICAL
     assert call_kwargs["hosts"] == ("10.24.11.13",)

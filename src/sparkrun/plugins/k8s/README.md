@@ -137,7 +137,7 @@ cluster or establish physical-device compatibility.
 ## Shared native lifecycle
 
 Native `api.run()` saves its portable ID, JobSet reference, controller provenance,
-and resolved executor target before submitting. `api.stop(cluster_id=...)` uses
+and resolved executor target before submitting. `api.stop(workload_id=...)` uses
 that record after process restart and after defaults change. Stop deletes the
 JobSet with foreground cascading and confirms it is gone before removing local
 metadata. Ownership, connection, deletion, and confirmation failures preserve the

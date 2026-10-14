@@ -252,7 +252,7 @@ def test_new_local_launch_without_explicit_user_is_recoverable(run_env, monkeypa
         return {h: RemoteResult(host=h, returncode=0, stdout="sparkrun_removed=1\n", stderr="") for h in grouped}
 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", cleanup)
-    assert stop(cluster_id=launched.cluster_id, sctx=env.sctx).success
+    assert stop(workload_id=launched.cluster_id, sctx=env.sctx).success
     assert load_job_metadata(launched.cluster_id, sctx=env.sctx) is None
     assert calls and all(c["ssh_user"] == expected_user for c in calls)
     assert env.sctx.config.ssh_user is None

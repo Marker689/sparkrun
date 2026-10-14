@@ -232,7 +232,7 @@ def _stop_discovered_workloads(discovered, *, cluster, cache_dir, dry_run, sctx)
         try:
             # An unscoped legacy snapshot cannot supply a provider destination.
             # With no explicit cluster, require stop-by-ID's authoritative metadata.
-            outcome = stop(cluster_id=cid, hosts=hosts if cluster is not None else None, cluster=cluster, cache_dir=cache_dir, sctx=sctx)
+            outcome = stop(workload_id=cid, hosts=hosts if cluster is not None else None, cluster=cluster, cache_dir=cache_dir, sctx=sctx)
         except Exception as exc:
             failures.update({host: str(exc) for host in hosts})
             continue

@@ -512,6 +512,8 @@ class StopResult:
     """Hosts whose teardown did not confirm.  Non-empty means containers
     may still be running (and holding VRAM); job metadata is deliberately
     retained so the workload can still be found and stopped."""
+    dry_run: bool = False
+    """True when nothing was torn down; the result previews the target."""
 
     @property
     def success(self) -> bool:

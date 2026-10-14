@@ -702,7 +702,7 @@ def test_stop_by_cluster_id_cross_user_uses_ssh():
         patch("sparkrun.orchestration.primitives.cleanup_containers_by_host") as mock_remote,
         patch("sparkrun.orchestration.primitives.cleanup_containers_local") as mock_local,
     ):
-        api.stop(cluster_id="sparkrun_abc12345", hosts=("127.0.0.1",), cache_dir="/tmp/cache")
+        api.stop(workload_id="sparkrun_abc12345", hosts=("127.0.0.1",), cache_dir="/tmp/cache")
 
         mock_local.assert_not_called()
         mock_remote.assert_called_once()

@@ -267,7 +267,7 @@ def test_stop_requires_cluster_id_or_recipe():
 def test_stop_unknown_cluster_id_raises_job_not_found(tmp_path):
     """When no job metadata matches cluster_id and no hosts given."""
     with pytest.raises(api.JobNotFound):
-        api.stop(cluster_id="sparkrun_doesnotexist", cache_dir=str(tmp_path))
+        api.stop(workload_id="sparkrun_doesnotexist", cache_dir=str(tmp_path))
 
 
 def test_stop_with_hosts_skips_metadata_lookup(tmp_path, idle_occupancy):
@@ -278,7 +278,7 @@ def test_stop_with_hosts_skips_metadata_lookup(tmp_path, idle_occupancy):
     fake_result = RemoteResult(host="h1", returncode=0, stdout="", stderr="")
     with patch("sparkrun.orchestration.ssh.run_remote_script", return_value=fake_result):
         result = api.stop(
-            cluster_id="sparkrun_explicithost",
+            workload_id="sparkrun_explicithost",
             hosts=("h1",),
             cache_dir=str(tmp_path),
         )

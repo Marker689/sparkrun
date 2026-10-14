@@ -256,7 +256,7 @@ def test_api_stop_tears_down_with_the_launching_executor(monkeypatch, tmp_path):
 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", fake_cleanup)
 
-    api.stop(cluster_id=CID, cache_dir=str(tmp_path))
+    api.stop(workload_id=CID, cache_dir=str(tmp_path))
 
     assert isinstance(seen["executor"], LocalExecutor)
 
@@ -303,7 +303,7 @@ def test_api_stop_discovers_the_executor_when_metadata_is_gone(monkeypatch, tmp_
 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", fake_cleanup)
 
-    api.stop(cluster_id=CID, hosts=("h1",), cache_dir=str(tmp_path))
+    api.stop(workload_id=CID, hosts=("h1",), cache_dir=str(tmp_path))
 
     assert isinstance(seen["executor"], LocalExecutor)
 
@@ -328,7 +328,7 @@ def test_api_stop_executor_discovery_tolerates_a_failed_sweep(monkeypatch, tmp_p
 
     monkeypatch.setattr("sparkrun.orchestration.primitives.cleanup_containers_by_host", fake_cleanup)
 
-    result = api.stop(cluster_id=CID, hosts=("h1",), cache_dir=str(tmp_path))
+    result = api.stop(workload_id=CID, hosts=("h1",), cache_dir=str(tmp_path))
 
     assert isinstance(seen["executor"], DockerExecutor)
     assert result.hosts_failed == ()

@@ -22,9 +22,18 @@ def test_lifecycle_error_boundary_and_no_mutation(tmp_path, monkeypatch, operati
         cause = {"network": K8sError, "unexpected": OSError, "interrupt": KeyboardInterrupt}[failure]
         lookup = Mock(side_effect=cause("lookup failed"))
     monkeypatch.setattr(client, "run_json", lookup)
+    # Log discovery reads through the shared cancellable reader, not ``run_json``.
+    monkeypatch.setattr("sparkrun.plugins.k8s.orchestration.logs._query_json", lambda client, args, cancel=None: lookup(args))
     monkeypatch.setattr(k8s._ops, "make_client", lambda *a, **kw: client)
     mutation = Mock(side_effect=AssertionError("must not mutate"))
-    monkeypatch.setattr(client, "run", mutation)
+
+    def run(args, **kwargs):
+        # Pinning the current context is a read; anything else through ``run`` would mutate.
+        if list(args) == ["config", "current-context"]:
+            return Mock(stdout="fixture-context\n", returncode=0)
+        return mutation(args, **kwargs)
+
+    monkeypatch.setattr(client, "run", run)
     with pytest.raises(KeyboardInterrupt if failure == "interrupt" else SparkrunError) as caught:
         getattr(k8s, operation)(_sctx(tmp_path), name="sample")
     if failure != "interrupt":

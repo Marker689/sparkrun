@@ -240,7 +240,7 @@ def stop(binding: WorkloadBinding, cluster_id: str, *, owner: str, sctx=None):
     sctx = resolve_sctx(sctx)
     with operation_scope(sctx), reserve_resources(sctx.config.config_path.parent, {"*"}):
         _exact_job(binding, cluster_id, owner, sctx, mutation=True)
-        result = api.stop(cluster_id=cluster_id, sctx=sctx)
+        result = api.stop(workload_id=cluster_id, sctx=sctx)
         if not result.success:
             raise WorkloadError("stop_failed", "Could not confirm workload teardown", retryable=True)
         receipts = Receipts(sctx)

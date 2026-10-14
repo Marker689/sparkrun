@@ -132,10 +132,11 @@ def operation_boundary(*, mutation=False):
                             cluster = ClusterManager(config.config_path.parent).get(cluster)
                         if cluster is not None:
                             hosts = cluster.hosts
-                        elif bound.arguments.get("cluster_id"):
+                        elif bound.arguments.get("workload_id") or bound.arguments.get("cluster_id"):
                             from sparkrun.orchestration.job_metadata import load_job_metadata
 
-                            meta = load_job_metadata(bound.arguments["cluster_id"], cache_dir=str(config.cache_dir))
+                            workload_id = bound.arguments.get("workload_id") or bound.arguments["cluster_id"]
+                            meta = load_job_metadata(workload_id, cache_dir=str(config.cache_dir))
                             hosts = (meta or {}).get("hosts")
                         else:
                             hosts = config.default_hosts

@@ -56,7 +56,7 @@ def test_stop_inference_calls_api_stop_with_cluster_id_and_hosts():
 
     mock_stop.assert_called_once()
     _, kwargs = mock_stop.call_args
-    assert kwargs["cluster_id"] == "sparkrun_0123456789abcdef_aabbccddeeff"
+    assert kwargs["workload_id"] == "sparkrun_0123456789abcdef_aabbccddeeff"
     assert kwargs["hosts"] == ("h1", "h2")
     assert kwargs["sctx"] is fake_sctx
 

@@ -152,7 +152,7 @@ records. Close the iterator when stopping early. `setup k8s launch --follow` and
 submission returns without attachment; use `api.logs(workload_id=result.cluster_id)`
 or `api.open_log_target(workload_id=result.cluster_id)` for shared log consumption.
 Native `RunResult.cluster_id` remains the portable workload ID. Use
-`api.stop(cluster_id=result.cluster_id)` for shared teardown; the saved native
+`api.stop(workload_id=result.cluster_id)` for shared teardown; the saved native
 resource reference and resolved Kubernetes target survive a new API session and
 changes to defaults. `api.status(..., executor="k8s")` reports submitted JobSets
 for intent discovery and replacement. Use `result.metadata["k8s_jobset"]` for the
@@ -429,6 +429,15 @@ retained separately. Exported `recipe.hash` remains a hash of exported text,
 with `declared_hash` added for declared inputs. See the
 [provenance contract](BENCHMARK_API.md#effective-measurement-provenance).
 
+
+### Workload IDs: `workload_id`
+
+`api.stop`, `api.logs` and `api.open_log_target` all take the workload's id as
+`workload_id` (the value of `RunResult.cluster_id`). `api.stop(cluster_id=...)`
+still works for one release and emits a `DeprecationWarning`; passing both
+spellings with different values raises `ValueError`. `api.stop(..., dry_run=True)`
+resolves the target, hosts and executor without tearing anything down and returns
+a `StopResult` with `dry_run=True`.
 
 ### Observed names during eviction
 

@@ -87,10 +87,11 @@ def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, po
         if cluster_id is not None:
             host_list, effective_cluster = _hosts_for_cluster_id_target(target, hosts, hosts_file, cluster_name, config, sctx=sctx)
             result = api.stop(
-                cluster_id=cluster_id,
+                workload_id=cluster_id,
                 hosts=tuple(host_list) if host_list else None,
                 cluster=effective_cluster,
                 cache_dir=str(config.cache_dir),
+                dry_run=dry_run,
                 sctx=sctx,
             )
         else:
@@ -108,6 +109,7 @@ def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, po
                 overrides=overrides,
                 cluster=hctx.cluster_name,
                 cache_dir=str(config.cache_dir),
+                dry_run=dry_run,
                 sctx=sctx,
             )
     except api.AmbiguousWorkload as e:
@@ -124,6 +126,12 @@ def stop(ctx, target, hosts, hosts_file, cluster_name, stop_all, tp_override, po
     except api.SparkrunError as e:
         click.echo("Error: %s" % e, err=True)
         sys.exit(1)
+
+    if result.dry_run:
+        click.echo(
+            "[dry-run] Would stop %s on %d host(s): %s" % (result.cluster_id, len(result.hosts_targeted), ", ".join(result.hosts_targeted))
+        )
+        return
 
     # A teardown that did not confirm is an error, not a warning: the
     # containers may still be running.  Same contract as ``--all``.

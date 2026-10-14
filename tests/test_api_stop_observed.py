@@ -134,7 +134,7 @@ def test_failed_survivor_teardown_preserves_metadata_and_aborts_strict_eviction(
 
 def test_stop_with_discovery_reports_actual_removed_count(observed_job):
     job = observed_job(ranks=(1, 3))
-    result = api.stop(cluster_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=job.snapshot)
+    result = api.stop(workload_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=job.snapshot)
     assert result.containers_removed == 2
     assert result.hosts_failed == () and result.errors == ()
 
@@ -150,7 +150,7 @@ def test_stop_releases_cache_claims_only_after_confirmed_teardown(observed_job, 
     load_job_metadata(PRIOR)["model_cache_claims"] = claims
     release = Mock()
     monkeypatch.setattr("sparkrun.models.usage.release_claims", release)
-    api.stop(cluster_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=job.snapshot)
+    api.stop(workload_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=job.snapshot)
     if failed:
         release.assert_not_called()
         assert not job.forgotten
@@ -183,7 +183,7 @@ def test_unusable_observation_never_forgets_job(observed_job, mismatch):
             )
         snapshot = replace(snapshot, coverage=(coverage,))
     with pytest.raises(api.SparkrunError):
-        api.stop(cluster_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=snapshot)
+        api.stop(workload_id=PRIOR, hosts=["h1"], cluster=job.cluster, sctx=job.sctx, discovered=snapshot)
     assert job.calls == []
     assert job.forgotten == []
     assert set(job.names) <= job.alive
@@ -216,7 +216,7 @@ def test_observed_host_mapping_does_not_copy_ranks_to_other_hosts(observed_job):
             ),
         ),
     )
-    result = api.stop(cluster_id=PRIOR, hosts=["h1", "h2"], cluster=job.cluster, sctx=job.sctx, discovered=snapshot)
+    result = api.stop(workload_id=PRIOR, hosts=["h1", "h2"], cluster=job.cluster, sctx=job.sctx, discovered=snapshot)
     assert job.calls[0][0] == {"h1": list(job.names), "h2": [other]}
     assert result.containers_removed == 3
     assert job.alive == {job.foreign}

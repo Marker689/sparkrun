@@ -1592,7 +1592,7 @@ def _stop_inference(host_list, cluster_id, dry_run, sctx=None, emitter: _Progres
 
     try:
         stopped = api.stop(
-            cluster_id=cluster_id,
+            workload_id=cluster_id,
             hosts=tuple(host_list) if host_list else None,
             sctx=sctx,
         )

@@ -47,7 +47,7 @@ def test_host_launch_preserves_unobserved_live_native_metadata(lifecycle_env, mo
     assert docker.rc == 0
     assert env.objects[env.target], "the native workload is still live"
     assert load_job_metadata(native.cluster_id, cache_dir=str(env.sctx.config.cache_dir)) is not None
-    assert api.stop(cluster_id=native.cluster_id, sctx=env.sctx).success
+    assert api.stop(workload_id=native.cluster_id, sctx=env.sctx).success
 
 
 def test_completion_rejects_other_native_destination_snapshot(lifecycle_env):

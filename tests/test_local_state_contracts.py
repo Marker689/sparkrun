@@ -163,7 +163,7 @@ def test_stop_preserves_records_until_the_process_is_confirmed_stopped(bench_env
             pid.chmod(0)
             with pytest.raises(PermissionError):
                 pid.read_text()
-        result = stop(cluster_id=cid, sctx=env.sctx)
+        result = stop(workload_id=cid, sctx=env.sctx)
         if unreadable:
             assert not result.success and result.containers_removed == 0
             assert result.errors
