@@ -168,7 +168,6 @@ class TokenaryRuntime(RuntimePlugin):
         )
 
         parts = [
-            base,
             "--rank %s" % node_args["node_rank"],
             "--world-size %s" % node_args["num_nodes"],
             "--master-addr %s" % node_args["master_addr"],
@@ -179,7 +178,7 @@ class TokenaryRuntime(RuntimePlugin):
             # Head node serves the OpenAI-compatible API; workers bind no HTTP.
             port = config.get("port") or 8000
             parts.append("--server --port %s" % port)
-        return " ".join(parts)
+        return self.append_args(base, *parts)
 
     # --- environment ---
 

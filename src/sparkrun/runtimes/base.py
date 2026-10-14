@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 from abc import ABC, abstractmethod
 from logging import Logger
@@ -942,16 +943,45 @@ class RuntimePlugin(Plugin, ABC):
           recipe command that hardcodes ``--distributed-executor-backend
           ray``.)
 
+        Both spellings of an existing occurrence are recognized
+        (``--flag value`` and ``--flag=value``), and only as a whole token,
+        so ``--port`` never matches ``--port-range``.
+
         Idempotent; *value* is stringified.
         """
-        if flag in command:
+        if RuntimePlugin.command_has_flag(command, flag):
             if not override:
                 return command
-            import re
+            # A function replacement: a value is data, never a regex escape.
+            replaced, count = re.subn(
+                r"(?<!\S)%s(=|\s+(?:\\\n\s*)?)\S+" % re.escape(flag),
+                lambda m: "%s%s%s" % (flag, m.group(1), value),
+                command,
+                count=1,
+            )
+            if count:
+                return replaced
+        return RuntimePlugin.append_args(command, "%s %s" % (flag, value))
 
-            return re.sub(re.escape(flag) + r"\s+\S+", "%s %s" % (flag, value), command, count=1)
-        # A trailing line continuation would escape the appended flag.
-        return "%s %s %s" % (strip_dangling_line_continuations(command), flag, value)
+    @staticmethod
+    def command_has_flag(command: str, flag: str) -> bool:
+        """True when *flag* is a whole token of *command* (``--flag`` or ``--flag=value``)."""
+        return re.search(r"(?<!\S)%s(?=[=\s]|$)" % re.escape(flag), command or "") is not None
+
+    @staticmethod
+    def append_args(command: str, *args: str) -> str:
+        """Append *args* to a (possibly rendered) serve command.
+
+        Every flag sparkrun appends to a command goes through here.  A recipe
+        ``command:`` may end in a dangling line continuation, which
+        ``Recipe.render_command`` keeps; joining after it would make bash read
+        the escaped space as part of the next word, so ``" --nnodes"`` reached
+        the engine as one argument.
+        """
+        parts = [str(a) for a in args if a]
+        if not command:
+            return " ".join(parts)
+        return " ".join([strip_dangling_line_continuations(command), *parts])
 
     @staticmethod
     def _augment_served_model_name(
@@ -1063,8 +1093,6 @@ class RuntimePlugin(Plugin, ABC):
         Returns:
             Command string with the specified flags removed.
         """
-        import re
-
         for key in skip_keys:
             # Collect all flag forms for this key: canonical + aliases
             flags_to_strip: list[str] = []
@@ -1079,12 +1107,13 @@ class RuntimePlugin(Plugin, ABC):
             for flag in flags_to_strip:
                 escaped = re.escape(flag)
                 if key in bool_keys:
-                    command = re.sub(r"\s*" + escaped + r"(?=\s|$)", "", command)
+                    command = re.sub(r"\s*(?<!\S)" + escaped + r"(?=\s|$)", "", command)
                 else:
-                    # Match the flag, its value, and an optional trailing
+                    # Match the flag (whole token, either ``--flag value`` or
+                    # ``--flag=value``), its value, and an optional trailing
                     # backslash continuation on the same line.
                     command = re.sub(
-                        escaped + r"\s+\S+\s*\\?\s*\n?",
+                        r"(?<!\S)" + escaped + r"(?:=|\s+)\S+\s*\\?\s*\n?",
                         "",
                         command,
                     )

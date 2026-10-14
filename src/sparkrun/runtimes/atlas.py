@@ -471,14 +471,22 @@ class AtlasRuntime(RuntimePlugin):
         else:
             base = self._build_base_command(recipe, config, node_rank=node_rank, skip_keys=skip_keys)
 
-        parts = [
+        node_args = self._make_node_command_args(
+            head_ip=head_ip,
+            num_nodes=num_nodes,
+            node_rank=node_rank,
+            init_port=init_port,
+            hosts=hosts,
+            placement=placement,
+            replica_size=num_nodes,
+        )
+        return self.append_args(
             base,
-            "--rank %d" % node_rank,
-            "--world-size %d" % num_nodes,
-            "--master-addr %s" % head_ip,
-            "--master-port %d" % init_port,
-        ]
-        return " ".join(parts)
+            "--rank %s" % node_args["node_rank"],
+            "--world-size %s" % node_args["num_nodes"],
+            "--master-addr %s" % node_args["master_addr"],
+            "--master-port %s" % node_args["master_port"],
+        )
 
     # --- Internal helpers ---
 

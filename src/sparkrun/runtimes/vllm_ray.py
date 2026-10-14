@@ -83,8 +83,8 @@ class VllmRayRuntime(VllmRuntimeBase):
             # command template (e.g. -o distributed_executor_backend=ray).
             rendered = self._apply_distributed_backend(rendered, config, skip_keys)
             # Ensure --distributed-executor-backend ray is present for cluster mode
-            if is_cluster and "--distributed-executor-backend" not in rendered:
-                rendered = rendered.rstrip() + " --distributed-executor-backend ray"
+            if is_cluster and not self.command_has_flag(rendered, "--distributed-executor-backend"):
+                rendered = self.append_args(rendered, "--distributed-executor-backend ray")
             rendered = self._augment_vllm_served_model_name(
                 rendered,
                 recipe,

@@ -7,7 +7,6 @@ from sparkrun.core.operation import submit as _operation_submit
 import logging
 from typing import Any, TYPE_CHECKING
 
-from sparkrun.utils.text import strip_dangling_line_continuations
 from sparkrun.core.config import SparkrunConfig
 from sparkrun.runtimes._util import resolve_api_key
 from sparkrun.core.validation import RecipeIssue
@@ -194,8 +193,8 @@ class LlamaCppRuntime(RuntimePlugin):
         """Strip existing ``--split-mode`` from *command* and append the correct one."""
         import re
 
-        command = re.sub(r"--split-mode\s+\S+", "", command).strip()
-        return "%s --split-mode %s" % (command, split_mode)
+        command = re.sub(r"(?<!\S)--split-mode(?:=|\s+)\S+", "", command).strip()
+        return RuntimePlugin.append_args(command, "--split-mode %s" % split_mode)
 
     @staticmethod
     def _special_flags(config, skip_keys: set[str] | frozenset[str] = frozenset()) -> list[str]:
@@ -239,9 +238,9 @@ class LlamaCppRuntime(RuntimePlugin):
         explicitly (literal ``--mmproj`` or via the ``{mmproj}`` placeholder)
         are left untouched, so this only fills in the auto case.
         """
-        if not mmproj_path or "--mmproj" in command:
+        if not mmproj_path or RuntimePlugin.command_has_flag(command, "--mmproj"):
             return command
-        return "%s --mmproj %s" % (strip_dangling_line_continuations(command), mmproj_path)
+        return RuntimePlugin.append_args(command, "--mmproj %s" % mmproj_path)
 
     def prepare(
         self,
@@ -394,7 +393,7 @@ class LlamaCppRuntime(RuntimePlugin):
         """Build the llama-server head command with --rpc for worker nodes."""
         base = self._build_command(recipe, config, skip_keys=skip_keys)
         rpc_addrs = ",".join("%s:%d" % (h, rpc_port) for h in worker_hosts)
-        return "%s --rpc %s" % (base, rpc_addrs)
+        return self.append_args(base, "--rpc %s" % rpc_addrs)
 
     @staticmethod
     def _build_rpc_worker_command(rpc_port: int) -> str:

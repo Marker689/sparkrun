@@ -478,13 +478,12 @@ class SglangRuntime(RuntimePlugin):
 
         # Append sglang multi-node arguments.  SGLang combines master_addr
         # and master_port into a single --dist-init-addr HOST:PORT flag.
-        parts = [
+        return self.append_args(
             base,
             "--dist-init-addr %s:%s" % (node_args["master_addr"], node_args["master_port"]),
             "--nnodes %s" % node_args["num_nodes"],
             "--node-rank %d" % rank_in_world,
-        ]
-        return " ".join(parts)
+        )
 
     @staticmethod
     def _inject_gguf_model(config) -> None:

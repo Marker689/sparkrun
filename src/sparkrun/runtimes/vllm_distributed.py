@@ -324,7 +324,7 @@ class VllmDistributedRuntime(VllmRuntimeBase):
         else:
             base = self._build_base_command(recipe, config, skip_keys=skip_keys)
 
-        parts = [base]
+        parts: list[str] = []
 
         # Torch-distributed coordination for cross-node tp/pp (intra-replica).
         if replica_size > 1:
@@ -344,7 +344,7 @@ class VllmDistributedRuntime(VllmRuntimeBase):
             dp_rpc_port = int(config.get("data_parallel_rpc_port") or 13345)
             # Only inject --data-parallel-size when the recipe template
             # didn't already supply it (mirrors how we handle -tp today).
-            if "--data-parallel-size" not in (base or ""):
+            if not self.command_has_flag(base, "--data-parallel-size"):
                 parts.append("--data-parallel-size %d" % dp)
             parts.extend(
                 [
@@ -354,7 +354,7 @@ class VllmDistributedRuntime(VllmRuntimeBase):
                 ]
             )
 
-        return " ".join(parts)
+        return self.append_args(base, *parts)
 
     def get_cluster_env(self, head_ip: str, num_nodes: int) -> dict[str, str]:
         """Return vLLM distributed-specific cluster environment variables.
