@@ -1163,7 +1163,10 @@ Two layers, deliberately separate:
   transfer mode's copy sources** (`copy_sources`, which mirrors `orchestration.distribution`: control
   machine for `local`/`push`; head for `delegated`, plus the control machine only when the mode was
   inferred; nothing for `pull`; a heterogeneous delegated launch is a per-node pull). `--rebuild` is
-  refused. Skipped under `--dry-run` (no SSH).
+  refused. Skipped under `--dry-run` (no SSH). It reads the same inputs phase 3 uses: the targets'
+  cache (`effective_cache_dir`, probed on the head; the raw `cache_dir` is usually `None`, which
+  resolves to the *control* machine's cache and made every model look missing from a remote control
+  node) and the `skip_model` / `skip_fan_out` decision computed once for both.
 - **The guarantee** is at the leaves: distribution threads `offline` down to every step that could
   fetch (control-machine `docker pull` / HF download, `image_sync.sh`, the model ensure scripts), and
   each refuses instead. The preflight exists so the answer comes first and complete, not one transfer
@@ -1635,8 +1638,11 @@ skip download+distribution) *before* the launch commits to that skip. Host-subst
 executors (docker/local) override it to SSH `test -e` the hosts via the shared
 `ssh.verify_host_paths` helper; provider executors (k8s/modal) probe their own
 volumes; the base default is a safe no-op (`{}`). Wired at the launch choke point
-by `launcher._verify_pre_placed_model` (skipped on `--dry-run`), which raises a
-`RecipeError` listing host→missing-path gaps. Best-effort like `query_status`: an
+by `launcher._verify_mount_sources` (skipped on `--dry-run`), which raises a
+`RecipeError` listing host→missing-path gaps. It probes through the launch's own
+per-host executors (`host_executors`), as does the ENTRYPOINT probe below:
+re-resolving one from the serve overrides missed `--executor` and CLI
+`executor_config`, so it checked volumes the launch would not bind. Best-effort like `query_status`: an
 unresolvable executor or unreachable host degrades to "couldn't verify" and never
 blocks — only a *confirmed*-missing path fails the launch. This is why an
 absolute-path model works from a **remote control machine** that isn't a cluster

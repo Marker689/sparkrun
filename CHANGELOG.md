@@ -273,6 +273,13 @@ system, gateway registry, and execution-strategy extension points shipped in
 - `sparkrun stop <target> --dry-run` no longer tears the workload down. `api.stop`
   gains `dry_run` and takes `workload_id` (matching `api.logs`); the
   `cluster_id=` keyword is removed.
+- An offline launch from a control machine outside the cluster no longer reports
+  every cached model as missing. The offline preflight checks the target hosts' own
+  HuggingFace cache (resolved on the head) instead of the control machine's, and
+  checks exactly the models distribution would move.
+- The mount-source and ENTRYPOINT preflights now check through the launch's own
+  executors. `--executor local` no longer fails on docker's `executor_config.volumes`,
+  and volumes given on the command line are verified too.
 - Security: a recipe's container image reference could run shell commands on every
   target host through the image sync and distribution scripts. Image references are
   now validated and never re-expanded by the shell.

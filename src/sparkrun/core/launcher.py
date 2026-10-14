@@ -360,7 +360,7 @@ def _format_missing_mounts(missing: dict, keep: set) -> str:
     return "; ".join(parts)
 
 
-def _verify_mount_sources(recipe, hosts, ssh_kwargs, *, runtime, cluster, config, overrides) -> None:
+def _verify_mount_sources(recipe, hosts, ssh_kwargs, *, runtime, cluster, config, overrides, host_executors=None) -> None:
     """Fail fast when host paths the launch will bind are missing on the targets.
 
     Two path sets, probed in **one** pass because they share a substrate and an
@@ -383,42 +383,60 @@ def _verify_mount_sources(recipe, hosts, ssh_kwargs, *, runtime, cluster, config
     nothing, so its ``volumes:`` are inert and checking them would fail a
     working launch.
 
+    *host_executors* (host → executor) is what ``launch_inference`` passes: the
+    very executors the launch will run with, so ``--executor`` and CLI
+    ``executor_config`` reach the probe.  Hosts whose executors are of one
+    type and bind the same sources share one probe.  Without it, one executor
+    is resolved from *overrides* for every host.
+
     Best-effort and non-fatal by design: an unresolvable executor (e.g. a
     gated-off provider) or an unreachable/unverifiable host is *skipped* rather
     than blocking the launch — only a *confirmed*-missing path raises.  The
     caller guards ``dry_run`` (no SSH).
     """
     from sparkrun.core.recipe import RecipeError
-    from sparkrun.orchestration.executor import resolve_executor
     from sparkrun.orchestration.primitives import resolved_model_volume
 
     model_paths = list(resolved_model_volume(recipe))  # identity-mount source path(s)
 
-    try:
-        executor = resolve_executor(recipe=recipe, cluster=cluster, runtime=runtime, config=config, cli_overrides=overrides)
-    except Exception:
-        # If the executor can't be resolved here, the runtime will surface the
-        # real error at launch — don't pre-empt it with a preflight failure.
-        logger.debug("mount-source preflight: executor unresolvable; skipping probe", exc_info=True)
-        return
+    if host_executors is None:
+        from sparkrun.orchestration.executor import resolve_executor
+
+        try:
+            executor = resolve_executor(recipe=recipe, cluster=cluster, runtime=runtime, config=config, cli_overrides=overrides)
+        except Exception:
+            # If the executor can't be resolved here, the runtime will surface the
+            # real error at launch — don't pre-empt it with a preflight failure.
+            logger.debug("mount-source preflight: executor unresolvable; skipping probe", exc_info=True)
+            return
+        host_executors = dict.fromkeys(hosts, executor)
 
     policy = config.missing_mount_source_policy if config is not None else "fail"
-    volume_paths: list[str] = []
-    if policy != "ignore":
+    # (executor type, volume paths) → (executor, hosts): one probe per group.
+    groups: dict[tuple, tuple] = {}
+    for host in hosts:
+        executor = host_executors.get(host)
+        if executor is None:
+            continue
+        volumes: list[str] = []
+        if policy != "ignore":
+            try:
+                volumes = [p for p in (executor.bind_mount_sources() or []) if p not in model_paths]
+            except Exception:
+                logger.debug("mount-source preflight: bind_mount_sources failed; skipping volumes", exc_info=True)
+        groups.setdefault((type(executor), tuple(volumes)), (executor, []))[1].append(host)
+
+    volume_paths: set[str] = set()
+    missing: dict[str, list[str]] = {}
+    for (_type, volumes), (executor, group_hosts) in groups.items():
+        probe = model_paths + list(volumes)
+        if not probe:
+            continue
+        volume_paths.update(volumes)
         try:
-            volume_paths = [p for p in (executor.bind_mount_sources() or []) if p not in model_paths]
+            missing.update(executor.verify_mount_sources(probe, group_hosts, ssh_kwargs=ssh_kwargs) or {})
         except Exception:
-            logger.debug("mount-source preflight: bind_mount_sources failed; skipping volumes", exc_info=True)
-
-    probe = model_paths + volume_paths
-    if not probe:
-        return
-
-    try:
-        missing = executor.verify_mount_sources(probe, hosts, ssh_kwargs=ssh_kwargs) or {}
-    except Exception:
-        logger.debug("mount-source preflight: probe failed; skipping", exc_info=True)
-        return
+            logger.debug("mount-source preflight: probe failed; skipping", exc_info=True)
     if not missing:
         return
 
@@ -470,6 +488,7 @@ def _verify_image_command_passthrough(
     auto_user,
     host_hardware,
     v,
+    executor=None,
 ) -> None:
     """Fail fast when the image's ENTRYPOINT would swallow sparkrun's command.
 
@@ -485,35 +504,38 @@ def _verify_image_command_passthrough(
     a consuming entrypoint may also perform setup the workload needs — so this
     names both supported fixes and leaves the choice to the operator.
 
-    The executor is resolved with the same arguments the launch itself uses
-    below, so the probe container starts under the launch's own accelerator
-    flags (``host_hardware`` is what pins DGX Spark to ``--gpus`` over CDI).
+    ``launch_inference`` passes the probe host's own launch *executor*, so the
+    probe container starts under exactly the launch's accelerator flags
+    (``host_hardware`` is what pins DGX Spark to ``--gpus`` over CDI) and
+    executor overrides.  Without one, it is resolved with the same arguments.
 
     Best-effort, matching :func:`_verify_pre_placed_model`: an unresolvable
     executor, an unreachable host, or any probe error is skipped rather than
     blocking.  Only a *confirmed* consuming entrypoint raises.
     """
     from sparkrun.core.recipe import RecipeError
-    from sparkrun.orchestration.executor import resolve_executor
 
     if not image or not hosts:
         return
 
-    try:
-        executor = resolve_executor(
-            recipe=recipe,
-            cluster=cluster,
-            runtime=runtime,
-            config=config,
-            cli_overrides=executor_config if isinstance(executor_config, dict) else None,
-            rootless=rootless,
-            auto_user=auto_user,
-            host_hardware=host_hardware,
-            v=v,
-        )
-    except Exception:
-        logger.debug("image entrypoint preflight: executor unresolvable; skipping probe", exc_info=True)
-        return
+    if executor is None:
+        from sparkrun.orchestration.executor import resolve_executor
+
+        try:
+            executor = resolve_executor(
+                recipe=recipe,
+                cluster=cluster,
+                runtime=runtime,
+                config=config,
+                cli_overrides=executor_config if isinstance(executor_config, dict) else None,
+                rootless=rootless,
+                auto_user=auto_user,
+                host_hardware=host_hardware,
+                v=v,
+            )
+        except Exception:
+            logger.debug("image entrypoint preflight: executor unresolvable; skipping probe", exc_info=True)
+            return
 
     try:
         probe = executor.verify_command_passthrough(image, hosts, ssh_kwargs=ssh_kwargs)
@@ -1256,26 +1278,6 @@ def launch_inference(
 
     ssh_kwargs = build_ssh_kwargs(config)
 
-    # Preflight: verify the host paths this launch will bind actually exist on
-    # the substrate where the workload runs — pre-placed weights (whose
-    # presence is what licenses skipping download + distribution) and the
-    # executor's own bind-mount sources from ``executor_config.volumes``.
-    # Substrate-aware via the launching executor (host → SSH ``test -e``;
-    # provider executors probe their own volumes). Best-effort: skipped on
-    # dry-run, and an unresolvable executor / unreachable host never blocks.
-    # Runs unconditionally now: a recipe with no pre-placed model can still
-    # carry volumes, and that was the unchecked half.
-    if not dry_run:
-        _verify_mount_sources(
-            recipe,
-            host_list,
-            ssh_kwargs,
-            runtime=runtime,
-            cluster=cluster,
-            config=config,
-            overrides=overrides,
-        )
-
     effective_local_cache = local_cache_dir or str(config.hf_cache_dir)
     effective_cache_dir = resolve_effective_cache_dir(
         cache_dir,
@@ -1373,6 +1375,27 @@ def launch_inference(
     executor = host_executors[host_list[0]]
     executor.bind_host_executors(host_executors)
 
+    # Preflight: verify the host paths this launch will bind actually exist on
+    # the substrate where the workload runs — pre-placed weights (whose
+    # presence is what licenses skipping download + distribution) and the
+    # executor's own bind-mount sources from ``executor_config.volumes``.
+    # Probed through the launch's own per-host executors, so ``--executor`` and
+    # CLI ``executor_config`` volumes are what gets checked (host → SSH
+    # ``test -e``; provider executors probe their own volumes). Runs before
+    # any side effect (builder, distribution, eviction). Best-effort: skipped
+    # on dry-run, and an unreachable host never blocks.
+    if not dry_run:
+        _verify_mount_sources(
+            recipe,
+            host_list,
+            ssh_kwargs,
+            runtime=runtime,
+            cluster=cluster,
+            config=config,
+            overrides=overrides,
+            host_executors=host_executors,
+        )
+
     # Global serve flags must agree across assigned devices. Explicit runtime
     # settings win over the platform tier and resolve conflicting defaults.
     from sparkrun.core.hardware_assessment import assess_launch_hardware
@@ -1436,6 +1459,32 @@ def launch_inference(
         else:
             logger.warning("Cannot resolve recipe.mods: no RegistryManager available")
 
+    # What phase 3 will move, decided once so the offline preflight checks
+    # exactly the set distribution would transfer.
+    #
+    # Cluster-level model-distribution preferences (shared/NFS caches).
+    # Explicit kwargs win (used by the benchmark path, which launches with
+    # explicit hosts and so loses the named cluster identity); otherwise
+    # fall back to the resolved cluster's prefs.  Anonymous/explicit-hosts
+    # clusters carry the safe defaults (preserve_perms=True,
+    # skip_fan_out=False).
+    from sparkrun.core.cluster_manager import ModelDistributionPrefs
+
+    _dist_model = getattr(getattr(cluster, "distribution", None), "model", None)
+    _model_prefs = ModelDistributionPrefs(
+        preserve_perms=(preserve_model_perms if preserve_model_perms is not None else getattr(_dist_model, "preserve_perms", True)),
+        skip_fan_out=(skip_model_fan_out if skip_model_fan_out is not None else getattr(_dist_model, "skip_fan_out", False)),
+    )
+    # Skip model download + distribution when the cluster disables it
+    # (``distribution.model.enabled: false``) or a recipe points at
+    # pre-placed weights (``cluster_config.resolved_model_path``).
+    _skip_model = (
+        _skip_model_distribution
+        or not getattr(_dist_model, "enabled", True)
+        or (asset_policy is not None and not asset_policy.prepare_model)
+    )
+    _skip_container = not executor.needs_image or (asset_policy is not None and not asset_policy.distribute_images)
+
     if offline and not dry_run:
         _offline_preflight(
             recipe,
@@ -1447,17 +1496,14 @@ def launch_inference(
             v=v,
             ssh_kwargs=ssh_kwargs,
             transfer_result=transfer_result,
-            cache_dir=cache_dir,
-            local_cache_dir=local_cache_dir,
-            skip_model=_skip_model_distribution
-            or not getattr(getattr(getattr(cluster, "distribution", None), "model", None), "enabled", True)
-            or (asset_policy is not None and not asset_policy.prepare_model),
-            skip_images=not executor.needs_image or (asset_policy is not None and not asset_policy.distribute_images),
-            shared_model_cache=(
-                skip_model_fan_out
-                if skip_model_fan_out is not None
-                else getattr(getattr(getattr(cluster, "distribution", None), "model", None), "skip_fan_out", False)
-            ),
+            # Host-side checks read the *targets'* cache (probed from the
+            # head), never the control machine's; the control-side check
+            # reads the same local cache distribution would copy from.
+            cache_dir=effective_cache_dir,
+            local_cache_dir=effective_local_cache,
+            skip_model=_skip_model,
+            skip_images=_skip_container,
+            shared_model_cache=_model_prefs.skip_fan_out,
         )
 
     if p:
@@ -1535,29 +1581,6 @@ def launch_inference(
             p.phase(3)
         from sparkrun.orchestration.distribution import distribute_from_config
 
-        # Cluster-level model-distribution preferences (shared/NFS caches).
-        # Explicit kwargs win (used by the benchmark path, which launches with
-        # explicit hosts and so loses the named cluster identity); otherwise
-        # fall back to the resolved cluster's prefs.  Anonymous/explicit-hosts
-        # clusters carry the safe defaults (preserve_perms=True,
-        # skip_fan_out=False).
-        from sparkrun.core.cluster_manager import ModelDistributionPrefs
-
-        _dist_model = getattr(getattr(cluster, "distribution", None), "model", None)
-        _model_prefs = ModelDistributionPrefs(
-            preserve_perms=(preserve_model_perms if preserve_model_perms is not None else getattr(_dist_model, "preserve_perms", True)),
-            skip_fan_out=(skip_model_fan_out if skip_model_fan_out is not None else getattr(_dist_model, "skip_fan_out", False)),
-        )
-        # Skip model download + distribution when the cluster disables it
-        # (``distribution.model.enabled: false``) or a recipe points at
-        # pre-placed weights (``cluster_config.resolved_model_path``).
-        _model_dist_enabled = getattr(_dist_model, "enabled", True)
-        _skip_model = _skip_model_distribution or not _model_dist_enabled or (asset_policy is not None and not asset_policy.prepare_model)
-
-        _skip_container = not executor.needs_image
-        if asset_policy is not None and not asset_policy.distribute_images:
-            _skip_container = True
-
         # Preflight: does this image actually run the command sparkrun appends?
         # Runs from the distribution hook — i.e. once the image is resident on
         # every target but *before* the model sync — because that is the only
@@ -1593,6 +1616,7 @@ def launch_inference(
                         auto_user=auto_user,
                         host_hardware=launch_hardware[probe_host],
                         v=v,
+                        executor=host_executors[probe_host],
                     )
 
             # One probe per *distinct* image.  The single-image shortcut used to
