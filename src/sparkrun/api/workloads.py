@@ -344,7 +344,7 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
         # Resolve current launch contents only when recovery/launch needs them.
         # Receipt checks still precede adoption, including uncertain hook effects.
         resolved = resolve_binding(binding, sctx=sctx) if not binding.recipe_revision else None
-        revision = binding.recipe_revision or resolved[1]
+        revision = resolved[1] if resolved is not None else binding.recipe_revision
         binding = replace(binding, recipe_revision=revision)
         receipts = Receipts(sctx)
         previous = [
