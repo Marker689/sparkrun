@@ -376,14 +376,25 @@ at random:
 - Load is counted per backend address, so a model and its aliases share one
   view of each backend. Only the requested model's deployments are candidates,
   so a request never lands on a backend serving a different model.
+- Each HTTP request holds its own slot, keyed by LiteLLM's per-request call id,
+  so concurrent requests that share an `x-litellm-session-id` or
+  `x-litellm-trace-id` are still counted separately.
 - The slot is reserved when the backend is picked and released when the
   request succeeds or fails, including after retries. A reservation that sees
   neither expires after 15 minutes.
+- A retry or fallback goes to a backend that request has not tried yet, when
+  the model has one.
+- A backend whose request just failed on its side (anything but a malformed or
+  oversized request: 400, 413, 422) is ranked after the others for 10 seconds.
+  Without this, a backend that errors instantly would always look the least
+  loaded and draw every new request.
 - Counts are local to the proxy process. Traffic sent straight to a backend,
   bypassing the proxy, is not seen.
 
-Removing the key restores LiteLLM's routing, and changing it restarts the
-proxy like `router_settings` does.
+Removing the key restores LiteLLM's routing and deletes `sparkrun_balancer.py`;
+changing it restarts the proxy like `router_settings` does. With `balancing`
+set, `router_settings.routing_strategy` has no effect (the balancer hands
+LiteLLM a single backend), and sparkrun warns when both are configured.
 
 ## Python API and gateway plugins
 

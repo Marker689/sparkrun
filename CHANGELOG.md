@@ -18,6 +18,10 @@ first tagged release containing them, regardless of their original commit date.
 - SparkRoute settings and catalogs now live only under `gateways.sparkroute` in
   `proxy.yaml`, alongside `gateways.litellm`; legacy locations are not read or
   migrated. Shared discovery settings, listener settings and aliases stay shared.
+- LiteLLM gateway: `gateways.litellm.router_settings` is emitted verbatim, and
+  `gateways.litellm.balancing: least-in-flight` sends each request to the backend
+  of its model with the fewest requests in flight. LiteLLM's own `least-busy` does
+  not balance on the proxy's async path in the pinned release.
 
 - Public seams for integrations: `api.wait_ready(workload_id=...)` waits on a recorded
   workload; `api.recipe_protocols()` / `api.RecipeProtocols`; `api.discovery_snapshot(

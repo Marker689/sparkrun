@@ -22,30 +22,63 @@ How a request is placed:
   model and its aliases share one view of each backend.  Only the
   deployments LiteLLM offers for the requested model group are candidates,
   so a request never spills onto a backend serving a different model.
-* The slot is released on the success event for the same request.  A
-  retry or fallback re-enters the filter with the same trace id and moves
-  its reservation instead of taking a second one.  LiteLLM logs a failure
-  event only for the first failed attempt, so a request whose retries all
-  fail is released by the proxy's once-per-request failure hook, matched
-  on the proxy call id the filter saw.  Reservations that never see either
-  expire after ``stale_after`` seconds so a backend cannot stay "busy"
-  forever.
+* A request is identified by the proxy's ``litellm_call_id``, which is fresh
+  per HTTP request and kept across the router's retries and fallbacks.  The
+  trace id is only a fallback: clients set it from ``x-litellm-trace-id`` /
+  ``x-litellm-session-id`` to group a whole session, so concurrent requests
+  routinely share one, and keying on it would collapse them into one slot.
+* A retry or fallback re-enters the filter with the same id, moves its
+  reservation instead of taking a second one, and prefers a backend that
+  request has not tried yet.
+* A backend whose request failed on the backend's side (anything but a
+  malformed or oversized request; see :func:`is_backend_fault`) is ranked
+  after the others for ``fault_avoid``
+  seconds.  Least-in-flight alone would do the opposite: a backend that
+  errors instantly always reads as the least loaded and would draw every
+  new request until LiteLLM's cooldown caught up.  Client errors (a 400 for
+  an oversized prompt) say nothing about the backend and are not counted.
+* The slot is released on the success event for the same request.  LiteLLM
+  logs a failure event only for the first failed attempt, so a request whose
+  retries all fail is released by the proxy's once-per-request failure hook.
+  A failure event naming a backend other than the one currently held is a
+  late event for an earlier attempt and leaves the retry's slot alone.
+  A client that hangs up mid-stream produces no logging event at all, so
+  the proxy's stream wrapper releases those (without blaming the backend).
+  Reservations that see none of these expire after ``stale_after`` seconds
+  so a backend cannot stay "busy" forever.
+
+Known undercounts, both bounded to the requests involved and never a leak:
+a comma-separated ``model`` (LiteLLM's batch completion) fans one call id
+out to concurrent requests, which then share one slot; and a late failure
+event cannot be told from the current attempt's when the retry went back to
+the same backend (a one-backend model, or every backend already tried).
 """
 
 from __future__ import annotations
 
+import asyncio
 import random
 import threading
 import time
 from typing import Any, Callable
 
-try:  # Present inside the LiteLLM gateway process.
+if __name__ == "sparkrun.plugins.litellm.balancer":
+    # Imported by sparkrun itself (tests, and to copy the file), which has no
+    # LiteLLM installed.  Inside the gateway LiteLLM loads this file under its
+    # own module name and the import below must succeed: LiteLLM only calls
+    # callbacks that are ``CustomLogger`` instances, so a fallback there would
+    # turn balancing off without a word.
+    CustomLogger = object
+else:  # pragma: no cover - runs inside the LiteLLM gateway process
     from litellm.integrations.custom_logger import CustomLogger
-except ImportError:  # pragma: no cover - sparkrun imports this file for tests and to copy it
-    CustomLogger = object  # type: ignore[assignment,misc]
 
 STRATEGY = "least-in-flight"
 STALE_AFTER_S = 900.0
+FAULT_AVOID_S = 10.0
+
+#: HTTP statuses that describe the request rather than the backend: a
+#: malformed or oversized request fails the same way wherever it is sent.
+_REQUEST_FAULT_STATUSES = frozenset({400, 413, 422, 499})
 
 
 def backend_key(deployment: dict[str, Any]) -> str:
@@ -57,22 +90,50 @@ def backend_key(deployment: dict[str, Any]) -> str:
     return str((deployment.get("model_info") or {}).get("id") or params.get("model") or "")
 
 
-def _trace_id(kwargs: dict[str, Any] | None) -> str | None:
-    """The request's trace id, as seen by the routing filter and by the logging events.
+def _request_keys(kwargs: dict[str, Any] | None) -> list[str]:
+    """Identities of one request, most specific first (call id, then trace id).
 
-    The filter receives the router's request kwargs, where it is top-level.
-    Logging events carry it in ``litellm_params`` (and the standard logging
-    payload); their own top-level ``litellm_trace_id`` is a different,
-    per-logging-object id and must not be preferred.
+    The filter receives the router's request kwargs, where both ids are
+    top-level.  Logging events carry them in ``litellm_params`` (and the
+    standard logging payload); an event's own top-level ``litellm_trace_id``
+    is a different, per-logging-object id and must not be preferred.
     """
     if not kwargs:
-        return None
+        return []
     params = kwargs.get("litellm_params") or {}
     standard = kwargs.get("standard_logging_object") or {}
+    keys = []
+    for call in (params.get("litellm_call_id"), kwargs.get("litellm_call_id")):
+        if call:
+            keys.append("call:%s" % call)
+            break
     for trace in (params.get("litellm_trace_id"), standard.get("trace_id"), kwargs.get("litellm_trace_id")):
         if trace:
-            return str(trace)
-    return None
+            keys.append("trace:%s" % trace)
+            break
+    return keys
+
+
+def _event_backend(kwargs: dict[str, Any] | None) -> str | None:
+    """Backend a logging event's attempt went to, when the event says."""
+    base = str(((kwargs or {}).get("litellm_params") or {}).get("api_base") or "").rstrip("/")
+    return base or None
+
+
+def is_backend_fault(exception: Any) -> bool:
+    """Whether *exception* says the backend failed, as opposed to the request.
+
+    Only a malformed or oversized request (400, 413, 422) or a client that
+    went away (499) is the caller's.
+    Everything else is the backend's: no status at all (connection refused,
+    reset, DNS), 5xx, timeouts and 429 (overloaded), and also 401/403/404,
+    which from an upstream behind the proxy mean a wrong key or a backend
+    that does not serve the model it was registered for.  An unknown failure
+    counts against the backend too: a wrong guess only ranks it last for
+    ``fault_avoid`` seconds.
+    """
+    status = getattr(exception, "status_code", None)
+    return not (isinstance(status, int) and status in _REQUEST_FAULT_STATUSES)
 
 
 class LeastInFlight(CustomLogger):
@@ -81,6 +142,7 @@ class LeastInFlight(CustomLogger):
     def __init__(
         self,
         stale_after: float = STALE_AFTER_S,
+        fault_avoid: float = FAULT_AVOID_S,
         clock: Callable[[], float] = time.monotonic,
         choice: Callable[[list], Any] = random.choice,
     ) -> None:
@@ -88,11 +150,16 @@ class LeastInFlight(CustomLogger):
             super().__init__()
         self._lock = threading.Lock()
         self._stale_after = stale_after
+        self._fault_avoid = fault_avoid
         self._clock = clock
         self._choice = choice
         self._in_flight: dict[str, int] = {}
+        #: request key -> (backend holding its slot, reserved at)
         self._held: dict[str, tuple[str, float]] = {}
-        self._trace_by_call: dict[str, str] = {}
+        #: request key -> (backends it has been sent to, last attempt at)
+        self._tried: dict[str, tuple[set[str], float]] = {}
+        #: backend -> when a request last failed on its side
+        self._faulted: dict[str, float] = {}
 
     # -- bookkeeping ----------------------------------------------------
 
@@ -102,59 +169,113 @@ class LeastInFlight(CustomLogger):
             self._expire_locked()
             return {k: v for k, v in self._in_flight.items() if v > 0}
 
-    def _release_locked(self, trace: str) -> None:
-        held = self._held.pop(trace, None)
+    def faulted(self) -> set[str]:
+        """Backends currently ranked last because of a recent backend-side failure."""
+        with self._lock:
+            self._expire_locked()
+            return set(self._faulted)
+
+    def _held_key_locked(self, keys: list[str]) -> str | None:
+        return next((k for k in keys if k in self._held), None)
+
+    def _release_locked(self, key: str) -> str | None:
+        held = self._held.pop(key, None)
         if held is None:
-            return
-        for call in [c for c, t in self._trace_by_call.items() if t == trace]:
-            del self._trace_by_call[call]
+            return None
         backend = held[0]
         remaining = self._in_flight.get(backend, 0) - 1
         if remaining > 0:
             self._in_flight[backend] = remaining
         else:
             self._in_flight.pop(backend, None)
+        return backend
+
+    def _finish_locked(self, keys: list[str]) -> str | None:
+        """Release the request for good: no retry will follow.
+
+        Only the first of *keys* this request is known by is finished.  Its
+        trace id may be shared by a whole session, so the fallback key must
+        not end some other request that happens to be keyed on it.
+        """
+        key = next((k for k in keys if k in self._held or k in self._tried), None)
+        if key is None:
+            return None
+        self._tried.pop(key, None)
+        return self._release_locked(key)
 
     def _expire_locked(self) -> None:
-        cutoff = self._clock() - self._stale_after
-        for trace in [t for t, (_, at) in self._held.items() if at < cutoff]:
-            self._release_locked(trace)
+        now = self._clock()
+        cutoff = now - self._stale_after
+        for key in [k for k, (_, at) in self._held.items() if at < cutoff]:
+            self._release_locked(key)
+        for key in [k for k, (_, at) in self._tried.items() if at < cutoff]:
+            del self._tried[key]
+        fault_cutoff = now - self._fault_avoid
+        for backend in [b for b, at in self._faulted.items() if at < fault_cutoff]:
+            del self._faulted[backend]
 
-    def pick(self, deployments: list[dict[str, Any]], trace: str | None, call: str | None = None) -> dict[str, Any]:
-        """Choose one deployment and reserve a slot on its backend for *trace*.
+    def _mark_fault_locked(self, backend: str | None) -> None:
+        if backend:
+            self._faulted[backend] = self._clock()
 
-        *call* is the proxy's per-request call id, recorded so the slot can
-        also be released by :meth:`release_call`.
-        """
+    def pick(self, deployments: list[dict[str, Any]], key: str | None) -> dict[str, Any]:
+        """Choose one deployment and reserve a slot on its backend for request *key*."""
         with self._lock:
             self._expire_locked()
-            if trace is not None:
-                self._release_locked(trace)  # retry / fallback moves the slot
-            loads = [self._in_flight.get(backend_key(d), 0) for d in deployments]
-            lowest = min(loads)
-            chosen = self._choice([d for d, load in zip(deployments, loads, strict=True) if load == lowest])
-            if trace is not None:
+            tried: set[str] = set()
+            if key is not None:
+                self._release_locked(key)  # retry / fallback moves the slot
+                tried = self._tried.get(key, (set(), 0.0))[0]
+            fresh = [d for d in deployments if backend_key(d) not in tried]
+            candidates = fresh or deployments
+            ranks = [(backend_key(d) in self._faulted, self._in_flight.get(backend_key(d), 0)) for d in candidates]
+            best = min(ranks)
+            chosen = self._choice([d for d, rank in zip(candidates, ranks, strict=True) if rank == best])
+            if key is not None:
                 backend = backend_key(chosen)
+                now = self._clock()
                 self._in_flight[backend] = self._in_flight.get(backend, 0) + 1
-                self._held[trace] = (backend, self._clock())
-                if call:
-                    self._trace_by_call[call] = trace
+                self._held[key] = (backend, now)
+                self._tried[key] = (tried | {backend}, now)
             return chosen
 
-    def release(self, trace: str | None) -> None:
-        if trace is None:
+    def release(self, kwargs: dict[str, Any] | None) -> None:
+        """The request in logging-event *kwargs* succeeded."""
+        keys = _request_keys(kwargs)
+        if not keys:
             return
         with self._lock:
-            self._release_locked(trace)
+            self._finish_locked(keys)
 
-    def release_call(self, call: str | None) -> None:
-        """Release the slot reserved by the proxy request with call id *call*."""
-        if not call:
-            return
+    def release_failed_attempt(self, kwargs: dict[str, Any] | None) -> None:
+        """An attempt of the request in logging-event *kwargs* failed; a retry may follow."""
+        kwargs = kwargs or {}
+        fault = is_backend_fault(kwargs.get("exception"))
+        attempt_backend = _event_backend(kwargs)
         with self._lock:
-            trace = self._trace_by_call.get(call)
-            if trace is not None:
-                self._release_locked(trace)
+            key = self._held_key_locked(_request_keys(kwargs))
+            held = self._held[key][0] if key is not None else None
+            if key is not None and (attempt_backend is None or attempt_backend == held):
+                self._release_locked(key)
+                attempt_backend = held
+            if fault:
+                self._mark_fault_locked(attempt_backend)
+
+    def release_request(self, request_data: dict[str, Any] | None, exception: Any = None, *, fault: bool | None = None) -> None:
+        """The proxy request *request_data* ended without success, after every retry and fallback.
+
+        *fault* says whether to blame the backend it held; by default it is
+        decided from *exception*.
+        """
+        keys = _request_keys(request_data)
+        if not keys:
+            return
+        if fault is None:
+            fault = is_backend_fault(exception)
+        with self._lock:
+            backend = self._finish_locked(keys)
+            if backend is not None and fault:
+                self._mark_fault_locked(backend)
 
     # -- LiteLLM hooks --------------------------------------------------
 
@@ -168,25 +289,37 @@ class LeastInFlight(CustomLogger):
     ) -> list:
         if not healthy_deployments:
             return healthy_deployments
-        kwargs = request_kwargs or {}
-        return [self.pick(list(healthy_deployments), _trace_id(kwargs), kwargs.get("litellm_call_id"))]
+        keys = _request_keys(request_kwargs)
+        return [self.pick(list(healthy_deployments), keys[0] if keys else None)]
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time) -> None:
-        self.release(_trace_id(kwargs))
+        self.release(kwargs)
 
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time) -> None:
-        self.release(_trace_id(kwargs))
+        self.release_failed_attempt(kwargs)
 
     async def async_post_call_failure_hook(self, request_data, original_exception, user_api_key_dict, traceback_str=None):
         # Proxy-only, once per request after every retry and fallback has failed.
-        self.release_call((request_data or {}).get("litellm_call_id"))
+        self.release_request(request_data, original_exception)
         return None
 
+    async def async_post_call_streaming_iterator_hook(self, user_api_key_dict, response, request_data):
+        # Proxy-only.  A client that disconnects mid-stream closes this
+        # generator (or cancels the task iterating it) and LiteLLM logs no
+        # event for that request at all.  Errors raised by the stream itself
+        # still reach the failure hooks, which can blame the backend.
+        try:
+            async for chunk in response:
+                yield chunk
+        except (GeneratorExit, asyncio.CancelledError):
+            self.release_request(request_data, fault=False)
+            raise
+
     def log_success_event(self, kwargs, response_obj, start_time, end_time) -> None:
-        self.release(_trace_id(kwargs))
+        self.release(kwargs)
 
     def log_failure_event(self, kwargs, response_obj, start_time, end_time) -> None:
-        self.release(_trace_id(kwargs))
+        self.release_failed_attempt(kwargs)
 
 
 handler = LeastInFlight()
