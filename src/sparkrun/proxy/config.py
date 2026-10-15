@@ -30,7 +30,6 @@ from sparkrun.proxy import (
 
 logger = logging.getLogger(__name__)
 
-_UNCHANGED = object()
 _DELETE = object()
 
 
@@ -57,8 +56,6 @@ class ProxyConfig:
         """Forget which sections this instance has modified."""
         self._pending_proxy: dict[str, Any] = {}
         self._pending_aliases: dict[str, Any] = {}
-        self._pending_bindings: object = _UNCHANGED
-        self._pending_discovered_models: object = _UNCHANGED
 
     def _read(self, *, strict: bool = False) -> dict[str, Any]:
         """Parse the file as it is on disk right now.
@@ -125,8 +122,6 @@ class ProxyConfig:
         that mutated ``_data`` directly.
         """
         has_pending = bool(self._pending_proxy or self._pending_aliases)
-        has_pending = has_pending or self._pending_bindings is not _UNCHANGED
-        has_pending = has_pending or self._pending_discovered_models is not _UNCHANGED
 
         from sparkrun.core.config import _lifecycle_snapshot
 
@@ -157,15 +152,6 @@ class ProxyConfig:
                         aliases[alias] = target
                 if not aliases:
                     latest.pop("aliases", None)
-
-            if self._pending_bindings is not _UNCHANGED:
-                latest["bindings"] = copy.deepcopy(self._pending_bindings)
-            if self._pending_discovered_models is not _UNCHANGED:
-                models = copy.deepcopy(self._pending_discovered_models)
-                if models:
-                    latest["discovered_models"] = models
-                else:
-                    latest.pop("discovered_models", None)
 
             self._write_atomic(latest)
 
@@ -227,17 +213,27 @@ class ProxyConfig:
 
     @property
     def discovery_backend(self) -> str:
-        value = self._data.get("proxy", {}).get("discovery_backend", "daemon" if self.gateway_transport == "daemon" else "process")
+        return self.discovery_backend_for(self.gateway)
+
+    def discovery_backend_for(self, gateway: str | None) -> str:
+        """Resolve shared discovery settings for the gateway actually selected.
+
+        SparkRoute daemon transport defaults to daemon discovery. Keep that
+        default without applying SparkRoute settings to another
+        gateway, including when --gateway overrides the saved selector.
+        """
+        proxy = getattr(self, "_data", {}).get("proxy", {})
+        if "discovery_backend" in proxy:
+            value = proxy["discovery_backend"]
+        elif gateway == "sparkroute":
+            transport = self.gateway_settings("sparkroute").get("transport", "bridge")
+            if transport not in {"bridge", "daemon"}:
+                raise ValueError("gateways.sparkroute.transport must be bridge or daemon")
+            value = "daemon" if transport == "daemon" else "process"
+        else:
+            value = "process"
         if value not in {"process", "daemon"}:
             raise ValueError("proxy.discovery_backend must be process or daemon")
-        return value
-
-    @property
-    def gateway_transport(self) -> str:
-        """Explicit SparkRoute control-plane transport; never auto-detect."""
-        value = self._data.get("proxy", {}).get("gateway_transport", "bridge")
-        if value not in {"bridge", "daemon"}:
-            raise ValueError("proxy.gateway_transport must be bridge or daemon")
         return value
 
     @property
@@ -342,113 +338,3 @@ class ProxyConfig:
     def default_recipes(self) -> dict[str, dict]:
         """Return default recipe mappings (future use)."""
         return dict(self._data.get("default_recipes", {}))
-
-    @property
-    def gateway_config(self) -> str | None:
-        """Path to an operator-authored gateway document, or ``None``.
-
-        For the ``sparkroute`` backend this is a **one-time bootstrap seed**,
-        not a document sparkrun keeps running: the gateway rejects ``-config``
-        in SQLite mode, so it is passed as ``-config-bootstrap`` and imported
-        into the ``operator`` managed set only when the configuration database
-        is empty.  Ignored by LiteLLM.
-        """
-        val = self._data.get("proxy", {}).get("gateway_config")
-        return str(val) if val else None
-
-    @property
-    def gateway_admin_port(self) -> int:
-        """Port for an explicitly split gateway admin listener."""
-        return int(self._data.get("proxy", {}).get("gateway_admin_port", 8081))
-
-    @property
-    def gateway_admin_host(self) -> str:
-        """Bind address for an explicitly split gateway admin listener.
-
-        Loopback by default, because this listener accepts a credential that
-        can rewrite the served model set.  Set it to ``0.0.0.0`` or a specific
-        address to reach the admin console from another machine.
-
-        Widening it is defensible rather than reckless: the listener is
-        authenticated, so exposure costs a credential rather than the whole
-        config.  It stays opt-in because a default nobody chose should never be
-        the reason something is on the network.
-        """
-        return str(self._data.get("proxy", {}).get("gateway_admin_host", "127.0.0.1"))
-
-    @property
-    def gateway_admin_configured(self) -> bool:
-        """Whether admin was explicitly isolated from the data listener.
-
-        With neither key present SparkRoute mounts ``/admin`` and its admin API
-        routes on the data address. Setting either legacy host/port key opts
-        into a dedicated listener; the other component keeps its safe legacy
-        default.
-        """
-        proxy = self._data.get("proxy", {})
-        return "gateway_admin_host" in proxy or "gateway_admin_port" in proxy
-
-    @property
-    def capability_policy(self) -> str:
-        """``permissive`` (default) or ``strict`` capability generation.
-
-        Under ``permissive`` sparkrun emits ``capability_policy.unknown =
-        "try"`` on generated deployments: an undeclared optional capability is
-        attempted and the upstream error decides.  That is right while sparkrun
-        cannot determine model capabilities — the alternative is every recipe
-        silently losing tool-calling until someone declares it.  Capabilities
-        the gateway treats as fail-closed (embeddings, files, responses, …)
-        always require a positive declaration regardless.
-        """
-        value = str(self._data.get("proxy", {}).get("capability_policy", "permissive")).strip().lower()
-        return value if value in ("permissive", "strict") else "permissive"
-
-    @property
-    def gateway_allow_insecure_admin_nonloopback(self) -> bool:
-        """Persisted acknowledgment of unauthenticated non-loopback admin.
-
-        Required for a non-loopback token-file listener because its token can
-        be cleared while the process remains running. Sparkrun implies it for
-        public binds and still warns loudly whenever the live token is absent.
-        """
-        return bool(self._data.get("proxy", {}).get("gateway_allow_insecure_admin_nonloopback", False))
-
-    @property
-    def bindings(self) -> list[dict[str, Any]]:
-        """Recipe bindings under ``bindings:`` — sparkrun's desired state.
-
-        A **catalog**, deliberately not "whatever is running now": generating
-        deployments from live discovery would deadlock, since a workload going
-        down would delete the very deployment needed to activate it again.
-        """
-        value = self._data.get("bindings", [])
-        return [dict(entry) for entry in value if isinstance(entry, dict)]
-
-    def set_bindings(self, bindings: list[dict[str, Any]]) -> None:
-        """Replace the binding list."""
-        self._data["bindings"] = [dict(entry) for entry in bindings]
-        self._pending_bindings = copy.deepcopy(self._data["bindings"])
-
-    @property
-    def discovered_models(self) -> list[str]:
-        """Models imported by the last explicit discovery sync.
-
-        These are deliberately separate from :attr:`bindings`. A binding is
-        durable, activatable desired state; a discovered model is only a route
-        to a workload observed running during ``proxy sync``. A later explicit
-        sync may therefore remove a discovered model without deleting the
-        cold-start route for a bound recipe.
-        """
-        value = self._data.get("discovered_models", [])
-        if not isinstance(value, list):
-            return []
-        return sorted({str(model).strip() for model in value if str(model).strip()})
-
-    def set_discovered_models(self, models: list[str]) -> None:
-        """Replace the explicit-discovery snapshot deterministically."""
-        normalized = sorted({str(model).strip() for model in models if str(model).strip()})
-        if normalized:
-            self._data["discovered_models"] = normalized
-        else:
-            self._data.pop("discovered_models", None)
-        self._pending_discovered_models = normalized

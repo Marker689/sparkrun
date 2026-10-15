@@ -12,6 +12,13 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Proxy discovery reports successful imports with routing warnings separately from
+  failed sweeps. With the coordinated SparkRoute gateway/plugin, public-name
+  conflicts leave running deployments visible for correction in the admin console.
+- SparkRoute settings and catalogs now live only under `gateways.sparkroute` in
+  `proxy.yaml`, alongside `gateways.litellm`; legacy locations are not read or
+  migrated. Shared discovery settings, listener settings and aliases stay shared.
+
 - Public seams for integrations: `api.wait_ready(workload_id=...)` waits on a recorded
   workload; `api.recipe_protocols()` / `api.RecipeProtocols`; `api.discovery_snapshot(
   metadata_only=True)` (also on the daemon `discovery.snapshot` op), whose endpoints now

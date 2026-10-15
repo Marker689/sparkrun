@@ -128,6 +128,20 @@ def test_alias_cli_reports_saved_change_and_provider_failure(registered_provider
     assert isinstance(result.exception, SystemExit)
 
 
+def test_successful_sync_exposes_routing_warnings_in_api_and_cli(registered_provider, monkeypatch):
+    from sparkrun.cli import main
+
+    warning = "Discovered deployment is ready; its public model name is reserved"
+    monkeypatch.setattr(ContractGateway, "sync_models", lambda *args: (1, 0))
+    monkeypatch.setattr(ContractGateway, "discovery_warnings", lambda self: (warning,))
+    result = api.proxy.sync(endpoints=[], sctx=registered_provider)
+    assert result.changed and result.warnings == (warning,)
+    cli = CliRunner().invoke(main, ["proxy", "sync"], obj={"sparkrun_ctx": registered_provider})
+    assert cli.exit_code == 0, cli.output
+    assert "Synchronized running models" in cli.output
+    assert "Routing warning: " + warning in cli.output
+
+
 def test_operational_construction_failure_retains_process_recovery(registered_provider, monkeypatch):
     monkeypatch.setattr(ContractGateway, "__init__", Mock(side_effect=GatewayOperationError("invalid provider configuration")))
     discovery = Mock(side_effect=AssertionError("discovered for recovery-only provider"))

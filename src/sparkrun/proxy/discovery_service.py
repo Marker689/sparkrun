@@ -72,6 +72,7 @@ class DiscoverySession:
                 "last_success": None,
                 "last_application": None,
                 "last_error": None,
+                "warnings": [],
                 "created": time.time(),
             }
             self.write(record)
@@ -144,6 +145,7 @@ class DiscoverySession:
             "last_success": record["last_success"],
             "last_application": record["last_application"],
             "last_error": record["last_error"],
+            "warnings": record.get("warnings", []),
         }
 
 
@@ -173,6 +175,7 @@ def session_for(sctx):
 
 def run_session(session, generation, sctx, *, cancelled, wait, job_id=None):
     """Cancellable common loop. Failed coverage/application never advances grace."""
+    from sparkrun.api.proxy import ProxyUpdateFailed
     from sparkrun.proxy.autodiscover import _EndpointRemovalGrace, sync_discovered
     from sparkrun.proxy.discovery import discover_snapshot
     from sparkrun.proxy._supervisor import GatewayState
@@ -237,11 +240,22 @@ def run_session(session, generation, sctx, *, cancelled, wait, job_id=None):
                     last_application=time.time(),
                     **({"last_success": observation.observed_at} if observation.complete else {}),
                     last_error="Some hosts or endpoints were not observed" if observation.errors else None,
+                    warnings=list(result.warnings),
                 )
-                event = (health, result.added, result.removed, deferred)
+                event = (health, result.added, result.removed, deferred, result.warnings)
                 operation = CURRENT.get()
                 if operation and (event != previous_event or result.added or result.removed):
-                    operation.emit("discovery", state=health, added=result.added, removed=result.removed, deferred_removals=deferred)
+                    operation.emit(
+                        "discovery",
+                        state=health,
+                        added=result.added,
+                        removed=result.removed,
+                        deferred_removals=deferred,
+                        warnings=list(result.warnings),
+                    )
+                if event != previous_event:
+                    for warning in result.warnings:
+                        logger.warning("Auto-discover routing: %s", warning)
                 previous_event = event
                 failures = 0
             except DiscoveryOwnershipError:
@@ -250,16 +264,21 @@ def run_session(session, generation, sctx, *, cancelled, wait, job_id=None):
                 raise
             except Exception as exc:
                 failures += 1
-                # Exception arguments can contain credentials; report only the
-                # category here, while operation log redaction handles details.
+                # GatewayOperationError's API wrapper carries a diagnostic safe
+                # to display. Arbitrary exception messages/causes can contain
+                # credentials, so keep those category-only on every surface.
+                error = type(exc).__name__
+                diagnostic = "%s: %s" % (error, exc) if isinstance(exc, ProxyUpdateFailed) and str(exc) else error
                 try:
-                    session.update(generation, state="degraded", last_error=type(exc).__name__)
+                    session.update(generation, state="degraded", last_error=diagnostic)
                 except DiscoveryOwnershipError:
                     return {"stopped": "ownership released"}
                 operation = CURRENT.get()
-                if operation and previous_event != ("error", type(exc).__name__):
-                    operation.emit("discovery", state="degraded", error=type(exc).__name__)
-                previous_event = ("error", type(exc).__name__)
+                if previous_event != ("error", diagnostic):
+                    logger.warning("Auto-discover sweep failed: %s", diagnostic)
+                    if operation:
+                        operation.emit("discovery", state="degraded", error=error, message=diagnostic)
+                previous_event = ("error", diagnostic)
             wait(min(300, interval * 2 ** min(failures, 4)))
         return {"stopped": "cancelled"}
     finally:

@@ -64,7 +64,8 @@ class ProxyUpdateFailed(SparkrunError):
     """The gateway refused a model/config change, credential operation, or stop.
 
     Wraps :class:`~sparkrun.proxy._supervisor.GatewayOperationError` (of which
-    ``ProxyRestartError`` is the LiteLLM member).  The requested desired state
+    ``ProxyRestartError`` is the LiteLLM member), preserving its diagnostic
+    safe to display without secrets. The requested desired state
     may already be persisted — LiteLLM's config is rewritten before the restart
     that failed — so callers should report the error and may safely retry.
     """

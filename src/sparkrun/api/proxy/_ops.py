@@ -234,6 +234,8 @@ class ProxySyncResult:
     removed: int = 0
     #: False when no proxy was running (the config was still updated).
     proxy_running: bool = True
+    #: Successful import may still leave public routes awaiting user correction.
+    warnings: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -410,7 +412,8 @@ def start(options: ProxyStartOptions | None = None, *, sctx: "SparkrunContext | 
 
         sctx = resolve_sctx(sctx)
         options = options or ProxyStartOptions()
-        backend = options.discovery_backend or sctx.proxy_config.discovery_backend
+        gateway = resolve_gateway(options.gateway, sctx=sctx)
+        backend = options.discovery_backend or _configured_discovery_backend(sctx.proxy_config, gateway)
         daemon_foreground = options.foreground and backend == "daemon" and not options.dry_run
         result = _start(options, sctx=sctx, daemon_attach=daemon_foreground)
         if daemon_foreground:
@@ -424,17 +427,21 @@ def start(options: ProxyStartOptions | None = None, *, sctx: "SparkrunContext | 
         raise ProxyStartFailed(str(exc)) from exc
 
 
+def _configured_discovery_backend(proxy_cfg, gateway: str) -> str:
+    resolver = getattr(type(proxy_cfg), "discovery_backend_for", None)
+    return resolver(proxy_cfg, gateway) if resolver is not None else proxy_cfg.discovery_backend
+
+
 @operation_boundary(mutation=True)
 def _start(options: ProxyStartOptions, *, sctx: "SparkrunContext", daemon_attach: bool = False) -> ProxyStartResult:
     """Execute the lifecycle inside the public operational-error boundary."""
     proxy_cfg = sctx.proxy_config
-    backend = options.discovery_backend or proxy_cfg.discovery_backend
+    gateway = resolve_gateway(options.gateway, sctx=sctx)
+    backend = options.discovery_backend or _configured_discovery_backend(proxy_cfg, gateway)
     if backend not in {"process", "daemon"}:
         raise ProxyStartFailed("Discovery backend must be process or daemon")
     if backend == "daemon" and not sctx.config.is_feature_enabled("daemon"):
         raise ProxyStartFailed("Daemon discovery requires the daemon feature; enable it explicitly first")
-
-    gateway = resolve_gateway(options.gateway, sctx=sctx)
 
     effective_port = options.port or proxy_cfg.port
     effective_host = options.host or proxy_cfg.host
@@ -751,7 +758,7 @@ def sync(
                 return ProxySyncResult(proxy_running=False)
             added, removed = engine.sync_models(endpoints, aliases)
 
-        return ProxySyncResult(added=added, removed=removed, proxy_running=running)
+        return ProxySyncResult(added=added, removed=removed, proxy_running=running, warnings=tuple(engine.discovery_warnings()))
 
 
 @operation_boundary(mutation=True)

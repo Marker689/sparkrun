@@ -485,6 +485,10 @@ class GatewaySupervisor(GatewayState):
     # is both a worse error and one that surfaces far from its cause.  A
     # gateway that genuinely cannot do one of these says so here, naming itself.
 
+    def discovery_warnings(self) -> tuple[str, ...]:
+        """Safe diagnostics for imported deployments needing a routing decision."""
+        return ()
+
     def sync_models(self, endpoints: list, aliases: dict[str, str] | None = None) -> tuple[int, int]:
         """Make the gateway serve exactly *endpoints* (plus *aliases*).
 

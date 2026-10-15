@@ -337,6 +337,8 @@ def status(output_json):
         click.echo("  Discovery: %s (%s)" % (discovery["state"], discovery["backend"]))
         if discovery.get("last_error"):
             click.echo("    Last error: %s" % discovery["last_error"])
+        for warning in discovery.get("warnings", []):
+            click.echo("    Routing warning: %s" % warning)
     elif result.autodiscover_pid:
         if result.autodiscover_running:
             click.echo("  Auto-discover: running (PID %s)" % result.autodiscover_pid)
@@ -382,6 +384,8 @@ def sync_cmd(output_json):
         "added": result.added,
         "removed": result.removed,
     }
+    if result.warnings:
+        payload["warnings"] = list(result.warnings)
     if output_json:
         print_json(payload)
         return
@@ -391,6 +395,8 @@ def sync_cmd(output_json):
         click.echo("Synchronized running models: +%d, -%d." % (result.added, result.removed))
     else:
         click.echo("Running models already in sync.")
+    for warning in result.warnings:
+        click.echo("Routing warning: %s" % warning)
 
 
 # ---------------------------------------------------------------------------

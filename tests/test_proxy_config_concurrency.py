@@ -198,24 +198,53 @@ def test_removal_grace_defaults_and_clamps(config_path: Path):
     assert cfg.discover_removal_grace_sweeps == 1
 
 
-def test_catalog_discovery_and_alias_writers_preserve_each_others_sections(config_path: Path):
-    bindings = ProxyConfig(config_path)
-    discovery = ProxyConfig(config_path)
-    aliases = ProxyConfig(config_path)
-    bindings.set_bindings([{"recipe": "@local/model", "cluster": "spark-a"}])
-    bindings.save()
-    discovery.set_discovered_models(["warm-model"])
-    discovery.save()
-    aliases.add_alias("assistant", "warm-model")
-    aliases.save()
-    current = ProxyConfig(config_path)
-    assert current.bindings == [{"recipe": "@local/model", "cluster": "spark-a"}]
-    assert current.discovered_models == ["warm-model"]
-    assert current.aliases == {"assistant": "warm-model"}
-    # Explicitly clearing one catalog must not erase the other sections.
-    bindings.set_bindings([])
-    bindings.save()
-    current = ProxyConfig(config_path)
-    assert current.bindings == []
-    assert current.discovered_models == ["warm-model"]
-    assert current.aliases == {"assistant": "warm-model"}
+def test_shared_writes_preserve_gateway_namespaces(config_path: Path):
+    cfg = ProxyConfig(config_path)
+    namespaces = {
+        "sparkroute": {"bindings": [{"recipe": "@local/model"}], "discovered_models": ["warm"]},
+        "litellm": {"router_settings": {"routing_strategy": "least-busy"}},
+    }
+    config_path.write_text(yaml.safe_dump({"gateways": namespaces}))
+    cfg.add_alias("assistant", "warm")
+    cfg.set_proxy(port=4002)
+    cfg.save()
+    result = _read(config_path)
+    assert result["gateways"] == namespaces
+    assert result["aliases"] == {"assistant": "warm"}
+    assert result["proxy"] == {"port": 4002}
+
+
+def test_sparkroute_transport_namespace_is_scoped_to_selected_gateway(config_path: Path):
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "proxy": {"gateway": "sparkroute"},
+                "gateways": {"sparkroute": {"transport": "daemon"}, "litellm": {"transport": "invalid"}},
+            }
+        )
+    )
+    cfg = ProxyConfig(config_path)
+    assert cfg.discovery_backend == "daemon"
+    assert cfg.discovery_backend_for("litellm") == "process"
+    assert cfg.discovery_backend_for("another") == "process"
+    from sparkrun.api.proxy._ops import _configured_discovery_backend
+
+    assert _configured_discovery_backend(cfg, "litellm") == "process"
+    cfg.set_proxy(discovery_backend="process")
+    assert cfg.discovery_backend_for("sparkroute") == "process"
+    cfg.set_proxy(discovery_backend="daemon")
+    assert cfg.discovery_backend_for("litellm") == "daemon"  # An explicit shared choice applies to both.
+
+
+def test_other_gateways_ignore_invalid_sparkroute_transport(config_path: Path):
+    config_path.write_text(yaml.safe_dump({"proxy": {"gateway": "litellm"}, "gateways": {"sparkroute": {"transport": "invalid"}}}))
+    cfg = ProxyConfig(config_path)
+    assert cfg.discovery_backend == "process"
+    with pytest.raises(ValueError, match="gateways.sparkroute.transport"):
+        cfg.discovery_backend_for("sparkroute")
+
+
+def test_old_transport_key_does_not_select_daemon_discovery(config_path: Path):
+    config_path.write_text(yaml.safe_dump({"proxy": {"gateway": "sparkroute", "gateway_transport": "daemon"}}))
+    cfg = ProxyConfig(config_path)
+    assert cfg.discovery_backend == "process"

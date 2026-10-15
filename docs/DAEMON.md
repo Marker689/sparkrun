@@ -634,13 +634,16 @@ For the new SparkRoute HTTP/SSE client, configure `proxy.yaml` explicitly:
 ```yaml
 proxy:
   gateway: sparkroute
-  gateway_transport: daemon
   discovery_backend: daemon
   discover_interval: 30
   discover_removal_grace_sweeps: 2
+
+gateways:
+  sparkroute:
+    transport: daemon
 ```
 
-`gateway_transport` defaults to `bridge`. Selecting daemon transport defaults
+`gateways.sparkroute.transport` defaults to `bridge`. Selecting daemon transport defaults
 discovery to daemon unless a discovery backend was explicitly saved. The managed
 plugin verifies that both its daemon operations and the gateway binary support
 this transport. Use coordinated host/plugin/gateway builds; older release pins do

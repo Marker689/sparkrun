@@ -2224,8 +2224,11 @@ rewritten for a setting change.
 `proxy.yaml` (`ProxyConfig.gateway_settings(name)`): a top-level key reads as
 applying to whichever gateway runs. LiteLLM emits
 `gateways.litellm.router_settings` verbatim, and a change to it alone restarts
-the proxy, since LiteLLM reads it only at startup. SparkRoute's older keys under
-`proxy:` (`gateway_config`, `gateway_admin_*`, `capability_policy`) predate this.
+the proxy, since LiteLLM reads it only at startup. SparkRoute owns
+`gateways.sparkroute`, including its binding and discovery catalogs. Its plugin
+reads only that namespace and merges generated-state changes under the shared
+proxy lock. Legacy locations are not read or migrated. Keep plugin-specific
+schema and persistence in the plugin rather than adding SparkRoute accessors to core.
 
 **`proxy.yaml` has two writers** — the daemon and any `sparkrun proxy` command
 — so `ProxyConfig.save()` locks a stable sidecar, re-reads, and merges only the

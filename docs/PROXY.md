@@ -293,8 +293,32 @@ integration guide.
 Settings that only one gateway understands go under `gateways.<name>`, keyed by
 the gateway selector. Each gateway reads only its own section, so switching
 gateways never applies one implementation's settings to another. Sparkrun does
-not write or validate these sections; they are hand-edited and preserved across
-saves.
+not interpret or validate these sections. Shared proxy saves preserve them; a
+gateway plugin may maintain its own generated state within its namespace.
+
+SparkRoute uses `gateways.sparkroute` for its bootstrap `config`, `transport`,
+`admin_host`, `admin_port`, `allow_insecure_admin_nonloopback`, `capability_policy`,
+`bindings` and `discovered_models`. Only this namespaced schema is supported;
+legacy locations are not read or migrated. Shared listener settings, gateway
+selection, discovery scheduling and aliases stay in their existing locations.
+See the SparkRoute integration guide for the full schema.
+
+When discovery is degraded, `proxy status` includes the gateway's safe rejection
+message in `Last error`, such as a model name conflicting with an operator-owned
+SparkRoute route. The same diagnostic is logged in `proxy/autodiscover.log` when
+the error changes; unexpected exceptions expose only their class name. Registered
+models describe the gateway's current routes, so they can still appear while a
+new discovery update is rejected. Resolve the conflicting configuration and run
+`proxy sync`, or let the next discovery sweep retry.
+
+Gateways can also report routing warnings after a successful discovery import.
+These appear separately in `proxy status` and `proxy sync`: discovery remains
+running and its normal interval continues. For SparkRoute gateways supporting
+the reconciliation-context API, a duplicate public name leaves the discovered
+deployment available in the console without publishing the conflicting default
+route. The user can attach it to an existing route or choose a different name.
+Operator references retain discovered deployments after their workloads stop;
+removing the last reference allows discovery to remove the deployment.
 
 Default paths below are relative to `~/.cache/sparkrun/`. Other application
 profiles and cache settings change the root.
@@ -466,6 +490,11 @@ A provider's own settings live under `gateways.<gateway_name>` in `proxy.yaml`
 and are read with `ProxyConfig.gateway_settings(gateway_name)`, which returns a
 copy (`{}` when unset). Do not add top-level keys or keys under `proxy:` for a
 setting other gateways cannot honor.
+
+Providers may override `GatewaySupervisor.discovery_warnings()` to return safe
+diagnostics from the last successful `sync_models()` call. These are exposed as
+`ProxySyncResult.warnings` and discovery status `warnings`; they do not turn a
+successful application into a failed sweep or delay the next observation.
 
 Registry resolution returns the provider's registered class directly. Providers
 implement these contracts in their own packages. Applications should use
