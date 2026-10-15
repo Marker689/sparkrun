@@ -22,6 +22,7 @@ import bisect
 from rich.segment import Segment
 from rich.text import Text
 from textual import events, work
+from textual.message import Message
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.actions import SkipAction
@@ -195,7 +196,7 @@ def entry_plain_text(entry: LogLine | Marker | str) -> str:
 
 
 def render_text(
-    line: LogLine | str,
+    line: LogLine | Marker | str,
     *,
     color: bool = True,
     pattern: str | re.Pattern | None = None,
@@ -217,7 +218,7 @@ def render_text(
         if prefix is None:
             prefix = format_prefix(line, multi_host=multi_host, multi_source=multi_source)
     else:
-        raw_text = str(line)
+        raw_text = entry_plain_text(line)
         if prefix is None and (multi_host or multi_source):
             prefix = ""
 
@@ -453,7 +454,7 @@ class LogBuffer:
     def prepend_page(
         self,
         source_or_lines: Any,
-        lines: list[LogLine | Marker] | None = None,
+        lines: Sequence[LogLine | Marker] | None = None,
         *,
         exhausted: bool = False,
         separator: str | Marker | None = None,
@@ -582,8 +583,10 @@ class LogBuffer:
     def _source_key(source: Any) -> tuple[str, str]:
         if isinstance(source, tuple) and len(source) == 2:
             return (str(source[0]), str(source[1]))
-        if hasattr(source, "host") and hasattr(source, "container"):
-            return (source.host, source.container)
+        host = getattr(source, "host", None)
+        container = getattr(source, "container", None)
+        if host is not None and container is not None:
+            return (str(host), str(container))
         return (str(source), "")
 
     @staticmethod
@@ -707,7 +710,7 @@ class SelectionList(OptionList):
 class WorkloadList(SelectionList):
     """Workload container selection list adhering to rule 0b."""
 
-    class OpenLog(events.Message):
+    class OpenLog(Message):
         """Posted when a container is chosen to open logs."""
 
         def __init__(self, host: str, cluster_id: str, container: str) -> None:
@@ -716,7 +719,7 @@ class WorkloadList(SelectionList):
             self.cluster_id = cluster_id
             self.container = container
 
-    class RequestDump(events.Message):
+    class RequestDump(Message):
         """Posted when dump modal is requested."""
 
         def __init__(self, host: str, cluster_id: str, container: str, scope: LogScope = LogScope.CONTAINER) -> None:
@@ -726,7 +729,7 @@ class WorkloadList(SelectionList):
             self.container = container
             self.scope = scope
 
-    class BackToHosts(events.Message):
+    class BackToHosts(Message):
         """Posted when user requests back navigation."""
 
     BINDINGS = [
@@ -815,7 +818,7 @@ class LogView(ScrollView):
     }
     """
 
-    class NearTop(events.Message):
+    class NearTop(Message):
         """Posted when scroll position comes within one page of top of loaded buffer."""
 
     #: Max repaint rate while streaming (seconds). The gate is a rate limiter,
@@ -985,8 +988,10 @@ class LogView(ScrollView):
         self.refresh()
         self.scroll_to_end()  # no-op unless following
         parent = self.parent
-        if parent is not None and hasattr(parent, "_update_status"):
-            parent._update_status()  # status rides the same gate
+        if parent is not None:
+            update_status = getattr(parent, "_update_status", None)
+            if callable(update_status):
+                update_status()  # status rides the same gate
 
     def _writer_queue_depth(self) -> int:
         if not self.is_mounted:
@@ -1176,8 +1181,10 @@ class LogView(ScrollView):
         if self.view_state is not None:
             self.view_state.on_user_scroll_up()
         parent = self.parent
-        if parent is not None and hasattr(parent, "_update_status"):
-            parent._update_status()
+        if parent is not None:
+            update_status = getattr(parent, "_update_status", None)
+            if callable(update_status):
+                update_status()
 
     @property
     def _user_scrolling(self) -> bool:
@@ -1210,8 +1217,10 @@ class LogView(ScrollView):
             if self.view_state is not None and self.view_state.state == FollowState.SCROLLED:
                 self.view_state.on_scroll(True)
                 parent = self.parent
-                if parent is not None and hasattr(parent, "_update_status"):
-                    parent._update_status()
+                if parent is not None:
+                    update_status = getattr(parent, "_update_status", None)
+                    if callable(update_status):
+                        update_status()
 
     def action_scroll_up(self) -> None:
         if not self.allow_vertical_scroll:
@@ -1248,8 +1257,10 @@ class LogView(ScrollView):
         if self.view_state is not None and self.view_state.state == FollowState.SCROLLED:
             self.view_state.on_scroll(True)
             parent = self.parent
-            if parent is not None and hasattr(parent, "_update_status"):
-                parent._update_status()
+            if parent is not None:
+                update_status = getattr(parent, "_update_status", None)
+                if callable(update_status):
+                    update_status()
         self._programmatic_scroll = True
         try:
             self.scroll_end(animate=False, x_axis=x_axis, immediate=True)
@@ -1390,10 +1401,10 @@ class LogPane(Vertical):
     }
     """
 
-    class Closed(events.Message):
+    class Closed(Message):
         """Posted when the log pane is closed."""
 
-    class RequestDump(events.Message):
+    class RequestDump(Message):
         """Posted when dump modal is requested."""
 
         def __init__(self, host: str, cluster_id: str, container: str, scope: LogScope) -> None:
@@ -1403,7 +1414,7 @@ class LogPane(Vertical):
             self.container = container
             self.scope = scope
 
-    class _FlushIncoming(events.Message, bubble=False):
+    class _FlushIncoming(Message, bubble=False):
         """Internal message to drain incoming lines batch on the main thread."""
 
         def __init__(self, gen: int) -> None:
@@ -1834,8 +1845,9 @@ class LogPane(Vertical):
             for source, skip, snap_count in source_skips:
                 if cancel.is_set():
                     return
-                if hasattr(target, "before_page") and callable(target.before_page):
-                    target.before_page()
+                before_page = getattr(target, "before_page", None)
+                if callable(before_page):
+                    before_page()
                 count_before_read = self._get_delivered_count(source)
                 lines = target.page(source, skip=skip, count=500)
                 exhausted = len(lines) < 500
@@ -2102,7 +2114,9 @@ class LogPane(Vertical):
                 current_entry = self.log_view.virtual_row_to_entry(int(self.log_view.scroll_offset[1]))
                 candidates = [i for i, m in enumerate(matches) if m >= current_entry]
                 self._set_current_match(candidates[0] if candidates else 0)
-                self.log_view.scroll_to_line(matches[self._current_match_idx])
+                idx = self._current_match_idx
+                assert idx is not None
+                self.log_view.scroll_to_line(matches[idx])
             else:
                 self._set_current_match(None)
 
@@ -2125,7 +2139,9 @@ class LogPane(Vertical):
             self._set_current_match(candidates[0] if candidates else 0)
         else:
             self._set_current_match((self._current_match_idx + 1) % len(matches))
-        self.log_view.scroll_to_line(matches[self._current_match_idx])
+        idx = self._current_match_idx
+        assert idx is not None
+        self.log_view.scroll_to_line(matches[idx])
         self.log_view.refresh()
         self._update_status()
 
@@ -2145,7 +2161,9 @@ class LogPane(Vertical):
             self._set_current_match(candidates[-1] if candidates else len(matches) - 1)
         else:
             self._set_current_match((self._current_match_idx - 1) % len(matches))
-        self.log_view.scroll_to_line(matches[self._current_match_idx])
+        idx = self._current_match_idx
+        assert idx is not None
+        self.log_view.scroll_to_line(matches[idx])
         self.log_view.refresh()
         self._update_status()
 

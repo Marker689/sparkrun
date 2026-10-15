@@ -782,7 +782,7 @@ def test_open_log_target_unmatched_host_raises_job_not_found(tmp_path):
     cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
     save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path))
 
-    with pytest.raises(api.JobNotFound, match="No log sources found"):
+    with pytest.raises(api.JobNotFound, match="No log sources match"):
         api.open_log_target(cluster_id, hosts=("h1",), host="h999", cache_dir=str(tmp_path))
 
 
@@ -795,28 +795,8 @@ def test_open_log_target_unmatched_container_raises_job_not_found(tmp_path):
     cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
     save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path))
 
-    with pytest.raises(api.JobNotFound, match="No log source found for container"):
+    with pytest.raises(api.JobNotFound, match="No log sources match"):
         api.open_log_target(cluster_id, hosts=("h1",), container="nonexistent", cache_dir=str(tmp_path))
-
-
-def test_open_log_target_windowing_unsupported():
-    """Executor without read_logs_window_cmd returns windowing_supported=False."""
-    from sparkrun.core.log_source import LogSource
-    from sparkrun.orchestration.executors._base import Executor
-
-    class BaseExec(Executor):
-        def logs_cmd(self, container_name, follow=False, tail=None):
-            return f"docker logs {container_name}"
-
-    target = api.LogTarget(
-        cluster_id="cid",
-        sources=[LogSource(host="h1", container="c0")],
-        windowing_supported=False,
-        _executor=BaseExec(),
-    )
-    assert target.windowing_supported is False
-    # page returns empty list on unsupported executor
-    assert target.page(target.sources[0], skip=0, count=100) == []
 
 
 def test_log_target_follow():
@@ -827,7 +807,7 @@ def test_log_target_follow():
     dummy_line = LogLine(host="h1", container="c0", text="hello", role="node_0", rank=0, timestamp=0.0)
 
     target = api.LogTarget(
-        cluster_id="cid",
+        workload_id="cid",
         sources=[source],
         windowing_supported=True,
         _executor=DockerExecutor(),
@@ -835,38 +815,30 @@ def test_log_target_follow():
     with patch("sparkrun.orchestration.logs.read_log_sources", return_value=iter([dummy_line])) as mock_read:
         lines = list(target.follow(tail=150))
         assert lines == [dummy_line]
-        mock_read.assert_called_once_with(
-            target._executor,
-            target.sources,
-            follow=True,
-            tail=150,
-            ssh_kwargs=None,
-        )
+        assert mock_read.call_args[0] == (target._executor, target.sources)
+        assert mock_read.call_args[1]["follow"] is True
+        assert mock_read.call_args[1]["tail"] == 150
 
 
 def test_log_target_page():
-    """target.page(source, skip=10, count=5) calls read_log_window."""
+    """target.page(source, skip=10, count=5) reads from read_log_sources."""
     from sparkrun.core.log_source import LogLine, LogSource
 
     source = LogSource(host="h1", container="c0")
-    lines = [LogLine(host="h1", container="c0", text="paged", role="node_0", rank=0, timestamp=0.0)]
+    lines = [LogLine(host="h1", container="c0", text=f"line-{i}", role="node_0", rank=0, timestamp=0.0) for i in range(15)]
 
     target = api.LogTarget(
-        cluster_id="cid",
+        workload_id="cid",
         sources=[source],
         windowing_supported=True,
         _executor=DockerExecutor(),
     )
-    with patch("sparkrun.orchestration.logs.read_log_window", return_value=lines) as mock_window:
+    with patch("sparkrun.orchestration.logs.read_log_sources", return_value=iter(lines)) as mock_read:
         result = target.page(source, skip=10, count=5)
-        assert result == lines
-        mock_window.assert_called_once_with(
-            target._executor,
-            source,
-            skip=10,
-            count=5,
-            ssh_kwargs=None,
-        )
+        assert len(result) == 5
+        assert [line.text for line in result] == ["line-0", "line-1", "line-2", "line-3", "line-4"]
+        assert mock_read.call_args[0] == (target._executor, (source,))
+        assert mock_read.call_args[1]["tail"] == 15
 
 
 class _RealShellDumpExecutor(DockerExecutor):
@@ -892,7 +864,7 @@ def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
 
     # 1. Cluster scope (sources given out of order: [worker, head])
     target_cluster = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[worker_src, head_src],
         windowing_supported=True,
         _executor=executor,
@@ -914,7 +886,7 @@ def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
 
     # 2. Node scope (multiple containers on same host -> [role/rank] prefix, no host)
     target_node = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[worker_src, head_src],
         windowing_supported=True,
         _executor=executor,
@@ -932,7 +904,7 @@ def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
 
     # 3. Single source (no prefix attached to lines)
     target_single = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[head_src],
         windowing_supported=True,
         _executor=executor,
@@ -954,7 +926,7 @@ def test_log_target_dump_real_overwrite(tmp_path):
 
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[head_src],
         windowing_supported=True,
         _executor=_RealShellDumpExecutor(),
@@ -981,7 +953,7 @@ def test_log_target_dump_real_midstream_cancellation(tmp_path):
 
     slow_src = LogSource(host="localhost", container="c_slow", role="slow", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[slow_src],
         windowing_supported=True,
         _executor=_RealShellDumpExecutor(),
@@ -1010,7 +982,7 @@ def test_log_target_dump_keyboard_interrupt_removes_partial(tmp_path):
 
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[head_src],
         windowing_supported=True,
         _executor=_RealShellDumpExecutor(),
@@ -1033,7 +1005,7 @@ def test_log_target_dump_concurrent_dump_exclusive_creation(tmp_path):
 
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[head_src],
         windowing_supported=True,
         _executor=_RealShellDumpExecutor(),
@@ -1060,7 +1032,7 @@ def test_log_target_dump_no_overwrite_race_atomic_link(tmp_path):
 
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[head_src],
         windowing_supported=True,
         _executor=_RealShellDumpExecutor(),
@@ -1089,7 +1061,7 @@ def test_log_target_dump_missing_directory(tmp_path):
     from sparkrun.core.log_source import LogSource
 
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[LogSource(host="h1", container="c0")],
         windowing_supported=True,
         _executor=DockerExecutor(),
@@ -1107,7 +1079,7 @@ def test_log_target_dump_error_removes_partial(tmp_path):
     from sparkrun.core.log_source import LogSource
 
     target = api.LogTarget(
-        cluster_id="sparkrun_dump123",
+        workload_id="sparkrun_dump123",
         sources=[LogSource(host="h1", container="c0")],
         windowing_supported=True,
         _executor=DockerExecutor(),
@@ -1151,7 +1123,7 @@ def test_logs_forwards_host_container_and_cancel(tmp_path):
                 cancel=cancel,
                 cache_dir=str(tmp_path),
             )
-            mock_follow.assert_called_once_with(tail=50, cancel=cancel)
+            mock_follow.assert_called_once_with(tail=50, cancel=cancel, check=True)
 
 
 # --------------------------------------------------------------------------

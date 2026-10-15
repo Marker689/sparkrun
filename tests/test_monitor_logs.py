@@ -436,6 +436,33 @@ def test_render_text_with_prefix():
     assert t.plain.endswith("hello")
 
 
+def test_render_text_renders_marker_text_not_repr():
+    """A Marker renders its text; its dataclass repr must never reach the view."""
+    marker = Marker("— start of log —")
+    assert render_text(marker, color=False).plain == "— start of log —"
+    assert render_text(marker, color=True).plain == "— start of log —"
+
+
+def test_log_view_renders_marker_text():
+    import asyncio
+
+    async def _run():
+        buf = LogBuffer()
+        buf.append(Marker("— start of log —"))
+        view = LogView(buf)
+
+        class MarkerApp(App):
+            def compose(self) -> ComposeResult:
+                yield view
+
+        async with MarkerApp().run_test():
+            text = "".join(seg.text for seg in view.render_line(0))
+            assert "— start of log —" in text
+            assert "Marker(" not in text
+
+    asyncio.run(_run())
+
+
 # ---------------------------------------------------------------------------
 # workload_rows
 # ---------------------------------------------------------------------------

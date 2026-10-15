@@ -647,13 +647,15 @@ class TestReadLogWindow:
         assert read_log_window(_MinimalExecutor(), source, skip=5, count=10) == []
 
     def test_non_zero_exit_raises_called_process_error(self, monkeypatch):
+        import io
         import subprocess
 
-        def fake_spawn(cmd):
+        def fake_spawn(cmd, **kwargs):
             proc = mock.Mock()
-            proc.communicate.return_value = ("error text", "")
-            proc.returncode = 2
-            proc.stdout = mock.Mock()
+            proc.stdout = io.StringIO("error text\n")
+            proc.stderr = mock.Mock()
+            proc.stderr.readline.return_value = ""
+            proc.wait.return_value = 2
             return proc
 
         monkeypatch.setattr("sparkrun.orchestration.logs._spawn", fake_spawn)
@@ -706,7 +708,7 @@ class TestReadLogWindow:
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
             read_log_window(ex, source, skip=0, count=10)
         assert exc_info.value.returncode != 0
-        assert "cannot open" in exc_info.value.output or "No such file" in exc_info.value.output
+        assert "cannot open" in (exc_info.value.stderr or "") or "No such file" in (exc_info.value.stderr or "")
 
     def test_docker_file_window_shell_compatibility(self, tmp_path):
         """Run the generated docker file-reader payload under local POSIX shell variants."""

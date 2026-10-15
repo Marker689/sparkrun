@@ -292,22 +292,13 @@ def read_log_window(
     """
     skip = max(0, int(skip))
     count = max(0, int(count))
+    if count == 0:
+        return []
     cmd = build_read_window_command(executor, source, skip=skip, count=count, ssh_kwargs=ssh_kwargs)
     if cmd is None:
         return []
 
-    proc = _spawn(cmd)
-    try:
-        stdout, _ = proc.communicate(timeout=timeout)
-    finally:
-        _terminate(proc)
-        if proc.stdout is not None:
-            proc.stdout.close()
-
-    if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout)
-
-    return [_line(source, text) for text in stdout.splitlines()]
+    return list(read_log_command(cmd, source, check=True, timeout=timeout, merge_stderr=False))
 
 
 def _terminate(proc: subprocess.Popen) -> None:
