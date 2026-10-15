@@ -90,6 +90,8 @@ def test_default_off_vllm_flags_are_omitted_when_false(key):
         ("reasoning_parser_plugin", "$PARSER", "--reasoning-parser-plugin $PARSER"),
         ("video_pruning_rate", 0.5, "--video-pruning-rate 0.5"),
         ("allowed_local_media_path", "/data", "--allowed-local-media-path /data"),
+        ("prefix_match_unit", 64, "--prefix-match-unit 64"),
+        ("enable_mamba_shared_prefix_checkpoint", True, "--enable-mamba-shared-prefix-checkpoint"),
         (
             "media_io_kwargs",
             {"video": {"fps": 2, "num_frames": 256}},

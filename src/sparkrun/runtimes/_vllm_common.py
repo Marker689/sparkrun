@@ -441,6 +441,8 @@ VLLM_FLAG_MAP = {
     "media_io_kwargs": "--media-io-kwargs",
     "video_pruning_rate": "--video-pruning-rate",
     "allowed_local_media_path": "--allowed-local-media-path",
+    "prefix_match_unit": "--prefix-match-unit",
+    "enable_mamba_shared_prefix_checkpoint": "--enable-mamba-shared-prefix-checkpoint",
     "safetensors_load_strategy": "--safetensors-load-strategy",
     "moe_backend": "--moe-backend",
     "enable_prompt_tokens_details": "--enable-prompt-tokens-details",
@@ -485,6 +487,7 @@ VLLM_BOOL_FLAGS = {
     "enable_flashinfer_autotune",
     "scheduler_reserve_full_isl",
     "disable_custom_all_reduce",
+    "enable_mamba_shared_prefix_checkpoint",
 }
 
 # Boolean flags the engine turns on by default (or decides itself), so
