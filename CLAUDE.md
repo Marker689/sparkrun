@@ -2220,6 +2220,13 @@ rewritten for a setting change.
   dirs. Otherwise a developer with the real unit installed would have the
   suite start and stop it.
 
+**Gateway-specific settings are namespaced** under `gateways.<name>` in
+`proxy.yaml` (`ProxyConfig.gateway_settings(name)`): a top-level key reads as
+applying to whichever gateway runs. LiteLLM emits
+`gateways.litellm.router_settings` verbatim, and a change to it alone restarts
+the proxy, since LiteLLM reads it only at startup. SparkRoute's older keys under
+`proxy:` (`gateway_config`, `gateway_admin_*`, `capability_policy`) predate this.
+
 **`proxy.yaml` has two writers** — the daemon and any `sparkrun proxy` command
 — so `ProxyConfig.save()` locks a stable sidecar, re-reads, and merges only the
 sections *that instance* modified; a whole-document save silently discards the

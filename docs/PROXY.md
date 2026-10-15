@@ -270,6 +270,11 @@ proxy:
 
 aliases:
   my-model: "Qwen/Qwen3-1.7B"
+
+gateways:
+  litellm:
+    router_settings:
+      routing_strategy: least-busy
 ```
 
 For LiteLLM, `LITELLM_MASTER_KEY` supplies the key when no explicit master key is
@@ -284,6 +289,12 @@ CLI overrides persist for subsequent invocations. Writers lock and merge changed
 sections so a discovery sweep does not overwrite a concurrent alias or listener
 change. Gateway-specific settings also belong to `proxy.yaml`; see the relevant
 integration guide.
+
+Settings that only one gateway understands go under `gateways.<name>`, keyed by
+the gateway selector. Each gateway reads only its own section, so switching
+gateways never applies one implementation's settings to another. Sparkrun does
+not write or validate these sections; they are hand-edited and preserved across
+saves.
 
 Default paths below are relative to `~/.cache/sparkrun/`. Other application
 profiles and cache settings change the root.
@@ -316,6 +327,13 @@ provision LiteLLM's database-backed model store. Changes regenerate the config
 and restart the process; unchanged desired state skips the restart. Management
 queries report what the process is serving. These are LiteLLM implementation
 details, not requirements for other gateway plugins.
+
+`gateways.litellm.router_settings` is emitted verbatim as LiteLLM's
+`router_settings`, for example `routing_strategy: least-busy` in place of the
+default `simple-shuffle`, which picks a random backend per request regardless of
+load. LiteLLM reads it only at startup, so a change is applied like a model
+change: the next sync or discovery sweep regenerates the config and restarts the
+proxy.
 
 ## Python API and gateway plugins
 
@@ -443,6 +461,11 @@ failures to `ProxyUpdateFailed`. Model enumeration raises its subtype
 Diagnostics must not include secrets. Other exceptions, including a bare
 `RuntimeError` or provider-thrown `NotImplementedError`, propagate as provider
 bugs. Stop hooks also use `GatewayOperationError` and become `ProxyUpdateFailed`.
+
+A provider's own settings live under `gateways.<gateway_name>` in `proxy.yaml`
+and are read with `ProxyConfig.gateway_settings(gateway_name)`, which returns a
+copy (`{}` when unset). Do not add top-level keys or keys under `proxy:` for a
+setting other gateways cannot honor.
 
 Registry resolution returns the provider's registered class directly. Providers
 implement these contracts in their own packages. Applications should use

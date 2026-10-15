@@ -1992,6 +1992,111 @@ class TestAutodiscover:
         sleeper.assert_called_with(1)
 
 
+class TestRouterSettings:
+    """``gateways.litellm.router_settings`` in proxy.yaml reaches the LiteLLM config."""
+
+    def test_build_emits_router_settings_only_when_set(self):
+        from sparkrun.plugins.litellm.engine import build_litellm_config
+
+        assert "router_settings" not in build_litellm_config([_ep("m")], master_key=None)
+        config = build_litellm_config([_ep("m")], master_key=None, router_settings={"routing_strategy": "least-busy"})
+        assert config["router_settings"] == {"routing_strategy": "least-busy"}
+
+    def test_gateway_settings_are_namespaced_by_selector(self, tmp_path: Path):
+        from sparkrun.proxy.config import ProxyConfig
+
+        path = tmp_path / "proxy.yaml"
+        path.write_text("gateways:\n  litellm:\n    router_settings:\n      routing_strategy: least-busy\n")
+        cfg = ProxyConfig(config_path=path)
+        assert cfg.gateway_settings("litellm") == {"router_settings": {"routing_strategy": "least-busy"}}
+        assert cfg.gateway_settings("sparkroute") == {}
+        path.write_text("gateways:\n  litellm: nonsense\n")
+        assert ProxyConfig(config_path=path).gateway_settings("litellm") == {}
+        path.write_text("gateways: nonsense\n")
+        assert ProxyConfig(config_path=path).gateway_settings("litellm") == {}
+
+    def test_save_preserves_gateway_settings(self, tmp_path: Path):
+        from sparkrun.proxy.config import ProxyConfig
+
+        path = tmp_path / "proxy.yaml"
+        path.write_text("gateways:\n  litellm:\n    router_settings:\n      routing_strategy: least-busy\n")
+        cfg = ProxyConfig(config_path=path)
+        cfg.add_alias("a", "b")
+        cfg.save()
+        assert ProxyConfig(config_path=path).gateway_settings("litellm")["router_settings"] == {"routing_strategy": "least-busy"}
+
+    def test_engine_reads_only_its_own_namespace(self, state_dir: Path):
+        from sparkrun.plugins.litellm.engine import ProxyEngine
+        from sparkrun.proxy.config import ProxyConfig
+
+        path = ProxyConfig().config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+
+        path.write_text(
+            "router_settings:\n  routing_strategy: usage-based-routing\n"
+            "gateways:\n  sparkroute:\n    router_settings:\n      routing_strategy: latency-based-routing\n"
+        )
+        assert engine._configured_router_settings() == {}
+
+        path.write_text("gateways:\n  litellm:\n    router_settings:\n      routing_strategy: least-busy\n")
+        assert engine._configured_router_settings() == {"routing_strategy": "least-busy"}
+
+        path.write_text("gateways:\n  litellm:\n    router_settings: [least-busy]\n")
+        assert engine._configured_router_settings() == {}
+
+    def test_changed_routing_alone_rewrites_and_restarts(self, state_dir: Path):
+        """Same model set, new routing policy: LiteLLM only reads it at startup."""
+        from sparkrun.plugins.litellm.engine import ProxyEngine, build_litellm_config, write_config
+
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        ep = _ep("test/model")
+        write_config(build_litellm_config([ep], master_key="sk-test"), engine.config_path)
+
+        with (
+            patch.object(type(engine), "is_running", return_value=True),
+            patch.object(engine, "_configured_router_settings", return_value={"routing_strategy": "least-busy"}),
+            patch.object(engine, "_restart_proxy", return_value=1234) as mock_restart,
+        ):
+            assert engine.apply_desired_state([ep]) == (0, 0)
+            mock_restart.assert_called_once()
+            on_disk = yaml.safe_load(engine.config_path.read_text())
+            assert on_disk["router_settings"] == {"routing_strategy": "least-busy"}
+
+            # second sweep: already in sync, no further restart
+            mock_restart.reset_mock()
+            engine.apply_desired_state([ep])
+            mock_restart.assert_not_called()
+
+    def test_removed_routing_rewrites_and_restarts(self, state_dir: Path):
+        """Deleting the setting from proxy.yaml drops it rather than keeping the old policy."""
+        from sparkrun.plugins.litellm.engine import ProxyEngine, build_litellm_config, write_config
+
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        ep = _ep("test/model")
+        write_config(
+            build_litellm_config([ep], master_key="sk-test", router_settings={"routing_strategy": "least-busy"}),
+            engine.config_path,
+        )
+
+        with (
+            patch.object(type(engine), "is_running", return_value=True),
+            patch.object(engine, "_configured_router_settings", return_value={}),
+            patch.object(engine, "_restart_proxy", return_value=1234) as mock_restart,
+        ):
+            engine.apply_desired_state([ep])
+            mock_restart.assert_called_once()
+            assert "router_settings" not in yaml.safe_load(engine.config_path.read_text())
+
+    def test_prepare_config_includes_router_settings(self, state_dir: Path):
+        from sparkrun.plugins.litellm.engine import ProxyEngine
+
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        with patch.object(engine, "_configured_router_settings", return_value={"routing_strategy": "least-busy"}):
+            path, _, _ = engine.prepare_config([_ep("test/model")], {}, write=True)
+        assert yaml.safe_load(path.read_text())["router_settings"] == {"routing_strategy": "least-busy"}
+
+
 @pytest.fixture(autouse=True)
 def _gateway_provider(loaded_litellm_plugin):
     pass

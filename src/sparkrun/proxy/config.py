@@ -292,6 +292,21 @@ class ProxyConfig:
             proxy.pop(key, None)
             self._pending_proxy[key] = _DELETE
 
+    # -- Gateway-owned settings --
+
+    def gateway_settings(self, name: str) -> dict[str, Any]:
+        """Settings owned by gateway *name*, under ``gateways.<name>`` ({} when unset).
+
+        Gateways are interchangeable, so a setting only one implementation
+        understands is namespaced by its selector rather than placed at the top
+        level, where it would read as applying to whichever gateway runs. The
+        content is the gateway's to interpret; sparkrun neither validates it nor
+        writes it. A value that is not a mapping is ignored.
+        """
+        gateways = self._data.get("gateways")
+        value = gateways.get(name) if isinstance(gateways, dict) else None
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
+
     # -- Alias management --
 
     @property
