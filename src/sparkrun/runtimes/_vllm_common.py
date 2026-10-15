@@ -362,12 +362,16 @@ class VllmRuntimeBase(RuntimePlugin):
         deliberately not defaulted to the recipe's ``model_revision``: that SHA
         belongs to the served model's repo and does not exist in the draft's,
         so inheriting it fails the download with ``Revision Not Found``.
+
+        Accepts both spellings ``render_flag_value`` renders: a JSON string
+        and a YAML mapping. Reading only the string form skipped the draft
+        download for every mapping-shaped config (the lil catalog emits them),
+        and the offline container then could not find the drafter.
         """
         try:
-            # TODO: support various ways that speculative config can be specified
             # noinspection PyProtectedMember
             spec_cfg = recipe._effective_default("speculative_config")
-            spec_cfg_dict = json.loads(spec_cfg) or {}
+            spec_cfg_dict = (spec_cfg if isinstance(spec_cfg, dict) else json.loads(spec_cfg)) or {}
             # intended primarily for dflash, but we allow any "model" field for future extensibility
             return spec_cfg_dict.get("model", None), spec_cfg_dict.get("revision", None)
         except Exception:
@@ -431,6 +435,12 @@ VLLM_FLAG_MAP = {
     "max_cudagraph_capture_size": "--max-cudagraph-capture-size",
     "long_prefill_token_threshold": "--long-prefill-token-threshold",
     "mamba_cache_mode": "--mamba-cache-mode",
+    "mamba_cache_dtype": "--mamba-cache-dtype",
+    "mamba_ssm_cache_dtype": "--mamba-ssm-cache-dtype",
+    "reasoning_parser_plugin": "--reasoning-parser-plugin",
+    "media_io_kwargs": "--media-io-kwargs",
+    "video_pruning_rate": "--video-pruning-rate",
+    "allowed_local_media_path": "--allowed-local-media-path",
     "safetensors_load_strategy": "--safetensors-load-strategy",
     "moe_backend": "--moe-backend",
     "enable_prompt_tokens_details": "--enable-prompt-tokens-details",

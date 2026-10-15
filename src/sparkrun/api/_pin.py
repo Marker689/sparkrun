@@ -160,6 +160,6 @@ def unpinned_references(data: dict[str, Any]) -> list[str]:
     notes = []
     spec = (data.get("defaults") or {}).get("speculative_config")
     draft = spec.get("model") if isinstance(spec, dict) else None
-    if isinstance(draft, str) and draft and draft != data.get("model"):
+    if isinstance(draft, str) and draft and draft != data.get("model") and not spec.get("revision"):
         notes.append("speculative_config.model %s (draft model revision is not pinned)" % draft)
     return notes

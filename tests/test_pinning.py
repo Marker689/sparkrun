@@ -432,6 +432,14 @@ def test_a_separate_draft_model_is_reported_unpinned(tmp_path, v, dry_plan, reso
     )
 
 
+def test_a_draft_model_with_its_own_revision_is_not_reported(tmp_path, v, dry_plan, resolvers):
+    import sparkrun.api as api
+
+    spec = {"method": "eagle", "model": "org/draft", "revision": "cafe1234"}
+    data = {**_RECIPE, "defaults": {**_RECIPE["defaults"], "speculative_config": spec}}
+    assert api.realize_recipe(_options(tmp_path, data)).unpinned == ()
+
+
 @pytest.mark.parametrize(
     "args,match",
     [

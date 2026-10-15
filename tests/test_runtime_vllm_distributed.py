@@ -486,14 +486,14 @@ def test_vllm_distributed_overrides_in_command():
 # own `revision` field) and never from the recipe's `model_revision`.
 
 
-def _spec_recipe(spec_config, model_revision=None):
+def _spec_recipe(spec_config, model_revision=None, *, as_mapping=False):
     import json
 
     data = {
         "name": "test-recipe",
         "model": "meta-llama/Llama-2-7b-hf",
         "runtime": "vllm-distributed",
-        "defaults": {"speculative_config": json.dumps(spec_config)},
+        "defaults": {"speculative_config": spec_config if as_mapping else json.dumps(spec_config)},
     }
     if model_revision:
         data["model_revision"] = model_revision
@@ -515,6 +515,14 @@ def test_vllm_prepare_draft_model_is_unpinned_by_default():
 def test_vllm_prepare_pins_draft_revision_from_spec_config():
     runtime = VllmDistributedRuntime()
     recipe = _spec_recipe({"model": "org/draft", "revision": "cafe1234"}, model_revision="deadbeef")
+    runtime.prepare(recipe, hosts=["10.0.0.1"])
+    assert _entry(recipe, "org/draft").revision == "cafe1234"
+
+
+def test_vllm_prepare_reads_a_mapping_spec_config():
+    """A YAML-mapping speculative_config is a supported spelling; its draft must still be distributed."""
+    runtime = VllmDistributedRuntime()
+    recipe = _spec_recipe({"method": "dflash", "model": "org/draft", "revision": "cafe1234"}, as_mapping=True)
     runtime.prepare(recipe, hosts=["10.0.0.1"])
     assert _entry(recipe, "org/draft").revision == "cafe1234"
 
