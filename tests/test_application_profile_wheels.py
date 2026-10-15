@@ -726,7 +726,7 @@ metadata = root / 'jobs' / 'fixture.yaml'
 metadata.parent.mkdir(parents=True)
 metadata.write_text(yaml.safe_dump({'cluster_id': cluster_id, 'hosts': ['worker'], 'distribution': get_application_profile().id}))
 assert bootstrap._variables is None
-assert [j.cluster_id for j in api.list_jobs()] == [cluster_id]
+assert [j.workload_id for j in api.list_jobs()] == [cluster_id]
 assert bootstrap._variables is None
 assert 'click' not in sys.modules and 'sparkrun.cli' not in sys.modules
 context = initialize()
@@ -734,7 +734,7 @@ assert api.list_jobs() == api.list_jobs(sctx=context)
 for operation in (api.stop, api.logs):
     with patch('sparkrun.api._resolve.resolve_cluster_for_job', side_effect=RuntimeError('metadata resolved')) as resolve:
         try:
-            operation(cluster_id=cluster_id)
+            operation(workload_id=cluster_id)
         except RuntimeError as error:
             assert str(error) == 'metadata resolved'
         else:

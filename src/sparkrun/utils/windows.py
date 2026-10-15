@@ -179,8 +179,8 @@ class ChildJob:
     """Parent-owned containment for a gated child, including its descendants."""
 
     def __init__(self, pid):
-        # Native API accepts NULL for an unnamed job; pywin32's stub says str.
-        self.handle = cast(Any, win32job.CreateJobObject(None, cast(Any, None)))
+        # pywin32 rejects None for the name; an empty name is an unnamed job.
+        self.handle = cast(Any, win32job.CreateJobObject(None, ""))
         try:
             _kill_on_close(self.handle, True)
             process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
