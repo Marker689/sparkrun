@@ -57,6 +57,14 @@ logger = logging.getLogger(__name__)
 RESTART_EXIT_TIMEOUT = _RESTART_EXIT_TIMEOUT
 RESTART_STARTUP_GRACE = _RESTART_STARTUP_GRACE
 
+#: ``gateways.litellm.balancing`` values sparkrun implements itself, mapped to
+#: the callback LiteLLM loads (``<module>.<instance>``, resolved next to the
+#: generated config).  See ``plugins/litellm/balancer.py``.
+BALANCING_CALLBACKS = {"least-in-flight": "sparkrun_balancer.handler"}
+
+#: File name the balancer module is written under, beside the generated config.
+BALANCER_MODULE_FILE = "sparkrun_balancer.py"
+
 #: How long a restart routed through a systemd unit waits for the unit's new
 #: foreground process to record its gateway (it runs a discovery sweep first).
 UNIT_RESTART_TIMEOUT = 120.0
@@ -75,6 +83,7 @@ def build_litellm_config(
     master_key: str | None = DEFAULT_MASTER_KEY,
     aliases: dict[str, str] | None = None,
     router_settings: dict[str, Any] | None = None,
+    balancing: str | None = None,
 ) -> dict[str, Any]:
     """Generate a litellm proxy config dict from discovered endpoints.
 
@@ -104,6 +113,11 @@ def build_litellm_config(
             verbatim (e.g. ``{"routing_strategy": "least-busy"}``).  Without
             it LiteLLM uses ``simple-shuffle``: a random backend per request,
             blind to how many requests each one is already serving.
+        balancing: Optional sparkrun-side balancing policy (a key of
+            :data:`BALANCING_CALLBACKS`).  ``least-in-flight`` registers the
+            ``sparkrun_balancer`` callback, which sends each request to the
+            backend of its model group with the fewest requests in flight.
+            Unknown values are ignored here; the engine warns when reading them.
 
     Returns:
         Dict suitable for writing as litellm YAML config.
@@ -181,6 +195,10 @@ def build_litellm_config(
             "drop_params": True,
         },
     }
+
+    callback = BALANCING_CALLBACKS.get(balancing or "")
+    if callback:
+        config["litellm_settings"]["callbacks"] = [callback]
 
     if general_settings:
         config["general_settings"] = general_settings
@@ -262,9 +280,31 @@ def write_config(config_dict: dict[str, Any], config_path: Path | None = None) -
     with os.fdopen(fd, "w") as f:
         yaml.safe_dump(config_dict, f, default_flow_style=False, sort_keys=False)
     _restrict_file_permissions(config_path)
+    if set(BALANCING_CALLBACKS.values()) & set((config_dict.get("litellm_settings") or {}).get("callbacks") or []):
+        write_balancer_module(config_path.parent)
 
     logger.debug("Wrote litellm config to %s", config_path)
     return config_path
+
+
+def write_balancer_module(directory: Path) -> Path:
+    """Copy the balancer callback beside the config, where LiteLLM imports it from.
+
+    LiteLLM runs in its own ``uvx`` environment and resolves a config
+    callback ``<module>.<instance>`` as ``<config dir>/<module>.py``, so the
+    module has to exist as a file there rather than as an importable
+    ``sparkrun`` package.  Rewritten on every config write so an upgraded
+    sparkrun never leaves an older copy behind.
+    """
+    from importlib import resources
+
+    source = resources.files("sparkrun.plugins.litellm").joinpath("balancer.py").read_text()
+    path = directory / BALANCER_MODULE_FILE
+    fd = open_private_write(path)
+    with os.fdopen(fd, "w") as f:
+        f.write(source)
+    _restrict_file_permissions(path)
+    return path
 
 
 def _model_from_info(row: object) -> ProxyModel:
@@ -350,7 +390,13 @@ class ProxyEngine(GatewaySupervisor):
         model group, so the applied/pending split is read back out of the
         rendered config rather than assumed from *aliases*.
         """
-        config_dict = build_litellm_config(endpoints, self.master_key, aliases=aliases, router_settings=self._configured_router_settings())
+        config_dict = build_litellm_config(
+            endpoints,
+            self.master_key,
+            aliases=aliases,
+            router_settings=self._configured_router_settings(),
+            balancing=self._configured_balancing(),
+        )
         applied = {entry["model_name"] for entry in config_dict["model_list"]} & set(aliases)
         if write:
             self.claim_state_directory()
@@ -569,7 +615,11 @@ class ProxyEngine(GatewaySupervisor):
             self._adopt_running_identity()
 
         desired = build_litellm_config(
-            endpoints, master_key=self.master_key, aliases=aliases, router_settings=self._configured_router_settings()
+            endpoints,
+            master_key=self.master_key,
+            aliases=aliases,
+            router_settings=self._configured_router_settings(),
+            balancing=self._configured_balancing(),
         )
         current = self._load_current_config()
 
@@ -582,20 +632,25 @@ class ProxyEngine(GatewaySupervisor):
         added = len(desired_keys - current_keys)
         removed = len(current_keys - desired_keys)
 
-        # LiteLLM reads router_settings only at startup, so a changed routing
-        # policy needs the same rewrite + restart as a changed model set.
+        # LiteLLM reads router_settings and its callbacks only at startup, so a
+        # changed routing or balancing policy needs the same rewrite + restart
+        # as a changed model set.
         router_changed = (desired.get("router_settings") or {}) != (current.get("router_settings") or {})
+        balancing_changed = (desired["litellm_settings"].get("callbacks") or []) != (
+            (current.get("litellm_settings") or {}).get("callbacks") or []
+        )
 
-        if not added and not removed and not router_changed:
+        if not added and not removed and not router_changed and not balancing_changed:
             logger.debug("Proxy model list already matches discovered endpoints")
             return 0, 0
 
         write_config(desired, self.config_path)
         logger.info(
-            "Proxy config updated: +%d model entry/entries, -%d%s",
+            "Proxy config updated: +%d model entry/entries, -%d%s%s",
             added,
             removed,
             ", router_settings changed" if router_changed else "",
+            ", balancing changed" if balancing_changed else "",
         )
 
         if not self.is_running():
@@ -824,6 +879,27 @@ class ProxyEngine(GatewaySupervisor):
         if not isinstance(value, dict):
             logger.warning("Ignoring gateways.%s.router_settings in proxy.yaml: expected a mapping", self.gateway_name)
             return {}
+        return value
+
+    def _configured_balancing(self) -> str | None:
+        """Read ``gateways.litellm.balancing`` from ``proxy.yaml`` (``None`` when unset, unknown or unreadable)."""
+        try:
+            from sparkrun.proxy.config import ProxyConfig
+
+            value = ProxyConfig().gateway_settings(self.gateway_name).get("balancing")
+        except Exception:
+            logger.debug("Could not read configured balancing", exc_info=True)
+            return None
+        if value is None:
+            return None
+        if value not in BALANCING_CALLBACKS:
+            logger.warning(
+                "Ignoring gateways.%s.balancing %r in proxy.yaml: expected one of %s",
+                self.gateway_name,
+                value,
+                ", ".join(sorted(BALANCING_CALLBACKS)),
+            )
+            return None
         return value
 
     def _configured_aliases(self) -> dict[str, str]:
