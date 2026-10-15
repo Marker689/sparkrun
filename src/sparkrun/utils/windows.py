@@ -43,6 +43,12 @@ def _trusted_sids():
     return {user_id(), "S-1-5-18", "S-1-5-32-544"}  # current user, SYSTEM, administrators
 
 
+#: OWNER RIGHTS: an ACE for it grants access to the object's owner only, which
+#: check_private has already required to be trusted. Runner and some profile
+#: temp directories carry one with full control.
+_OWNER_RIGHTS_SID = "S-1-3-4"
+
+
 def _descriptor(path):
     if cast(Any, Path(path).lstat()).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
         raise ValueError(f"Reparse points are not allowed in private daemon paths: {path}")
@@ -74,11 +80,9 @@ def check_private(path, *, ancestor=False):
         if flags & win32con.INHERIT_ONLY_ACE:
             continue
         if kind == win32security.ACCESS_ALLOWED_ACE_TYPE:
-            if win32security.ConvertSidToStringSid(sid) not in trusted and (not ancestor or mask & dangerous):
-                raise ValueError(
-                    f"Unsafe permissions on daemon path: {path} "
-                    f"(SID {win32security.ConvertSidToStringSid(sid)}, mask {mask:#x}, flags {flags:#x})"
-                )
+            sid_string = win32security.ConvertSidToStringSid(sid)
+            if sid_string not in trusted and sid_string != _OWNER_RIGHTS_SID and (not ancestor or mask & dangerous):
+                raise ValueError(f"Unsafe permissions on daemon path: {path} (SID {sid_string}, mask {mask:#x}, flags {flags:#x})")
         elif kind != win32security.ACCESS_DENIED_ACE_TYPE:
             raise ValueError(f"Unsupported ACL on daemon path: {path}")
 

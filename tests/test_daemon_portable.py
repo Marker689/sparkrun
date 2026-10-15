@@ -211,6 +211,27 @@ def test_windows_credentials_have_protected_acl(binding):
             read_connection(binding.connection)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows ACLs")
+@pytest.mark.parametrize("ancestor", [True, False])
+def test_windows_owner_rights_ace_is_not_foreign_access(tmp_path, ancestor):
+    import win32con
+    import win32security
+    from sparkrun.utils.windows import check_private, secure_path
+
+    directory = tmp_path / "owned"
+    directory.mkdir()
+    secure_path(directory)
+    sd = win32security.GetNamedSecurityInfo(str(directory), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION)
+    acl = sd.GetSecurityDescriptorDacl()
+    owner_rights = win32security.ConvertStringSidToSid("S-1-3-4")
+    acl.AddAccessAllowedAce(win32security.ACL_REVISION, win32con.GENERIC_ALL, owner_rights)
+    win32security.SetNamedSecurityInfo(
+        str(directory), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION, None, None, acl, None
+    )
+
+    check_private(directory, ancestor=ancestor)
+
+
 @pytest.mark.parametrize("extra", [TCP, ("--no-unix", "--tcp", "0.0.0.0:0", "--allow-insecure")])
 def test_tcp_restart_cli_preserves_transport_and_rotates_token(binding, extra):
     with real_server(binding, extra=extra) as (_, client):
