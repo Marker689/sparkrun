@@ -350,9 +350,7 @@ class ProxyEngine(GatewaySupervisor):
         model group, so the applied/pending split is read back out of the
         rendered config rather than assumed from *aliases*.
         """
-        config_dict = build_litellm_config(
-            endpoints, self.master_key, aliases=aliases,
-            router_settings=self._configured_router_settings())
+        config_dict = build_litellm_config(endpoints, self.master_key, aliases=aliases, router_settings=self._configured_router_settings())
         applied = {entry["model_name"] for entry in config_dict["model_list"]} & set(aliases)
         if write:
             self.claim_state_directory()
@@ -571,8 +569,8 @@ class ProxyEngine(GatewaySupervisor):
             self._adopt_running_identity()
 
         desired = build_litellm_config(
-            endpoints, master_key=self.master_key, aliases=aliases,
-            router_settings=self._configured_router_settings())
+            endpoints, master_key=self.master_key, aliases=aliases, router_settings=self._configured_router_settings()
+        )
         current = self._load_current_config()
 
         # Preserve auth and any other operator-set general_settings.
@@ -594,9 +592,10 @@ class ProxyEngine(GatewaySupervisor):
 
         write_config(desired, self.config_path)
         logger.info(
-            "Proxy config updated: +%d model entry/entries, -%d",
+            "Proxy config updated: +%d model entry/entries, -%d%s",
             added,
             removed,
+            ", router_settings changed" if router_changed else "",
         )
 
         if not self.is_running():
@@ -812,14 +811,20 @@ class ProxyEngine(GatewaySupervisor):
         return data if isinstance(data, dict) else {}
 
     def _configured_router_settings(self) -> dict[str, Any]:
-        """Read LiteLLM router_settings from ``proxy.yaml`` (empty when unreadable)."""
+        """Read ``gateways.litellm.router_settings`` from ``proxy.yaml`` (empty when unset or unreadable)."""
         try:
             from sparkrun.proxy.config import ProxyConfig
 
-            return ProxyConfig().router_settings
+            value = ProxyConfig().gateway_settings(self.gateway_name).get("router_settings")
         except Exception:
             logger.debug("Could not read configured router_settings", exc_info=True)
             return {}
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            logger.warning("Ignoring gateways.%s.router_settings in proxy.yaml: expected a mapping", self.gateway_name)
+            return {}
+        return value
 
     def _configured_aliases(self) -> dict[str, str]:
         """Read aliases from ``proxy.yaml`` (empty when unreadable)."""
