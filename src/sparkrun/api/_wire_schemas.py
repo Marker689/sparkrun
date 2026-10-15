@@ -3217,6 +3217,7 @@ RESULT_SCHEMAS.update(
         ),
         "workloads.inventory": object_schema(
             {
+                "complete": {"type": "boolean"},
                 "workloads": {"type": "array", "items": _workload_row},
                 "providers": {
                     "type": "array",

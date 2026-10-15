@@ -163,15 +163,49 @@ def endpoints(*, recipe_revision="", cluster_candidates=(), workload_id="", sctx
 
 
 def inventory(*, owner="", sctx=None):
-    """Recorded workloads with lifecycle capabilities, not an invented live probe."""
-    from sparkrun import api
+    """Recorded workloads, including unfinished placements after caller loss.
+
+    ``complete`` permits absence decisions only when no execution is in flight
+    and the bounded response includes every recorded workload.
+    """
+    from sparkrun.core.coordination import ResourceBusy
 
     sctx = resolve_sctx(sctx)
+    try:
+        with reserve_resources(sctx.config.config_path.parent, {"*"}):
+            return _inventory(owner, sctx, complete=True)
+    except ResourceBusy:
+        return _inventory(owner, sctx, complete=False)
+
+
+def _inventory(owner, sctx, *, complete):
+    from sparkrun import api
+
     receipts = Receipts(sctx)
-    result = []
-    for job in api.list_jobs(sctx=sctx)[:256]:
-        result.append(_workload_row(job.workload_id, job.metadata or {}, lifecycle_provider(job), owner, receipts))
-    return {"workloads": result, "providers": [{"name": p.name, "version": p.version} for p in registered_workload_lifecycles()]}
+    result = [
+        _workload_row(job.workload_id, job.metadata or {}, lifecycle_provider(job), owner, receipts) for job in api.list_jobs(sctx=sctx)
+    ]
+    known = {row["workload_id"] for row in result}
+    with receipts.connect() as db:
+        pending = db.execute("SELECT * FROM activations WHERE phase NOT IN ('ready', 'stopped') ORDER BY updated DESC").fetchall()
+    for row in pending:
+        placement = _placement(row["placement"])
+        identifier = placement["workload_id"]
+        if identifier in known or receipts.state(identifier) == "stopped":
+            continue
+        known.add(identifier)
+        metadata = {
+            "recipe_fingerprint": row["revision"],
+            "owner": row["owner"],
+            "cluster": placement.get("cluster"),
+            "runtime_info": {"lifecycle_state": row["phase"]},
+        }
+        result.append(_workload_row(identifier, metadata, None, owner, receipts))
+    return {
+        "workloads": result[:256],
+        "complete": complete and len(result) <= 256,
+        "providers": [{"name": p.name, "version": p.version} for p in registered_workload_lifecycles()],
+    }
 
 
 def _workload_row(workload_id, metadata, provider, owner, receipts):
@@ -306,7 +340,11 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
     sctx = resolve_sctx(sctx)
     with operation_scope(sctx) as operation, reserve_resources(sctx.config.config_path.parent, {"*"}):
         deadline = min(time.monotonic() + timeout, operation.deadline or float("inf"))
-        recipe, revision, overrides = resolve_binding(binding, sctx=sctx)
+        # An exact existing workload can outlive an edit to its source recipe.
+        # Resolve current launch contents only when recovery/launch needs them.
+        # Receipt checks still precede adoption, including uncertain hook effects.
+        resolved = resolve_binding(binding, sctx=sctx) if not binding.recipe_revision else None
+        revision = binding.recipe_revision or resolved[1]
         binding = replace(binding, recipe_revision=revision)
         receipts = Receipts(sctx)
         previous = [
@@ -328,6 +366,9 @@ def ensure_ready(binding: WorkloadBinding, *, owner: str, timeout: float = 900, 
                 result = control(binding, job.workload_id, "status", owner=owner, sctx=sctx)
                 if result["state"] in {"sleeping", "warm"}:
                     control(binding, job.workload_id, "wake", owner=owner, sctx=sctx)
+                    if endpoint := _ready(binding, revision, sctx, owner=owner):
+                        return _ready_result(endpoint, adopted=True, owner=owner, sctx=sctx)
+        recipe, revision, overrides = resolved or resolve_binding(binding, sctx=sctx)
         placements = [{**r["placement"], "post_launch_completed": r["phase"] == "ready"} for r in previous]
         known = {p["workload_id"] for p in placements}
         for job in jobs:

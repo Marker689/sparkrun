@@ -233,3 +233,91 @@ def test_shared_workload_results_match_published_contracts(workflow, monkeypatch
     provider = NS(name="coldsnap", control=lambda *a, **kw: {"workload_id": "work", "state": "running"})
     monkeypatch.setattr(w, "lifecycle_provider", lambda job: provider)
     validate(w.control(binding, "work", "status", owner="gateway", sctx=ctx), RESULT_SCHEMAS["workloads.control"])
+
+
+def test_saved_revision_can_adopt_after_catalog_recipe_changes(workflow, monkeypatch):
+    ctx, _, binding, _ = workflow
+    resolve = Mock(side_effect=w.WorkloadError("recipe_revision_mismatch", "changed"))
+    monkeypatch.setattr(w, "resolve_binding", resolve)
+    monkeypatch.setattr(w, "_ready", lambda *a, **kw: endpoint("external"))
+    assert w.ensure_ready(binding, owner="gateway", sctx=ctx)["adopted"]
+    resolve.assert_not_called()
+    api.plan.assert_not_called()
+
+
+def test_changed_recipe_cannot_launch_with_old_pin(workflow, monkeypatch):
+    ctx, _, binding, _ = workflow
+    monkeypatch.setattr(w, "resolve_binding", Mock(side_effect=w.WorkloadError("recipe_revision_mismatch", "changed")))
+    with pytest.raises(w.WorkloadError) as error:
+        w.ensure_ready(binding, owner="gateway", sctx=ctx)
+    assert error.value.code == "recipe_revision_mismatch"
+    api.plan.assert_not_called()
+    assert not w.Receipts(ctx).placements("revision", "gateway")
+
+
+def test_changed_recipe_does_not_bypass_uncertain_hooks_on_adoption(workflow, monkeypatch):
+    ctx, _, binding, _ = workflow
+    w.Receipts(ctx).save("previous", "revision", "gateway", {"workload_id": "work", "cluster": "lab", "hosts": ["one"]}, "hooks_started")
+    ready = Mock(return_value=endpoint())
+    monkeypatch.setattr(w, "_ready", ready)
+    with pytest.raises(w.WorkloadError) as error:
+        w.ensure_ready(binding, owner="gateway", sctx=ctx)
+    assert error.value.code == "recovery_requires_operator"
+    ready.assert_not_called()
+
+
+def test_saved_revision_can_wake_after_catalog_changes(workflow, monkeypatch):
+    ctx, _, binding, job = workflow
+    monkeypatch.setattr(api, "list_jobs", lambda **kw: [job])
+    monkeypatch.setattr(w, "lifecycle_provider", lambda job: NS(name="sleep-provider"))
+    monkeypatch.setattr(w, "_ready", Mock(side_effect=[None, endpoint()]))
+    control = Mock(return_value={"state": "sleeping"})
+    monkeypatch.setattr(w, "control", control)
+    resolve = Mock(side_effect=w.WorkloadError("recipe_revision_mismatch", "changed"))
+    monkeypatch.setattr(w, "resolve_binding", resolve)
+    assert w.ensure_ready(binding, owner="gateway", sctx=ctx)["adopted"]
+    assert [call.args[2] for call in control.call_args_list] == ["status", "wake"]
+    resolve.assert_not_called()
+
+
+def test_inventory_retains_unfinished_placements_after_losing_worker(workflow):
+    ctx, _, _, _ = workflow
+    receipts = w.Receipts(ctx)
+    receipts.save("pending", "revision", "gateway", {"workload_id": "work", "cluster": "lab", "hosts": ["one"]}, "launch_started")
+    report = w.inventory(owner="gateway", sctx=ctx)
+    assert report["complete"] is True
+    assert [(job["workload_id"], job["recipe_revision"], job["state"]) for job in report["workloads"]] == [
+        ("work", "revision", "launch_started")
+    ]
+    receipts.save("pending", "revision", "gateway", {"workload_id": "work", "cluster": "lab", "hosts": ["one"]}, "stopped")
+    assert w.inventory(owner="gateway", sctx=ctx)["workloads"] == []
+
+
+def test_inventory_cannot_claim_absence_during_another_operation(workflow):
+    from sparkrun.core.coordination import reserve_resources
+
+    ctx, _, _, _ = workflow
+    held, release = threading.Event(), threading.Event()
+
+    def worker():
+        with reserve_resources(ctx.config.config_path.parent, {"*"}):
+            held.set()
+            assert release.wait(5)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        assert held.wait(5)
+        report = w.inventory(owner="gateway", sctx=ctx)
+        assert not report["complete"] and report["workloads"] == []
+    finally:
+        release.set()
+        thread.join(5)
+    assert w.inventory(owner="gateway", sctx=ctx)["complete"]
+
+
+def test_truncated_inventory_cannot_claim_absence(workflow, monkeypatch):
+    ctx, _, _, job = workflow
+    monkeypatch.setattr(api, "list_jobs", lambda **kw: [NS(**{**vars(job), "workload_id": str(index)}) for index in range(257)])
+    report = w.inventory(owner="gateway", sctx=ctx)
+    assert len(report["workloads"]) == 256 and not report["complete"]

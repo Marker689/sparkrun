@@ -298,7 +298,11 @@ gateway plugin may maintain its own generated state within its namespace.
 
 SparkRoute uses `gateways.sparkroute` for its bootstrap `config`, `transport`,
 `admin_host`, `admin_port`, `allow_insecure_admin_nonloopback`, `capability_policy`,
-`bindings` and `discovered_models`. Only this namespaced schema is supported;
+`auto_update_recipes`, `bindings` and `discovered_models`. Recipe auto-updates
+default to `true`; set `gateways.sparkroute.auto_update_recipes: false` and restart
+the proxy to require manual recipe updates. Updates wait until the previous
+workload is removed, preserving running and sleeping instances.
+Only this namespaced schema is supported;
 legacy locations are not read or migrated. Shared listener settings, gateway
 selection, discovery scheduling and aliases stay in their existing locations.
 See the SparkRoute integration guide for the full schema.
