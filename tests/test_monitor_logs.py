@@ -2094,6 +2094,40 @@ def test_workload_list_pilot():
     asyncio.run(_run())
 
 
+def test_workload_list_mouse_click_selects():
+    import asyncio
+
+    rows = [
+        WorkloadRow(key="header:cid1", text="cid1", is_header=True, cluster_id="cid1"),
+        WorkloadRow(key="cid1:c1", text="  c1", is_header=False, cluster_id="cid1", container="c1"),
+        WorkloadRow(key="cid1:c2", text="  c2", is_header=False, cluster_id="cid1", container="c2"),
+    ]
+    wl = WorkloadList(host="h1", rows=rows)
+    app = _WorkloadListTestApp(wl)
+
+    async def _run():
+        async with app.run_test() as pilot:
+            # Option rows start one row below and stay right of the list's padding;
+            # derive the click point from the widget's own gutter so the click lands
+            # on the option's text (a click in the padding carries no option meta).
+            gutter = wl.styles.gutter
+            click_x = gutter.left + 1
+
+            # Click on the second container row (option index 2) opens its logs
+            await pilot.click(wl, offset=(click_x, gutter.top + 2))
+            await pilot.pause(0.05)
+            assert app.opened_log == ("h1", "cid1", "c2")
+            assert wl.revealed is True
+
+            # Clicking the disabled header row is a no-op
+            app.opened_log = None
+            await pilot.click(wl, offset=(click_x, gutter.top))
+            await pilot.pause(0.05)
+            assert app.opened_log is None
+
+    asyncio.run(_run())
+
+
 def test_log_pane_inflight_page_scope_switch(monkeypatch):
     """Scope switch mid-fetch resets _loading_page, cancels page worker, and paging still works."""
     import asyncio

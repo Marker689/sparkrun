@@ -121,6 +121,7 @@ first tagged release containing them, regardless of their original commit date.
 - The cluster monitor now features real-time log tailing for running workloads.
   Log lines are colorized (toggle) and regex searchable, with optional search-term 
   highlighting. Parallelized workload logs can be combined into a single stream.
+  Workloads are chosen from the list with Enter or a mouse click.
 
 - Parallelize builtin manifest-based model copies across hosts and file batches,
   with configurable per-host and total stream limits (defaults: 2 and 16).

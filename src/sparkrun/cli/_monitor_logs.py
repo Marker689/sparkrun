@@ -784,6 +784,12 @@ class WorkloadList(SelectionList):
         else:
             self.highlighted = None
 
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Rule 0b: a mouse click selects the workload the same way Enter does."""
+        event.stop()
+        self.reveal()
+        self.action_select_container()
+
     def action_select_container(self) -> None:
         if self.highlighted is None or not (0 <= self.highlighted < len(self._rows)):
             return
