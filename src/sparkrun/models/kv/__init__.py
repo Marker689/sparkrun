@@ -20,6 +20,7 @@ from typing import Any
 from sparkrun.models.dtypes import dtype_key, kv_bytes_per_element
 from sparkrun.models.kv._base import ArchField, ArchInfo, KVCacheStrategy, KVDetection, KVSizing
 from sparkrun.models.kv.dense import DenseKVStrategy
+from sparkrun.models.kv.hybrid import HybridKVStrategy
 from sparkrun.models.kv.mla import MlaKVStrategy
 
 __all__ = [
@@ -40,7 +41,7 @@ __all__ = [
     "resolve_kv_strategy",
 ]
 
-_REGISTRY: list[KVCacheStrategy] = [MlaKVStrategy(), DenseKVStrategy()]
+_REGISTRY: list[KVCacheStrategy] = [MlaKVStrategy(), HybridKVStrategy(), DenseKVStrategy()]
 
 
 def register_kv_strategy(strategy: KVCacheStrategy) -> None:

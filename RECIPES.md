@@ -366,6 +366,23 @@ the figure you supply is one rank's replicated latent cache rather than a cluste
 > enough. Pinning `qk_rope_head_dim` on its own is accepted but warns, since it cannot distinguish a compressed-latent
 > cache from an ordinary one.
 
+#### Hybrid attention + recurrent (NemotronH, Qwen3-Next / Qwen3.5)
+
+These models interleave a few full-attention layers with many Mamba2 or GatedDeltaNet layers. Only the attention
+layers keep a per-token KV cache; a recurrent layer keeps a fixed state per *sequence*. The generic formula counts
+every layer, which overestimates Nemotron-3-Super (8 attention layers of 88) about 11x. sparkrun reads the layer layout
+from `hybrid_override_pattern`, `layers_block_type` or `layer_types` and sizes the attention layers plus one
+sequence's recurrent state. A layout with no recurrent layer (sliding + full attention) is not treated as hybrid.
+
+| Field                   | Meaning                                                                                       |
+|-------------------------|-----------------------------------------------------------------------------------------------|
+| `attention_layers`      | Layers keeping a per-token KV cache. Its presence switches KV sizing to the hybrid path.       |
+| `recurrent_state_bytes` | Recurrent state per sequence, summed over the recurrent layers. Absent → the estimate is a floor. |
+
+The state is counted at the config's `mamba_ssm_cache_dtype`, or float32 when the config names none, so a recipe
+serving it in bfloat16 is overestimated by a few hundred MB at most. The maximum-context figure subtracts one
+sequence's state from the KV budget before dividing by the per-token cost.
+
 ### Benchmark
 
 ```yaml

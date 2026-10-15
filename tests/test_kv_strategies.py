@@ -189,7 +189,7 @@ class TestAddingAnArchitecture:
     def test_registration_respects_priority(self, clean_registry):
         register_kv_strategy(_SlidingWindowStrategy())
         names = [s.name for s in list_kv_strategies()]
-        assert names == ["sliding", "mla", "dense"]
+        assert names == ["sliding", "mla", "hybrid", "dense"]
         assert names[-1] == "dense", "dense must stay the terminator"
 
     def test_re_registering_a_name_replaces_it(self, clean_registry):

@@ -569,6 +569,13 @@ def _extract_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
         if key in cfg:
             info["num_layers"] = cfg[key]
             break
+    else:
+        # NemotronH Puzzle/Omni configs state the depth only as a layout list.
+        from sparkrun.models.kv.hybrid import layer_layout
+
+        layout = layer_layout(cfg)
+        if layout:
+            info["num_layers"] = len(layout)
 
     # num_kv_heads: GQA architectures first, then MHA fallback
     for key in ("num_key_value_heads", "num_kv_heads"):
