@@ -46,7 +46,7 @@ branch, tag, or full commit with `--ref`:
 
 ```sh
 sparkrun plugins add https://github.com/sparksq/sparkrun-sparkroute-plugin --ref main
-sparkrun plugins update sparkroute --ref refs/tags/v0.2.1
+sparkrun plugins update sparkroute --ref refs/tags/v0.3.0
 sparkrun plugins add https://github.com/sparksq/sparkrun-coldsnap-plugin --dry-run
 ```
 
