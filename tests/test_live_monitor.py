@@ -336,7 +336,6 @@ class _FakeLiveMonitorSession:
 class _DummyLogTarget:
     def __init__(self, **kwargs):
         self.sources = [LogSource(host="h1", container="c1", role="head", rank=0)]
-        self.windowing_supported = True
         self.runtime = "vllm-ray"
         self.follow_cancel = None
 

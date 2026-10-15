@@ -155,7 +155,12 @@ File paths, export headers/prefixes, overwrite policy, partial-file handling,
 and atomic publication belong in the frontend. Keep export contents streaming;
 do not buffer the entire log to call a whole-file write helper. Atomic
 no-overwrite publication must never fall back to a check followed by replacement.
-There is no `LogTarget.dump` or `windowing_supported` property.
+`LogTarget.dump(path, *, overwrite=False, cancel=None, prefix=None)` streams a
+complete finite read to `path`: it writes `<path>.partial` with `O_EXCL` and mode
+`0600`, finalizes by `link`/`replace`, refuses an existing target without
+`overwrite`, and removes the partial on cancel or failure. There is no
+`windowing_supported` property — paging is always available for a target with
+sources (see *Page older history*).
 
 ## Native Kubernetes workloads
 

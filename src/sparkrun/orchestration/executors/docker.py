@@ -688,48 +688,6 @@ class DockerExecutor(Executor):
         inner.append(path)
         return "docker exec %s %s" % (quote(source.container), " ".join(quote(part) for part in inner))
 
-    def logs_window_cmd(
-        self,
-        container_name: str,
-        *,
-        skip: int,
-        count: int,
-    ) -> str | None:
-        """Generate a ``docker logs`` window command string.
-
-        Reads the *count* lines that precede the last *skip* lines.
-        Stderr is redirected to stdout (best-effort interleaving).
-        """
-        skip = max(0, int(skip))
-        count = max(0, int(count))
-        total = skip + count
-        awk_filter = f"awk -v s={skip} '{{b[NR]=$0}} END{{for(i=1;i<=NR-s;i++)print b[i]}}'"
-        return f"set -o pipefail; docker logs --tail {total} {quote(container_name)} 2>&1 | {awk_filter}"
-
-    def read_logs_window_cmd(
-        self,
-        source: "LogSource",
-        *,
-        skip: int,
-        count: int,
-    ) -> str | None:
-        """Read a window of *source* via ``docker logs`` or an in-container ``tail | awk``.
-
-        For :data:`MODE_FILE` sources, runs ``tail | awk`` inside the
-        container via ``docker exec … sh -c``.  For :data:`MODE_STDOUT`,
-        uses :meth:`logs_window_cmd` (``docker logs --tail … 2>&1 | awk``).
-        """
-        if source.mode != MODE_FILE:
-            return self.logs_window_cmd(source.container, skip=skip, count=count)
-
-        path = source.path or SERVE_LOG_PATH
-        skip = max(0, int(skip))
-        count = max(0, int(count))
-        total = skip + count
-        awk_filter = f"awk -v s={skip} '{{b[NR]=$0}} END{{for(i=1;i<=NR-s;i++)print b[i]}}'"
-        inner = f"tail -n 1 {quote(path)} >/dev/null || exit $?; tail -n {total} {quote(path)} | {awk_filter}"
-        return f"docker exec {quote(source.container)} sh -c {quote(inner)}"
-
     def verify_command_passthrough(
         self,
         image: str,

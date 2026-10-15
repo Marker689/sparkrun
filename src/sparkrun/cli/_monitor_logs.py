@@ -35,9 +35,9 @@ from textual.strip import Strip
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from sparkrun.api._errors import SparkrunError
-from sparkrun.api._logs import SCOPE_ALL, LogTarget, open_log_target
+from sparkrun.api import LogTarget, SparkrunError, open_log_target
 from sparkrun.cli._monitor_colorize import colorize_log_spans, unclaimed_ranges
+from sparkrun.core.log_source import SCOPE_ALL, source_sort_key
 from sparkrun.core.monitoring import HostActivity, MonitorFrame
 from sparkrun.orchestration.job_metadata import load_job_metadata
 from sparkrun.orchestration.logs import LogLine, LogSource
@@ -265,7 +265,6 @@ class Marker:
 LOADING_MARKER = Marker("— loading older lines —")
 START_OF_LOG_MARKER = Marker("— start of log —")
 STREAM_ENDED_MARKER = Marker("— log stream ended —")
-OLDER_UNAVAILABLE_MARKER = Marker("— older lines unavailable for this executor —")
 LOG_RESTARTED_MARKER = Marker("— log restarted —")
 TERMINAL_MARKERS = (STREAM_ENDED_MARKER, LOG_RESTARTED_MARKER)
 
@@ -1799,19 +1798,7 @@ class LogPane(Vertical):
     def _trigger_page_fetch(self) -> None:
         if self._loading_page or self.target is None:
             return
-        if not self.target.windowing_supported:
-            if not any(e == OLDER_UNAVAILABLE_MARKER for e in self.buffer._entries):
-                self.buffer.prepend_page([OLDER_UNAVAILABLE_MARKER])
-                self.log_view.refresh_buffer()
-                self._rederive_match_cursor()
-                marker_rows = self.log_view.entry_to_virtual_row(1)
-                self.log_view.compensate_scroll(marker_rows)
-            return
-
-        sorted_sources = sorted(
-            self.target.sources,
-            key=lambda s: (s.rank is None, s.rank if s.rank is not None else 0, s.host, s.container),
-        )
+        sorted_sources = sorted(self.target.sources, key=source_sort_key)
         rev_sources = list(reversed(sorted_sources))
         source_skips: list[tuple[LogSource, int, int]] = []
         for s in rev_sources:
@@ -1851,9 +1838,6 @@ class LogPane(Vertical):
             for source, skip, snap_count in source_skips:
                 if cancel.is_set():
                     return
-                before_page = getattr(target, "before_page", None)
-                if callable(before_page):
-                    before_page()
                 count_before_read = self._get_delivered_count(source)
                 lines = target.page(source, skip=skip, count=500)
                 exhausted = len(lines) < 500

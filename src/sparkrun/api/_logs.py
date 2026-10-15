@@ -20,15 +20,16 @@ from dataclasses import dataclass, field
 import math
 import os
 import threading
-from typing import TYPE_CHECKING, Any, Callable, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 
 from sparkrun.api._errors import JobNotFound, SparkrunError
-from sparkrun.core.log_source import SCOPE_ALL, SCOPE_HEAD, LogLine, LogSource
+from sparkrun.core.log_source import SCOPE_ALL, SCOPE_HEAD, LogLine, LogSource, source_sort_key
 
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
     from sparkrun.core.context import SparkrunContext
     from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.executors._base import Executor
 
 logger = logging.getLogger(__name__)
 
@@ -48,20 +49,15 @@ class LogTarget:
     to release readers. Reopen the target after workload placement changes.
     """
 
-    workload_id: str = ""
-    runtime: str = ""
-    sources: tuple[LogSource, ...] = ()
-    _executor: Any = field(default=None, repr=False, compare=False)
-    _ssh_kwargs: dict = field(default_factory=dict, repr=False, compare=False)
+    workload_id: str
+    runtime: str
+    sources: tuple[LogSource, ...]
+    _executor: Executor = field(repr=False, compare=False)
+    _ssh_kwargs: dict = field(repr=False, compare=False)
     _cancel: threading.Event | None = field(default=None, repr=False, compare=False)
     _host: str | None = field(default=None, repr=False, compare=False)
     _container: str | None = field(default=None, repr=False, compare=False)
     _scope: str = field(default=SCOPE_HEAD, repr=False, compare=False)
-    windowing_supported: bool = False
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.sources, tuple):
-            object.__setattr__(self, "sources", tuple(self.sources))
 
     def read(
         self,
@@ -141,8 +137,7 @@ class LogTarget:
                 if len(page) < count:
                     page.append(line)
         finally:
-            if hasattr(reader, "close") and callable(reader.close):
-                reader.close()
+            reader.close()
         if cancel is not None and cancel.is_set():
             return []
         return page[: max(0, total - skip)]
@@ -158,12 +153,11 @@ class LogTarget:
         """Stream complete logs for this target to *path*.
 
         Writes to ``<path>.partial`` and atomically renames to *path* upon completion.
-        If *cancel* is set during dumping, the partial file is removed and the
-        partial line count is returned (callers should check ``cancel.is_set()``
-        to distinguish cancellation from completion).
+        If *cancel* (or the target's own cancellation event) is set during dumping,
+        the partial file is removed and the partial line count is returned (callers
+        should check ``cancel.is_set()`` to distinguish cancellation from completion).
         Refuses an existing path unless *overwrite* is True.
         """
-        from sparkrun.orchestration.logs import dump_log_sources
 
         if not path:
             raise SparkrunError("Dump path cannot be empty")
@@ -176,11 +170,12 @@ class LogTarget:
         if not os.path.isdir(parent):
             raise SparkrunError(f"Directory {parent!r} does not exist")
 
+        cancel = self._cancel if cancel is None else cancel
         partial_path = f"{resolved_path}.partial"
 
+        multi_host = len({s.host for s in self.sources}) > 1
         if prefix is None:
             if len(self.sources) > 1:
-                multi_host = len({s.host for s in self.sources}) > 1
                 is_cluster_scope = self._host is None
                 include_host = multi_host or is_cluster_scope
 
@@ -199,10 +194,7 @@ class LogTarget:
         else:
             effective_prefix = prefix
 
-        sorted_sources = sorted(
-            self.sources,
-            key=lambda s: (s.rank is None, s.rank if s.rank is not None else 0, s.host, s.container),
-        )
+        sorted_sources = sorted(self.sources, key=source_sort_key)
         if self._container and self._host:
             scope_desc = f"container ({self._host}/{self._container})"
         elif self._container:
@@ -215,7 +207,7 @@ class LogTarget:
         header = f"# workload: {self.workload_id} | scope: {scope_desc} | sources: {src_labels}\n"
 
         try:
-            fd = os.open(partial_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            fd = os.open(partial_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as e:
             raise SparkrunError(f"A log dump to {path!r} is already in progress ({partial_path!r} exists)") from e
         except OSError as e:
@@ -235,14 +227,26 @@ class LogTarget:
 
             try:
                 fh.write(header)
-                count = dump_log_sources(
-                    self._executor,
-                    sorted_sources,
-                    fh,
-                    ssh_kwargs=self._ssh_kwargs,
-                    cancel=cancel,
-                    prefix=effective_prefix,
-                )
+                count = 0
+                reader = self.read(follow=False, tail=None, cancel=cancel, check=True)
+                try:
+                    for line in reader:
+                        if callable(effective_prefix):
+                            p = effective_prefix(line)
+                            if p:
+                                fh.write(f"{p} " if not p.endswith(" ") else p)
+                            fh.write(f"{line.text}\n")
+                        elif effective_prefix is True:
+                            tag = f"[{line.host}/{line.role}]" if multi_host else f"[{line.role}]"
+                            fh.write(f"{tag} {line.text}\n")
+                        elif isinstance(effective_prefix, str) and effective_prefix:
+                            fh.write(f"{effective_prefix} " if not effective_prefix.endswith(" ") else effective_prefix)
+                            fh.write(f"{line.text}\n")
+                        else:
+                            fh.write(f"{line.text}\n")
+                        count += 1
+                finally:
+                    reader.close()
             finally:
                 fh.close()
 
@@ -334,16 +338,16 @@ def logs(
 def open_log_target(
     workload_id: str | None = None,
     *,
-    recipe: str | Recipe | None = None,
+    recipe: "str | Recipe | None" = None,
     hosts: list[str] | tuple[str, ...] | None = None,
     overrides: dict | None = None,
-    cluster: str | ClusterDefinition | None = None,
+    cluster: "str | ClusterDefinition | None" = None,
     scope: str = SCOPE_HEAD,
     host: str | None = None,
     container: str | None = None,
     source_id: str | None = None,
     cache_dir: str | None = None,
-    sctx: SparkrunContext | None = None,
+    sctx: "SparkrunContext | None" = None,
     cancel: threading.Event | None = None,
 ) -> LogTarget:
     """Resolve log sources and check availability without opening log readers.
@@ -394,7 +398,7 @@ def open_log_target(
     from sparkrun.orchestration.executor import resolve_executor
 
     # Persistent metadata and runtime naming still use the internal cluster_id.
-    cid = workload_id
+    cluster_id = workload_id
     if scope not in (SCOPE_HEAD, SCOPE_ALL):
         raise SparkrunError("Invalid log scope %r: expected %r or %r" % (scope, SCOPE_HEAD, SCOPE_ALL))
     for name, value in (("host", host), ("container", container), ("source_id", source_id)):
@@ -406,7 +410,7 @@ def open_log_target(
     cache_dir = str(resolve_configured_cache_dir(cache_dir, config=sctx.config if sctx is not None else None))
 
     target_spec = resolve_workload_target(
-        workload_id=cid,
+        workload_id=cluster_id,
         recipe=recipe,
         hosts=hosts,
         overrides=overrides,
@@ -415,13 +419,13 @@ def open_log_target(
         operation="Log resolution",
         sctx=sctx,
     )
-    cid, meta, target_hosts, cluster_def, resolved_recipe = target_spec[:5]
+    cluster_id, meta, target_hosts, cluster_def, resolved_recipe = target_spec[:5]
     # A native resource is read through its executor's control plane, which
     # needs no host transport; everything else reads over the job's connection.
     if not target_spec.transport_prepared and not (meta and meta.get("native_resource") is not None):
         prepare_transport(cluster_def)
 
-    runtime = _resolve_runtime_for_job(meta, cid, recipe=resolved_recipe, sctx=sctx)
+    runtime = _resolve_runtime_for_job(meta, cluster_id, recipe=resolved_recipe, sctx=sctx)
     from sparkrun.core._executor_destination import metadata_executor_overrides
 
     executor = resolve_executor(
@@ -443,7 +447,7 @@ def open_log_target(
     effective_scope = SCOPE_ALL if filtered else scope
     if meta and meta.get("native_resource") is not None:
         try:
-            sources = executor.native_log_sources(cid, metadata=meta, scope=effective_scope, cancel=cancel)
+            sources = executor.native_log_sources(cluster_id, metadata=meta, scope=effective_scope, cancel=cancel)
         except (SparkrunError, ValueError):
             raise
         except Exception as exc:
@@ -451,15 +455,12 @@ def open_log_target(
         if cancel is not None and cancel.is_set():
             sources = []
         else:
-            sources = _filter_sources(sources, cid, host=host, container=container, source_id=source_id)
-
-        windowing_supported = bool(sources)
+            sources = _filter_sources(sources, cluster_id, host=host, container=container, source_id=source_id)
 
         return LogTarget(
-            workload_id=cid,
+            workload_id=cluster_id,
             runtime=runtime.runtime_name,
             sources=tuple(sources),
-            windowing_supported=windowing_supported,
             _executor=executor,
             _ssh_kwargs={},
             _cancel=cancel,
@@ -469,12 +470,12 @@ def open_log_target(
         )
 
     sources = runtime.log_sources(
-        cid,
+        cluster_id,
         target_hosts,
         is_solo=len(target_hosts) <= 1,
         scope=effective_scope,
     )
-    sources = _filter_sources(sources, cid, host=host, container=container, source_id=source_id)
+    sources = _filter_sources(sources, cluster_id, host=host, container=container, source_id=source_id)
 
     # Liveness precheck: check ALL nodes (not just the head log source) —
     # in a multi-node job the head may have crashed while workers are still
@@ -489,7 +490,7 @@ def open_log_target(
         sources
         if effective_scope == SCOPE_ALL
         else runtime.log_sources(
-            cid,
+            cluster_id,
             target_hosts,
             is_solo=len(target_hosts) <= 1,
             scope=SCOPE_ALL,
@@ -497,15 +498,12 @@ def open_log_target(
     )
     # Explicit selectors check only their sources. Reads never remove metadata
     # or cache claims, even when all selected containers are confirmed absent.
-    _verify_log_source_alive(executor, all_sources, ssh_kwargs, cid, cache_dir, scope=effective_scope)
-
-    windowing_supported = bool(sources)
+    _verify_log_source_alive(executor, all_sources, ssh_kwargs, cluster_id, cache_dir, scope=effective_scope)
 
     return LogTarget(
-        workload_id=cid,
+        workload_id=cluster_id,
         runtime=runtime.runtime_name,
         sources=tuple(sources),
-        windowing_supported=windowing_supported,
         _executor=executor,
         _ssh_kwargs=dict(ssh_kwargs),
         _cancel=cancel,

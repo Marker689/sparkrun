@@ -711,7 +711,6 @@ def test_open_log_target_host_filtering_and_precheck(tmp_path):
         assert len(target.sources) == 1
         assert target.sources[0].host == "h2"
         assert target.sources[0].container == cluster_id + "_node_1"
-        assert target.windowing_supported is True
 
 
 def test_open_log_target_container_filtering(tmp_path):
@@ -808,9 +807,10 @@ def test_log_target_follow():
 
     target = api.LogTarget(
         workload_id="cid",
-        sources=[source],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(source,),
         _executor=DockerExecutor(),
+        _ssh_kwargs={},
     )
     with patch("sparkrun.orchestration.logs.read_log_sources", return_value=iter([dummy_line])) as mock_read:
         lines = list(target.follow(tail=150))
@@ -829,11 +829,12 @@ def test_log_target_page():
 
     target = api.LogTarget(
         workload_id="cid",
-        sources=[source],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(source,),
         _executor=DockerExecutor(),
+        _ssh_kwargs={},
     )
-    with patch("sparkrun.orchestration.logs.read_log_sources", return_value=iter(lines)) as mock_read:
+    with patch("sparkrun.orchestration.logs.read_log_sources", return_value=(line for line in lines)) as mock_read:
         result = target.page(source, skip=10, count=5)
         assert len(result) == 5
         assert [line.text for line in result] == ["line-0", "line-1", "line-2", "line-3", "line-4"]
@@ -848,8 +849,13 @@ class _RealShellDumpExecutor(DockerExecutor):
         elif source.role == "worker":
             return "printf 'worker line 1\\nworker line 2\\n'"
         elif source.role == "slow":
-            # Emits lines with delay so mid-stream cancellation can be tested against real processes
-            return 'for i in $(seq 1 100); do echo "slow line $i"; sleep 0.05; done'
+            # Emits lines with delay so mid-stream cancellation can be tested against real
+            # processes; long enough that cancellation always lands well before EOF.
+            return 'for i in $(seq 1 1000); do echo "slow line $i"; sleep 0.05; done'
+        elif source.role == "stderr":
+            # Workload stdout plus transport noise: stderr must land in the
+            # reader's diagnostics, never inside the dumped log history.
+            return 'printf "out 1\\n"; printf "transport warning\\n" >&2; printf "out 2\\n"'
         return "printf 'default line\\n'"
 
 
@@ -865,10 +871,11 @@ def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
     # 1. Cluster scope (sources given out of order: [worker, head])
     target_cluster = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[worker_src, head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(worker_src, head_src),
         _executor=executor,
         _scope=SCOPE_ALL,
+        _ssh_kwargs={},
     )
     out_cluster = tmp_path / "cluster.log"
     count = target_cluster.dump(str(out_cluster))
@@ -887,10 +894,11 @@ def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
     # 2. Node scope (multiple containers on same host -> [role/rank] prefix, no host)
     target_node = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[worker_src, head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(worker_src, head_src),
         _executor=executor,
         _host="localhost",
+        _ssh_kwargs={},
     )
     out_node = tmp_path / "node.log"
     count = target_node.dump(str(out_node))
@@ -905,11 +913,12 @@ def test_log_target_dump_real_ordering_and_prefixes(tmp_path):
     # 3. Single source (no prefix attached to lines)
     target_single = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(head_src,),
         _executor=executor,
         _host="localhost",
         _container="c0",
+        _ssh_kwargs={},
     )
     out_single = tmp_path / "single.log"
     count = target_single.dump(str(out_single))
@@ -927,9 +936,10 @@ def test_log_target_dump_real_overwrite(tmp_path):
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(head_src,),
         _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
     )
 
     out_path = tmp_path / "existing.log"
@@ -954,9 +964,10 @@ def test_log_target_dump_real_midstream_cancellation(tmp_path):
     slow_src = LogSource(host="localhost", container="c_slow", role="slow", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[slow_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(slow_src,),
         _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
     )
 
     cancel = threading.Event()
@@ -976,6 +987,33 @@ def test_log_target_dump_real_midstream_cancellation(tmp_path):
         timer.cancel()
 
 
+def test_log_target_dump_honors_target_cancel_event(tmp_path):
+    """dump(path) with cancel=None must not publish when the target's own event is set."""
+    import threading
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    target_cancel = threading.Event()
+    target_cancel.set()
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(head_src,),
+        _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
+        _cancel=target_cancel,
+    )
+
+    out_path = tmp_path / "scoped-cancel.log"
+    partial_path = tmp_path / "scoped-cancel.log.partial"
+
+    count = target.dump(str(out_path))
+
+    assert count == 0
+    assert not out_path.exists()
+    assert not partial_path.exists()
+
+
 def test_log_target_dump_keyboard_interrupt_removes_partial(tmp_path):
     """When interrupted by KeyboardInterrupt (or SIGINT/SIGTERM), .partial file is removed."""
     from sparkrun.core.log_source import LogSource, MODE_FILE
@@ -983,15 +1021,16 @@ def test_log_target_dump_keyboard_interrupt_removes_partial(tmp_path):
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(head_src,),
         _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
     )
 
     out_path = tmp_path / "ki.log"
     partial_path = tmp_path / "ki.log.partial"
 
-    with patch("sparkrun.orchestration.logs.dump_log_sources", side_effect=KeyboardInterrupt()):
+    with patch("sparkrun.orchestration.logs.read_log_sources", side_effect=KeyboardInterrupt()):
         with pytest.raises(KeyboardInterrupt):
             target.dump(str(out_path))
 
@@ -1006,9 +1045,10 @@ def test_log_target_dump_concurrent_dump_exclusive_creation(tmp_path):
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(head_src,),
         _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
     )
 
     out_path = tmp_path / "concurrent.log"
@@ -1033,22 +1073,22 @@ def test_log_target_dump_no_overwrite_race_atomic_link(tmp_path):
     head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[head_src],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(head_src,),
         _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
     )
 
     out_path = tmp_path / "raced.log"
     partial_path = tmp_path / "raced.log.partial"
 
-    # Hook into dump_log_sources to simulate target file appearing mid-dump
-    from sparkrun.orchestration.logs import dump_log_sources as orig_dump
-
-    def simulate_race_dump(executor, sources, fh, **kwargs):
+    # Simulate the destination file appearing mid-dump: the write runs eagerly
+    # at read start, before dump() iterates or finalizes.
+    def simulate_race_read(executor, sources, **kwargs):
         out_path.write_text("raced destination content\n")
-        return orig_dump(executor, sources, fh, **kwargs)
+        return (line for line in ())
 
-    with patch("sparkrun.orchestration.logs.dump_log_sources", side_effect=simulate_race_dump):
+    with patch("sparkrun.orchestration.logs.read_log_sources", side_effect=simulate_race_read):
         with pytest.raises(api.SparkrunError, match="already exists"):
             target.dump(str(out_path), overwrite=False)
 
@@ -1062,9 +1102,10 @@ def test_log_target_dump_missing_directory(tmp_path):
 
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[LogSource(host="h1", container="c0")],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(LogSource(host="h1", container="c0"),),
         _executor=DockerExecutor(),
+        _ssh_kwargs={},
     )
 
     bad_path = tmp_path / "nonexistent_dir" / "out.log"
@@ -1080,18 +1121,257 @@ def test_log_target_dump_error_removes_partial(tmp_path):
 
     target = api.LogTarget(
         workload_id="sparkrun_dump123",
-        sources=[LogSource(host="h1", container="c0")],
-        windowing_supported=True,
+        runtime="vllm-distributed",
+        sources=(LogSource(host="h1", container="c0"),),
         _executor=DockerExecutor(),
+        _ssh_kwargs={},
     )
 
     out_path = tmp_path / "failed.log"
-    with patch("sparkrun.orchestration.logs.dump_log_sources", side_effect=RuntimeError("disk full")):
+    with patch("sparkrun.orchestration.logs.read_log_sources", side_effect=RuntimeError("disk full")):
         with pytest.raises(RuntimeError, match="disk full"):
             target.dump(str(out_path))
 
     assert not out_path.exists()
     assert not (tmp_path / "failed.log.partial").exists()
+
+
+def test_log_target_dump_explicit_prefix_modes(tmp_path, monkeypatch):
+    """Explicit dump prefixes: True, string, callable, and multi-host True."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    executor = _RealShellDumpExecutor()
+
+    def make(sources, **extra):
+        return api.LogTarget(
+            workload_id="sparkrun_dump123",
+            runtime="vllm-distributed",
+            sources=tuple(sources),
+            _executor=executor,
+            _ssh_kwargs={},
+            **extra,
+        )
+
+    # prefix=True on a single-host target tags with the role only.
+    out = tmp_path / "true.log"
+    assert make([head_src]).dump(str(out), prefix=True) == 2
+    assert out.read_text(encoding="utf-8").splitlines()[1:] == ["[head] head line 1", "[head] head line 2"]
+
+    # Non-empty string prefix.
+    out = tmp_path / "custom.log"
+    assert make([head_src]).dump(str(out), prefix="[custom]") == 2
+    assert out.read_text(encoding="utf-8").splitlines()[1] == "[custom] head line 1"
+
+    # Callable prefix returning a tag (or falsy to skip the tag).
+    out = tmp_path / "callable.log"
+    assert make([head_src]).dump(str(out), prefix=lambda line: f"<{line.host}>") == 2
+    assert out.read_text(encoding="utf-8").splitlines()[1:] == ["<localhost> head line 1", "<localhost> head line 2"]
+
+    # prefix=True with multiple hosts tags with host/role.
+    monkeypatch.setattr("sparkrun.orchestration.ssh.should_run_locally", lambda *a, **kw: True)
+    worker_src = LogSource(host="h2", container="c1", role="worker", rank=1, mode=MODE_FILE)
+    out = tmp_path / "multihost.log"
+    assert make([head_src, worker_src]).dump(str(out), prefix=True) == 4
+    body = out.read_text(encoding="utf-8").splitlines()[1:]
+    assert body == [
+        "[localhost/head] head line 1",
+        "[localhost/head] head line 2",
+        "[h2/worker] worker line 1",
+        "[h2/worker] worker line 2",
+    ]
+
+
+def test_log_target_dump_rank_none_orders_last(tmp_path):
+    """A rank-less source sorts after every ranked one through the production read path."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    sources = (
+        LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE),
+        LogSource(host="localhost", container="c1", role="worker", rank=1, mode=MODE_FILE),
+        LogSource(host="localhost", container="c2", role="node_3", rank=None, mode=MODE_FILE),
+    )
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=sources,
+        _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
+    )
+
+    out = tmp_path / "order.log"
+    assert target.dump(str(out), prefix=False) == 5
+    assert out.read_text(encoding="utf-8").splitlines()[1:] == [
+        "head line 1",
+        "head line 2",
+        "worker line 1",
+        "worker line 2",
+        "default line",
+    ]
+
+
+def test_log_target_dump_cancel_reaps_process_group(tmp_path, monkeypatch):
+    """Cancelling a dump reaps the reader's whole process group."""
+    import os
+    import threading
+    import time as time_module
+
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+    from sparkrun.orchestration import logs as logs_module
+
+    slow_src = LogSource(host="localhost", container="c_slow", role="slow", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(slow_src,),
+        _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
+    )
+
+    real_spawn = logs_module._spawn
+    captured: dict = {}
+
+    def capturing_spawn(cmd, **kwargs):
+        proc = real_spawn(cmd, **kwargs)
+        captured["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(logs_module, "_spawn", capturing_spawn)
+
+    cancel = threading.Event()
+    out_path = tmp_path / "cancel.log"
+    partial_path = tmp_path / "cancel.log.partial"
+    result: dict = {}
+
+    def run_dump():
+        result["count"] = target.dump(str(out_path), cancel=cancel)
+
+    thread = threading.Thread(target=run_dump)
+    thread.start()
+    try:
+        # The .partial file is userspace-buffered, so its size is not an observable
+        # "mid-stream" signal: wait for the reader process, then let it stream briefly.
+        deadline = time_module.monotonic() + 5
+        while time_module.monotonic() < deadline and "proc" not in captured:
+            time_module.sleep(0.01)
+        assert "proc" in captured
+        time_module.sleep(0.5)
+        cancel.set()
+    finally:
+        thread.join(timeout=10)
+    assert not thread.is_alive()
+
+    assert result["count"] > 0
+    assert not out_path.exists()
+    assert not partial_path.exists()
+
+    proc = captured["proc"]
+    reaped = False
+    deadline = time_module.monotonic() + 5
+    while time_module.monotonic() < deadline:
+        try:
+            os.killpg(proc.pid, 0)
+            time_module.sleep(0.05)
+        except ProcessLookupError:
+            reaped = True
+            break
+    assert reaped, f"Process group {proc.pid} still alive after dump cancellation"
+
+
+def test_log_target_dump_empty_sources_writes_header_only(tmp_path):
+    """A target with no sources still publishes a header-only dump and reports zero lines."""
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(),
+        _executor=DockerExecutor(),
+        _ssh_kwargs={},
+    )
+
+    out_path = tmp_path / "empty.log"
+    assert target.dump(str(out_path)) == 0
+
+    lines = out_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("# workload: sparkrun_dump123")
+
+
+def test_log_target_dump_reader_error_raises_called_process_error(tmp_path):
+    """A failing reader surfaces as CalledProcessError and leaves no .partial."""
+    import subprocess
+
+    from sparkrun.core.log_source import LogSource
+
+    class _FailingReadExecutor(DockerExecutor):
+        def read_logs_cmd(self, source, *, follow=False, tail=None):
+            return "echo err; exit 3"
+
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(LogSource(host="localhost", container="c0", role="head", rank=0),),
+        _executor=_FailingReadExecutor(),
+        _ssh_kwargs={},
+    )
+
+    out_path = tmp_path / "failed.log"
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        target.dump(str(out_path))
+    assert exc_info.value.returncode == 3
+    assert not out_path.exists()
+    assert not (tmp_path / "failed.log.partial").exists()
+
+
+def test_log_target_dump_excludes_reader_stderr(tmp_path):
+    """Transport stderr stays in diagnostics; the dump holds only workload stdout."""
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    src = LogSource(host="localhost", container="c0", role="stderr", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(src,),
+        _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
+    )
+
+    out_path = tmp_path / "stderr.log"
+    assert target.dump(str(out_path), prefix=False) == 2
+    assert out_path.read_text(encoding="utf-8").splitlines()[1:] == ["out 1", "out 2"]
+
+
+def test_log_target_dump_validates_native_source(tmp_path):
+    """Native sources are validated before the read and again after normal EOF."""
+    from sparkrun.core.log_source import LogResource, LogSource
+
+    calls: list = []
+
+    class _ValidatingExecutor:
+        def read_logs_cmd(self, source, *, follow=False, tail=None):
+            return "printf 'native line\\n'"
+
+        def validate_log_source(self, source, *, cancel=None, timeout=None):
+            calls.append(source)
+
+    src = LogSource(
+        host="localhost",
+        container="c0",
+        role="head",
+        rank=0,
+        resource=LogResource(kind="job", namespace="ns", name="n", uid="u", instance="i"),
+    )
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(src,),
+        _executor=_ValidatingExecutor(),
+        _ssh_kwargs={},
+    )
+
+    out_path = tmp_path / "native.log"
+    assert target.dump(str(out_path), prefix=False) == 1
+    assert calls == [src, src]
+    assert out_path.read_text(encoding="utf-8").splitlines()[1] == "native line"
 
 
 def test_logs_forwards_host_container_and_cancel(tmp_path):

@@ -429,21 +429,6 @@ class LocalExecutor(Executor):
         parts.append(log_file)
         return " ".join(parts)
 
-    def logs_window_cmd(
-        self,
-        container_name: str,
-        *,
-        skip: int,
-        count: int,
-    ) -> str | None:
-        """Tail a window of the logfile that ``run_cmd`` writes to."""
-        log_file = _shell_path(self._resolve_log_file(container_name))
-        skip = max(0, int(skip))
-        count = max(0, int(count))
-        total = skip + count
-        awk_filter = f"awk -v s={skip} '{{b[NR]=$0}} END{{for(i=1;i<=NR-s;i++)print b[i]}}'"
-        return f"set -o pipefail; tail -n {total} {log_file} | {awk_filter}"
-
     def status_cmd(self, container_name: str) -> str:
         """Exit 0 for a live PID/group, 1 for absent/dead, 2 for acquisition failure."""
         pid_file = _shell_path(self._resolve_pid_file(container_name))

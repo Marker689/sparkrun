@@ -1816,9 +1816,10 @@ detail pane show **all** executors' workloads (docker + local + provider), not
 just the docker containers `host_monitor.sh`'s embedded `docker ps` used to
 report. The detail panel shows node meters on top and a selectable workload list below,
 which can open an in-panel live log stream (`LogView`) or dump logs to a local file (`DumpLogScreen`).
-Log viewing and dumping use an end-addressed window primitive (`read_logs_window_cmd`),
-rank-grouped multi-source back-scroll for multi-container workloads, and container-based scopes
-(1 container, 2 node, 3 cluster) with frame-derived equivalence deduplication.
+Log viewing pages older history through `LogTarget.page()` (an end-addressed read over the shared tail primitive),
+with rank-grouped multi-source back-scroll for multi-container workloads; dumping goes through `LogTarget.dump()`
+(atomic `.partial` publication). Scopes are container-based (1 container, 2 node, 3 cluster) with frame-derived
+equivalence deduplication.
 The `--simple` / `--json` telemetry-only paths still use `ClusterMonitor`
 directly.
 

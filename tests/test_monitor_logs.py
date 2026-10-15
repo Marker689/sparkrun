@@ -27,7 +27,6 @@ from sparkrun.cli._monitor_logs import (
     STREAM_ENDED_MARKER,
     LOADING_MARKER,
     LOG_RESTARTED_MARKER,
-    OLDER_UNAVAILABLE_MARKER,
     ScopeSummary,
     SelectionList,
     ViewState,
@@ -1232,7 +1231,7 @@ def test_log_pane_live_stream_end_key_resumes_following_under_load(monkeypatch, 
     class StreamingTarget(FakeLogTarget):
         def __init__(self, stream_rate: int):
             lines = [LogLine(host="h1", container="c1", text=f"initial {i}") for i in range(200)]
-            super().__init__(lines=lines, windowing_supported=False)
+            super().__init__(lines=lines)
             self.stream_rate = stream_rate
 
         def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
@@ -1323,7 +1322,7 @@ def test_log_pane_cluster_scope_stream_responsive_under_load(monkeypatch):
                 for i in range(200)
                 for s in sources
             ]
-            super().__init__(sources=sources, lines=lines, windowing_supported=False, runtime="vllm-distributed")
+            super().__init__(sources=sources, lines=lines, runtime="vllm-distributed")
             self.stream_rate = stream_rate
 
         def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
@@ -1400,7 +1399,7 @@ def test_log_pane_home_pageup_stay_scrolled_after_animation(monkeypatch):
             while cancel and not cancel.is_set():
                 time.sleep(0.01)
 
-    target = StreamingTarget(lines=lines, windowing_supported=False)
+    target = StreamingTarget(lines=lines)
     monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
 
     async def _assert_holds_scroll(pane: LogPane) -> None:
@@ -1561,7 +1560,6 @@ class FakeLogTarget:
         sources: Sequence[LogSource] | None = None,
         lines: Sequence[LogLine] | None = None,
         history: dict[tuple[str, str], list[LogLine]] | None = None,
-        windowing_supported: bool = True,
         error_on_follow: Exception | None = None,
         error_on_page: Exception | None = None,
         error_on_dump: Exception | None = None,
@@ -1570,7 +1568,6 @@ class FakeLogTarget:
         self.sources = tuple(sources or [LogSource(host="h1", container="c1", role="head", rank=0)])
         self._lines = list(lines or [])
         self._history = history or {}
-        self.windowing_supported = windowing_supported
         self.runtime: str | None = runtime
         self.error_on_follow = error_on_follow
         self.error_on_page = error_on_page
@@ -1956,32 +1953,6 @@ def test_log_pane_paging_and_windowing(monkeypatch):
             pane._trigger_page_fetch()
             await pilot.pause(0.05)
             assert len(target.page_calls) == calls_before
-
-    asyncio.run(_run())
-
-
-def test_log_pane_windowing_unsupported_and_error(monkeypatch):
-    import asyncio
-
-    target_no_win = FakeLogTarget(lines=[LogLine(host="h1", container="c1", role="head", rank=0, text="line 0")], windowing_supported=False)
-    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target_no_win)
-
-    async def _run():
-        pane = LogPane(
-            host="h1",
-            cluster_id="cid1",
-            container="c1",
-            scope=LogScope.CONTAINER,
-            summary=ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1),
-        )
-        app = _LogPaneTestApp(pane)
-        async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-            pane._trigger_page_fetch()
-            await pilot.pause(0.05)
-            # OLDER_UNAVAILABLE_MARKER displayed and page never called
-            assert OLDER_UNAVAILABLE_MARKER in pane.buffer._entries
-            assert len(target_no_win.page_calls) == 0
 
     asyncio.run(_run())
 
@@ -2445,7 +2416,7 @@ def test_log_pane_search_last_screen_and_following_wraparound(monkeypatch):
         marker = "TARGET" if i in (6, 36, 38, 39) else "other"
         lines.append(LogLine(host="h1", container="c1", text=f"line {i} {marker}"))
 
-    target = FakeLogTarget(lines=lines, windowing_supported=False)
+    target = FakeLogTarget(lines=lines)
     monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
 
     async def _run():
@@ -2457,6 +2428,14 @@ def test_log_pane_search_last_screen_and_following_wraparound(monkeypatch):
                     break
                 await pilot.pause(0.05)
             await pilot.pause(0.05)
+            # Exhaust the empty fake history so the wrap-to-top 'n' cannot start a
+            # page fetch (and shift search indices) mid-assertion.
+            pane._trigger_page_fetch()
+            for _ in range(40):
+                if START_OF_LOG_MARKER in pane.buffer._entries:
+                    break
+                await pilot.pause(0.05)
+            assert START_OF_LOG_MARKER in pane.buffer._entries
 
             # In default following state, user is at the bottom (lines ~20..39)
             assert pane.view_state.is_following is True
@@ -2470,39 +2449,40 @@ def test_log_pane_search_last_screen_and_following_wraparound(monkeypatch):
             await pilot.pause(0.05)
 
             assert len(pane.buffer.search_matches) == 4
-            # While at bottom, first match in/after viewport was selected (e.g. 36)
-            assert pane.log_view.current_match_entry in (36, 38, 39)
+            # Index-relative assertions: the START_OF_LOG_MARKER from history
+            # exhaustion shifts absolute buffer indices, match order does not.
+            matches = list(pane.buffer.search_matches)
+            # While at bottom, the first match in/after the viewport was selected
+            assert pane.log_view.current_match_entry in matches[1:]
 
-            # Press 'n' to step to 38
+            # Press 'n' to step to the next match
             await pilot.press("n")
-            assert pane.log_view.current_match_entry == 38
+            assert pane.log_view.current_match_entry == matches[2]
             status = str(pane.query_one("#log-status", Static).content)
             assert "match 3/4" in status
 
-            # Press 'n' to step to 39
+            # Press 'n' to step to the last match
             await pilot.press("n")
-            assert pane.log_view.current_match_entry == 39
+            assert pane.log_view.current_match_entry == matches[3]
             status = str(pane.query_one("#log-status", Static).content)
             assert "match 4/4" in status
 
-            # Press 'n': wraps around back to match 6 at the top!
+            # Press 'n': wraps around back to the first match at the top!
             await pilot.press("n")
-            # NearTop prepends OLDER_UNAVAILABLE_MARKER when scrolling to 6, shifting indices by 1
-            shifted_matches = list(pane.buffer.search_matches)
-            assert pane.log_view.current_match_entry == shifted_matches[0]
+            assert pane.log_view.current_match_entry == matches[0]
             status = str(pane.query_one("#log-status", Static).content)
             assert "match 1/4" in status
 
             # Press 'b': wraps backwards to the last match!
             await pilot.press("b")
-            assert pane.log_view.current_match_entry == shifted_matches[-1]
+            assert pane.log_view.current_match_entry == matches[-1]
             assert pane.log_view.is_at_bottom is True
             status = str(pane.query_one("#log-status", Static).content)
             assert "match 4/4" in status
 
             # Press 'b': steps to the second-to-last match
             await pilot.press("b")
-            assert pane.log_view.current_match_entry == shifted_matches[-2]
+            assert pane.log_view.current_match_entry == matches[-2]
             status = str(pane.query_one("#log-status", Static).content)
             assert "match 3/4" in status
 
@@ -2633,10 +2613,6 @@ def test_log_pane_paging_live_growth_trims_by_skip_count(monkeypatch):
             self.page_started = threading.Event()
             self.page_continue = threading.Event()
 
-        def before_page(self) -> None:
-            self.page_started.set()
-            self.page_continue.wait(timeout=2)
-
         def page(self, source: LogSource, *, skip: int, count: int = 500) -> list[LogLine]:
             self.page_calls.append({"source": source, "skip": skip, "count": count})
             total = len(self.full_log)
@@ -2655,6 +2631,19 @@ def test_log_pane_paging_live_growth_trims_by_skip_count(monkeypatch):
     async def _run():
         pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
         app = _LogPaneTestApp(pane)
+        # Block the worker's count capture (2nd call: the 1st is the trigger
+        # snapshot) so growth lands between the snapshot and the remote read.
+        real_count = pane._get_delivered_count
+        calls = {"n": 0}
+
+        def gated_count(source):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                target.page_started.set()
+                target.page_continue.wait(timeout=2)
+            return real_count(source)
+
+        monkeypatch.setattr(pane, "_get_delivered_count", gated_count)
         async with app.run_test(size=(80, 20)) as pilot:
             for _ in range(50):
                 n_lines = len([e for e in pane.buffer._entries if isinstance(e, LogLine)])
@@ -2967,7 +2956,7 @@ def test_log_pane_search_cursor_survives_or_clears_on_top_eviction(monkeypatch):
     import asyncio
 
     lines = [LogLine(host="h1", container="c1", text=f"{'err' if i in (5, 15) else 'ok'} {i}") for i in range(20)]
-    target = FakeLogTarget(lines=lines, windowing_supported=False)
+    target = FakeLogTarget(lines=lines)
     monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
 
     async def _run():
@@ -3755,7 +3744,7 @@ def test_log_pane_cluster_scope_unthrottled_burst_bounded(monkeypatch):
 
     class ClusterUnthrottledTarget(FakeLogTarget):
         def __init__(self):
-            super().__init__(sources=sources, windowing_supported=False, runtime="vllm-distributed")
+            super().__init__(sources=sources, runtime="vllm-distributed")
 
         def follow(self, tail: int | None = 200, cancel: threading.Event | None = None):
             i = 0
@@ -4036,13 +4025,12 @@ def test_log_pane_stale_generation_flush_is_noop(monkeypatch):
 
 
 def test_log_pane_short_log_windowing_up_and_home_stay_scrolled(monkeypatch):
-    """When windowing is supported, up/home on short logs (< 2 pages) and 300-line logs decouple and stay scrolled."""
+    """Up/home on short logs (< 2 pages) and 300-line logs decouple and stay scrolled."""
     import asyncio
 
     async def _check(line_count: int, key: str):
         target = FakeLogTarget(
             lines=[LogLine(host="h1", container="c1", stream="stdout", timestamp=None, text=f"line {i}") for i in range(line_count)],
-            windowing_supported=True,
         )
         monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
         pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
@@ -4066,7 +4054,7 @@ def test_log_pane_short_log_windowing_up_and_home_stay_scrolled(monkeypatch):
 
 
 def test_log_pane_windowing_page_success_and_failure_stay_scrolled(monkeypatch):
-    """Page fetch success and failure with windowing_supported=True stay SCROLLED and keep anchor."""
+    """Page fetch success and failure stay SCROLLED and keep anchor."""
     import asyncio
 
     class PagingTarget(FakeLogTarget):
@@ -4083,7 +4071,6 @@ def test_log_pane_windowing_page_success_and_failure_stay_scrolled(monkeypatch):
         target = PagingTarget(
             fail=False,
             lines=[LogLine(host="h1", container="c1", text=f"line {i}") for i in range(30)],
-            windowing_supported=True,
         )
         monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
         pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
@@ -4101,7 +4088,6 @@ def test_log_pane_windowing_page_success_and_failure_stay_scrolled(monkeypatch):
         target = PagingTarget(
             fail=True,
             lines=[LogLine(host="h1", container="c1", text=f"line {i}") for i in range(30)],
-            windowing_supported=True,
         )
         monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
         pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
@@ -4194,7 +4180,6 @@ def test_log_view_layout_clamp_does_not_trigger_page_fetch(monkeypatch):
 
     target = FakeLogTarget(
         lines=[LogLine(host="h1", container="c1", stream="stdout", timestamp=None, text=f"line {i}") for i in range(30)],
-        windowing_supported=True,
     )
     monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
 

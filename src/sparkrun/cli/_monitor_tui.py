@@ -59,12 +59,7 @@ def _container_count(activity: HostActivity | None) -> int:
     """Total containers/processes occupying the host (across its workloads)."""
     if activity is None:
         return 0
-    try:
-        # ponytail: a duck-typed test session (Mock) has no iterable workloads
-        workloads = list(activity.workloads)
-    except TypeError:
-        return 0
-    return sum(len(w.containers) or 1 for w in workloads)
+    return sum(len(w.containers) or 1 for w in activity.workloads)
 
 
 def _render_workloads(activity: Any, cache_dir: str | None = None) -> list[str]:
