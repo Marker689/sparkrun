@@ -1,4 +1,4 @@
-"""Tests for cli/_monitor_logs.py: pure log-view models, scope helpers, and SelectionList."""
+"""Tests for cli/_monitor_logs.py: pure log-view models, scope helpers, and monitor TUI widgets."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.geometry import Size
-from textual.widgets import Input, Static
+from textual.widgets import Input, OptionList, Static
 
 from sparkrun.api._errors import SparkrunError
 from sparkrun.cli._monitor_logs import (
@@ -28,7 +28,6 @@ from sparkrun.cli._monitor_logs import (
     LOADING_MARKER,
     LOG_RESTARTED_MARKER,
     ScopeSummary,
-    SelectionList,
     ViewState,
     WorkloadList,
     DumpLogScreen,
@@ -1460,93 +1459,61 @@ def test_log_pane_home_pageup_stay_scrolled_after_animation(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# SelectionList: Rule 0b Pilot App
+# OptionList: bar visible from init
 # ---------------------------------------------------------------------------
 
 
-class _SelectionListApp(App):
+class _OptionListApp(App):
     def __init__(self, *options, **kwargs):
         super().__init__(**kwargs)
         self.options = options
         self.selected_index = None
 
     def compose(self) -> ComposeResult:
-        yield SelectionList(*self.options, id="test-list")
+        yield OptionList(*self.options, id="test-list")
 
     def on_option_list_option_selected(self, event):
         self.selected_index = event.option_index
 
 
-def test_selection_list_first_down_reveals_and_moves():
+def test_option_list_highlight_bar_visible_from_init():
     async def _run():
-        app = _SelectionListApp("Row 0", "Row 1", "Row 2")
+        app = _OptionListApp("Row 0", "Row 1", "Row 2")
         async with app.run_test() as pilot:
-            sl = app.query_one(SelectionList)
-            assert sl.has_class("-concealed")
-            assert not sl.revealed
-            assert sl.highlighted == 0
+            ol = app.query_one(OptionList)
+            assert ol.highlighted == 0
 
-            # Rendered appearance while concealed: row 0 looks identical to unhighlighted row 1
-            strip0 = sl.render_line(0)
-            strip1 = sl.render_line(1)
-            styles0 = [seg.style for seg in strip0 if seg.text.strip()]
-            styles1 = [seg.style for seg in strip1 if seg.text.strip()]
-            assert styles0[0].bgcolor == styles1[0].bgcolor
-            assert styles0[0].color == styles1[0].color
-            assert not styles0[0].bold
+            # No keypress: the highlighted row already renders with a distinct bgcolor
+            styles0 = [seg.style for seg in ol.render_line(0) if seg.text.strip()]
+            styles1 = [seg.style for seg in ol.render_line(1) if seg.text.strip()]
+            assert styles0[0].bgcolor != styles1[0].bgcolor
 
-            # Press down: reveals highlight AND moves to row 1
+            # First down moves the selection: nothing is swallowed to reveal it
             await pilot.press("down")
-            assert not sl.has_class("-concealed")
-            assert sl.revealed
-            assert sl.highlighted == 1
-
-            # Rendered appearance after reveal: highlighted row 1 renders bold with highlighted bgcolor
-            strip1_rev = sl.render_line(1)
-            styles1_rev = [seg.style for seg in strip1_rev if seg.text.strip()]
-            assert styles1_rev[0].bold is True
-            assert styles1_rev[0].bgcolor != styles0[0].bgcolor
+            assert ol.highlighted == 1
 
     import asyncio
 
     asyncio.run(_run())
 
 
-def test_selection_list_first_enter_selects_default_row():
+def test_option_list_first_enter_selects_default_row():
     async def _run():
-        app = _SelectionListApp("Default 0", "Row 1", "Row 2")
+        app = _OptionListApp("Default 0", "Row 1", "Row 2")
         async with app.run_test() as pilot:
-            sl = app.query_one(SelectionList)
-            assert sl.has_class("-concealed")
-            assert not sl.revealed
-            assert sl.highlighted == 0
+            ol = app.query_one(OptionList)
+            assert ol.highlighted == 0
+            styles0 = [seg.style for seg in ol.render_line(0) if seg.text.strip()]
+            styles1 = [seg.style for seg in ol.render_line(1) if seg.text.strip()]
+            assert styles0[0].bgcolor != styles1[0].bgcolor
 
-            # Press enter: reveals and selects row 0
+            # Enter selects the default row with no prior reveal press
             await pilot.press("enter")
             assert app.selected_index == 0
-            assert sl.revealed
-            assert not sl.has_class("-concealed")
 
     import asyncio
 
     asyncio.run(_run())
-
-
-def test_selection_list_programmatic_reveal_and_conceal():
-    sl = SelectionList("A", "B", "C")
-    assert not sl.revealed
-    assert sl.has_class("-concealed")
-    sl.highlighted = 2
-
-    sl.reveal()
-    assert sl.revealed
-    assert not sl.has_class("-concealed")
-    assert sl.highlighted == 2
-
-    sl.conceal()
-    assert not sl.revealed
-    assert sl.has_class("-concealed")
-    assert sl.highlighted == 2
 
 
 # ---------------------------------------------------------------------------
@@ -2022,11 +1989,14 @@ def test_workload_list_pilot():
     async def _run():
         async with app.run_test() as pilot:
             assert wl.highlighted == 1  # first container row highlighted by default
-            assert wl.has_class("-concealed")
 
-            # First down reveals and moves to row 2 (second container)
+            # Bar visible at init: highlighted row differs from unhighlighted row 2
+            styles1 = [seg.style for seg in wl.render_line(1) if seg.text.strip()]
+            styles2 = [seg.style for seg in wl.render_line(2) if seg.text.strip()]
+            assert styles1[0].bgcolor != styles2[0].bgcolor
+
+            # First down moves to row 2 (second container); no reveal press consumed
             await pilot.press("down")
-            assert wl.revealed is True
             assert wl.highlighted == 2
 
             # Enter selects container
@@ -2088,7 +2058,7 @@ def test_workload_list_mouse_click_selects():
             await pilot.click(wl, offset=(click_x, gutter.top + 2))
             await pilot.pause(0.05)
             assert app.opened_log == ("h1", "cid1", "c2")
-            assert wl.revealed is True
+            assert wl.highlighted == 2
 
             # Clicking the disabled header row is a no-op
             app.opened_log = None
@@ -3081,15 +3051,16 @@ def test_dump_modal_distinct_scopes_navigation_and_selection(tmp_path, monkeypat
         app = _DumpModalTestApp(screen)
         async with app.run_test() as pilot:
             await pilot.pause(0.05)
-            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            scope_list = screen.query_one("#dump-scope-list", OptionList)
             assert scope_list.has_focus
-            # Concealed highlight on default row (0)
-            assert scope_list.has_class("-concealed")
+            # Bar visible on the default row (0) with no keypress
+            styles0 = [seg.style for seg in scope_list.render_line(0) if seg.text.strip()]
+            styles1 = [seg.style for seg in scope_list.render_line(1) if seg.text.strip()]
+            assert styles0[0].bgcolor != styles1[0].bgcolor
             assert scope_list.highlighted == 0
 
-            # First down reveals highlight and moves it to row 1 (Node)
+            # First down moves it to row 1 (Node): no reveal press consumed
             await pilot.press("down")
-            assert not scope_list.has_class("-concealed")
             assert scope_list.highlighted == 1
 
             # Enter selects Node (scope 2) and focuses path input
@@ -3121,7 +3092,7 @@ def test_dump_modal_scope_equivalence_drops_redundant_scope():
         app = _DumpModalTestApp(screen)
         async with app.run_test() as pilot:
             await pilot.pause(0.05)
-            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            scope_list = screen.query_one("#dump-scope-list", OptionList)
             # Scope 3 is omitted, 2 options remain
             assert len(scope_list._options) == 2
             # Default row is 1 (Node)
@@ -3167,7 +3138,7 @@ def test_dump_modal_path_regeneration_unless_edited():
 
             # Escape in input goes back to scope list
             await pilot.press("escape")
-            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            scope_list = screen.query_one("#dump-scope-list", OptionList)
             assert scope_list.has_focus
 
             # Select Cluster (scope 3)
@@ -3205,9 +3176,12 @@ def test_dump_modal_overwrite_list_cancel_and_overwrite(tmp_path, monkeypatch):
             await pilot.press("enter")
             await pilot.pause(0.05)
 
-            overwrite_list = screen.query_one("#dump-overwrite-list", SelectionList)
+            overwrite_list = screen.query_one("#dump-overwrite-list", OptionList)
             assert overwrite_list.display is True
-            assert overwrite_list.has_class("-concealed")
+            # Bar visible on the default Cancel row (1) with no keypress
+            styles1 = [seg.style for seg in overwrite_list.render_line(1) if seg.text.strip()]
+            styles0 = [seg.style for seg in overwrite_list.render_line(0) if seg.text.strip()]
+            assert styles1[0].bgcolor != styles0[0].bgcolor
             assert overwrite_list.highlighted == 1  # Cancel is default row
             assert overwrite_list.has_focus
 
@@ -3248,12 +3222,11 @@ def test_dump_modal_overwrite_list_cancel_and_overwrite(tmp_path, monkeypatch):
             await pilot.press("enter")
             await pilot.pause(0.05)
 
-            overwrite_list = screen.query_one("#dump-overwrite-list", SelectionList)
+            overwrite_list = screen.query_one("#dump-overwrite-list", OptionList)
             assert overwrite_list.display is True
 
-            # up moves from Cancel (1) to Overwrite (0)
+            # up moves from Cancel (1) to Overwrite (0): no reveal press consumed
             await pilot.press("up")
-            assert not overwrite_list.has_class("-concealed")
             assert overwrite_list.highlighted == 0
 
             # enter confirms overwrite
@@ -3447,7 +3420,7 @@ def test_dump_modal_blocks_second_submit_and_scope_change_while_dumping(tmp_path
             assert screen._dumping is True
             assert len(dump_calls) == 1
             assert inp.disabled is True
-            scope_list = screen.query_one("#dump-scope-list", SelectionList)
+            scope_list = screen.query_one("#dump-scope-list", OptionList)
             assert scope_list.disabled is True
 
             # Second submit while dumping is blocked

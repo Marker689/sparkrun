@@ -381,10 +381,12 @@ def test_cluster_monitor_app_detail_panel_and_node_selection(tmp_path):
             assert stats is not None
             assert wl is not None
 
-            # Initially h1 selected, WorkloadList is concealed (rule 0b)
+            # Initially h1 selected; list unfocused but its selection bar is already visible
             assert "h1" in str(stats.content)
-            assert not wl.revealed
-            assert wl.has_class("-concealed")
+            assert wl.highlighted == 1
+            styles1 = [seg.style for seg in wl.render_line(1) if seg.text.strip()]
+            styles2 = [seg.style for seg in wl.render_line(2) if seg.text.strip()]
+            assert styles1[0].bgcolor != styles2[0].bgcolor
             assert app._pinned_host is None
 
             # 2. Moving table cursor to h2 updates detail panel
@@ -409,8 +411,6 @@ def test_cluster_monitor_app_detail_panel_and_node_selection(tmp_path):
             await pilot.pause(0.05)
             assert app._pinned_host == "h1"
             assert wl.has_focus
-            assert wl.revealed is True
-            assert not wl.has_class("-concealed")
             assert wl.highlighted == 1  # first container c1
 
             # 5. Frame update refreshes meters while pinned and preserves highlight
@@ -512,7 +512,6 @@ def test_cluster_monitor_app_open_and_close_log_pane(tmp_path, monkeypatch):
             await pilot.press("escape")
             await pilot.pause(0.05)
             assert app._pinned_host is None
-            assert not wl.revealed
             assert table.has_focus
 
     asyncio.run(_run())
@@ -523,7 +522,7 @@ def test_cluster_monitor_app_table_refocus_closes_log_pane(tmp_path, monkeypatch
     import asyncio
     from textual.widgets import DataTable
     from sparkrun.cli._monitor_tui import ClusterMonitorApp
-    from sparkrun.cli._monitor_logs import WorkloadList, LogPane
+    from sparkrun.cli._monitor_logs import LogPane
 
     w1 = RunningWorkload(
         cluster_id="cid1",
@@ -543,7 +542,6 @@ def test_cluster_monitor_app_table_refocus_closes_log_pane(tmp_path, monkeypatch
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause(0.05)
             table = app.query_one("#host-table", DataTable)
-            wl = app.query_one("#workload-list", WorkloadList)
 
             # Pin h1 and open log pane
             await pilot.press("enter")  # select h1
@@ -563,7 +561,6 @@ def test_cluster_monitor_app_table_refocus_closes_log_pane(tmp_path, monkeypatch
             assert dummy_target.follow_cancel.is_set()
             assert len(app.query("#log-pane")) == 0
             assert app._pinned_host is None
-            assert not wl.revealed
             assert table.has_focus
 
     asyncio.run(_run())
