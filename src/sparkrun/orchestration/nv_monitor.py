@@ -232,6 +232,9 @@ def start_nv_monitor_ssh(
     )
 
     try:
+        # stdin=/dev/null: this is a long-lived `ssh` tunnel, and `ssh` reads and
+        # forwards stdin.  Inheriting a caller's terminal would silently consume
+        # its keystrokes for the entire monitoring session, so the child gets none.
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,

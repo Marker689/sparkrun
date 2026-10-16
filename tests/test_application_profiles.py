@@ -757,8 +757,17 @@ def test_monitor_tui_follows_the_application_profile():
 
     assert "No alternate-test workloads running" in _render_workloads(SimpleNamespace(workloads=[]), None)[0]
 
+    class _EmptySession:
+        def frame(self):
+            from sparkrun.core.monitoring import MonitorFrame
+
+            return MonitorFrame(hosts=())
+
+        def close(self) -> None:
+            pass
+
     async def title():
-        app = ClusterMonitorApp(Mock(), ["h1"], interval=60)
+        app = ClusterMonitorApp(_EmptySession(), ["h1"], interval=60)
         async with app.run_test():
             return app.title
 

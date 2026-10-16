@@ -9,16 +9,24 @@ not just the docker containers the old telemetry-embedded ``docker ps`` saw.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from collections.abc import Callable
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Footer, Header, Static
 
 from sparkrun.core.application_profile import get_application_profile
-from sparkrun.core.monitoring import HostActivity, MonitorSample
+from sparkrun.cli._monitor_logs import (
+    DumpLogScreen,
+    LogPane,
+    LogScope,
+    WorkloadList,
+    workload_rows,
+)
+from sparkrun.core.monitoring import HostActivity, MonitorFrame, MonitorSample
 
 if TYPE_CHECKING:
     from sparkrun.api import LiveMonitorSession
@@ -54,54 +62,12 @@ def _container_count(activity: HostActivity | None) -> int:
     return sum(len(w.containers) or 1 for w in activity.workloads)
 
 
-def _render_workloads(activity: HostActivity, cache_dir: str | None) -> list[str]:
-    """Render the workload list from occupancy (all executors), with metadata.
-
-    Sourced from :attr:`HostActivity.workloads` (``api.status``) rather than the
-    telemetry stream, so ``local``/provider workloads appear.  Job metadata
-    (recipe/model/tp) is loaded per cluster_id; per-container name/role/status
-    comes straight from the snapshot.
-    """
-    from sparkrun.orchestration.job_metadata import load_job_metadata
-
-    lines: list[str] = []
-    total = _container_count(activity)
-    if not activity.workloads:
-        lines.append("  [dim]No %s workloads running[/dim]" % get_application_profile().command)
-        return lines
-
-    lines.append(f"  [bold]Workloads ({total}):[/bold]")
-    for w in activity.workloads:
-        meta = load_job_metadata(w.cluster_id, cache_dir=cache_dir) or {}
-        recipe = w.recipe_name or meta.get("recipe", "")
-        runtime = w.runtime_name or meta.get("runtime", "")
-        model = meta.get("model", "")
-        tp = meta.get("tensor_parallel", "")
-
-        rank_tag = f" [dim]×{w.ranks_on_host}[/dim]" if w.ranks_on_host > 1 else ""
-        lines.append(f"    [bold]{w.cluster_id}[/bold]{rank_tag}")
-
-        for c in w.containers:
-            role_tag = f" [dim]({c.role})[/dim]" if c.role and c.role != "?" else ""
-            status_tag = f" [dim]— {c.status}[/dim]" if c.status else ""
-            lines.append(f"      {c.name}{role_tag}{status_tag}")
-
-        meta_parts: list[str] = []
-        if recipe:
-            meta_parts.append(f"recipe=[bold]{recipe}[/bold]")
-        if model:
-            meta_parts.append(f"model={model}")
-        if runtime:
-            meta_parts.append(f"runtime={runtime}")
-        if tp:
-            meta_parts.append(f"tp={tp}")
-        if meta_parts:
-            lines.append(f"      [dim]{', '.join(meta_parts)}[/dim]")
-    return lines
+def _render_workloads(activity: Any, cache_dir: str | None = None) -> list[str]:
+    return [r.text for r in workload_rows(activity, cache_dir=cache_dir)]
 
 
-def _render_detail(host: str, activity: HostActivity | None, cache_dir: str | None = None) -> str:
-    """Build the Rich-markup string for the detail panel."""
+def _render_node_stats(host: str, activity: HostActivity | None) -> str:
+    """Build the Rich-markup string for the node stats in the detail panel."""
     if activity is None:
         return f"[dim]{host}: connecting…[/dim]"
 
@@ -114,11 +80,7 @@ def _render_detail(host: str, activity: HostActivity | None, cache_dir: str | No
         lines.append(f"  [yellow]status: {activity.status_error}[/yellow]")
 
     if s is None:
-        # No telemetry yet / no telemetry provider for this substrate — still
-        # show occupancy so the host isn't blank.
         lines.append("  [dim]telemetry unavailable[/dim]")
-        lines.append("")
-        lines.extend(_render_workloads(activity, cache_dir))
         return "\n".join(lines)
 
     cpu = _pct(s.cpu_usage_pct)
@@ -177,7 +139,6 @@ def _render_detail(host: str, activity: HostActivity | None, cache_dir: str | No
         except (ValueError, TypeError):
             pass
 
-    lines.extend(_render_workloads(activity, cache_dir))
     return "\n".join(lines)
 
 
@@ -263,6 +224,10 @@ class ClusterMonitorApp(App):
         max-height: 60%;
         margin: 0 1;
     }
+    Screen.-logs-open #host-table,
+    .-logs-open #host-table {
+        max-height: 25%;
+    }
     #detail-panel {
         height: 1fr;
         margin: 0 1;
@@ -270,9 +235,19 @@ class ClusterMonitorApp(App):
         padding: 0 1;
         overflow-y: auto;
     }
+    #node-stats {
+        height: auto;
+    }
+    #node-body {
+        height: 1fr;
+    }
+    LogPane {
+        min-height: 8;
+    }
     """
 
     BINDINGS = [
+        Binding("enter", "select_node", "Logs"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit", show=False),
     ]
@@ -283,14 +258,20 @@ class ClusterMonitorApp(App):
         hosts: list[str],
         interval: int = 2,
         cache_dir: str | None = None,
-        **kwargs,
+        cluster: str | None = None,
+        sctx: Any = None,
+        **kwargs: Any,
     ):
         super().__init__(**kwargs)
         self._session = session
         self._hosts = list(hosts)
         self._interval = interval
         self._cache_dir = cache_dir
+        self._cluster = cluster
+        self._sctx = sctx
         self._selected_host: str | None = self._hosts[0] if self._hosts else None
+        self._pinned_host: str | None = None
+        self._frame: MonitorFrame | None = None
 
     # -- layout -------------------------------------------------------------
 
@@ -298,7 +279,10 @@ class ClusterMonitorApp(App):
         yield Header()
         with Vertical():
             yield DataTable(id="host-table", cursor_type="row")
-            yield Static(id="detail-panel", markup=True)
+            with Vertical(id="detail-panel"):
+                yield Static(id="node-stats", markup=True)
+                with Vertical(id="node-body"):
+                    yield WorkloadList(id="workload-list", host=self._selected_host or "")
         yield Footer()
 
     # -- lifecycle ----------------------------------------------------------
@@ -316,7 +300,8 @@ class ClusterMonitorApp(App):
         for host in self._hosts:
             table.add_row(host, "-", *(["-"] * len(_TABLE_COLS)), key=host)
 
-        # The session is already collecting (opened before the App); just tick.
+        # Immediate initial refresh, then tick periodically.
+        self._refresh()
         self.set_interval(1.0, self._refresh)
 
     def on_unmount(self) -> None:
@@ -327,7 +312,115 @@ class ClusterMonitorApp(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.row_key is not None:
             self._selected_host = str(event.row_key.value)
+            if self._pinned_host is None:
+                self._refresh_detail()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self.action_select_node()
+
+    def action_select_node(self) -> None:
+        try:
+            table = self.query_one("#host-table", DataTable)
+            if not table.has_focus:
+                return
+        except Exception:
+            return
+        host = self._selected_host
+        if not host:
+            return
+        frame = getattr(self, "_frame", None)
+        activity = frame.for_host(host) if frame is not None else None
+        if not activity or not activity.workloads:
+            self.notify(f"No sparkrun workloads on {host}")
+            return
+
+        self._pinned_host = host
+        wl = self.query_one("#workload-list", WorkloadList)
+        wl.reveal()
+        wl.focus()
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if getattr(event.control, "id", None) == "host-table":
+            if self._is_log_open():
+                self._close_log_pane(refocus_list=False)
+            self._pinned_host = None
+            try:
+                wl = self.query_one("#workload-list", WorkloadList)
+                wl.conceal()
+            except Exception:
+                pass
             self._refresh_detail()
+
+    def on_workload_list_back_to_hosts(self, event: WorkloadList.BackToHosts) -> None:
+        self._pinned_host = None
+        wl = self.query_one("#workload-list", WorkloadList)
+        wl.conceal()
+        self.query_one("#host-table", DataTable).focus()
+
+    def on_workload_list_open_log(self, event: WorkloadList.OpenLog) -> None:
+        wl = self.query_one("#workload-list", WorkloadList)
+        wl.display = False
+
+        pane = LogPane(
+            host=event.host,
+            cluster_id=event.cluster_id,
+            container=event.container,
+            scope=LogScope.CONTAINER,
+            frame=self._frame,
+            cluster=self._cluster,
+            cache_dir=self._cache_dir,
+            sctx=self._sctx,
+            id="log-pane",
+        )
+        self.query_one("#node-body", Vertical).mount(pane)
+        self.add_class("-logs-open")
+        self.screen.add_class("-logs-open")
+        pane.focus()
+
+    def on_log_pane_closed(self, event: LogPane.Closed) -> None:
+        self._close_log_pane(refocus_list=True)
+
+    def _close_log_pane(self, refocus_list: bool = True) -> None:
+        try:
+            pane = self.query_one("#log-pane", LogPane)
+            pane.close()
+            pane.remove()
+        except Exception:
+            pass
+        self.remove_class("-logs-open")
+        self.screen.remove_class("-logs-open")
+        try:
+            wl = self.query_one("#workload-list", WorkloadList)
+            wl.display = True
+            if refocus_list:
+                wl.focus()
+        except Exception:
+            pass
+
+    def _is_log_open(self) -> bool:
+        try:
+            return bool(self.query("#log-pane"))
+        except Exception:
+            return False
+
+    def on_workload_list_request_dump(self, event: WorkloadList.RequestDump) -> None:
+        self._open_dump_screen(event.host, event.cluster_id, event.container, event.scope)
+
+    def on_log_pane_request_dump(self, event: LogPane.RequestDump) -> None:
+        self._open_dump_screen(event.host, event.cluster_id, event.container, event.scope)
+
+    def _open_dump_screen(self, host: str, cluster_id: str, container: str, scope: LogScope) -> None:
+        screen = DumpLogScreen(
+            host=host,
+            cluster_id=cluster_id,
+            container=container,
+            default_scope=scope,
+            frame=self._frame,
+            cluster=self._cluster,
+            cache_dir=self._cache_dir,
+            sctx=self._sctx,
+        )
+        self.push_screen(screen)
 
     # -- refresh ------------------------------------------------------------
 
@@ -362,11 +455,23 @@ class ClusterMonitorApp(App):
                 table.update_cell(host, key, cell_fn(s))
 
     def _refresh_detail(self) -> None:
-        panel = self.query_one("#detail-panel", Static)
-        host = self._selected_host
+        stats = self.query_one("#node-stats", Static)
+        host = self._pinned_host or self._selected_host
         if host is None:
-            panel.update("[dim]No host selected[/dim]")
+            stats.update("[dim]No host selected[/dim]")
             return
         frame = getattr(self, "_frame", None)
         activity = frame.for_host(host) if frame is not None else None
-        panel.update(_render_detail(host, activity, cache_dir=self._cache_dir))
+        stats.update(_render_node_stats(host, activity))
+
+        try:
+            wl = self.query_one("#workload-list", WorkloadList)
+            rows = workload_rows(activity, cache_dir=self._cache_dir)
+            wl.set_rows(rows, host=host)
+        except Exception:
+            pass
+
+    def action_quit(self) -> None:
+        if self._is_log_open():
+            return
+        self.exit()

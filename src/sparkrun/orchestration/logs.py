@@ -72,21 +72,27 @@ def build_read_command(
     bare ``docker`` and prints its help instead of the logs. Quoting collapses
     *command* back into the single word ``bash -c`` expects.
     """
+    command = executor.read_logs_cmd(source, follow=follow, tail=tail)
+    return _dispatch_argv(source, command, ssh_kwargs)
+
+
+def _dispatch_argv(source: LogSource, command: str | list[str], ssh_kwargs: dict | None = None) -> list[str]:
     from sparkrun.orchestration.ssh import build_ssh_cmd, should_run_locally
     from sparkrun.utils.shell import quote
 
-    kwargs = dict(ssh_kwargs or {})
-    command = executor.read_logs_cmd(source, follow=follow, tail=tail)
     if isinstance(command, list):
-        return command
-
+        return list(command)
+    kwargs = dict(ssh_kwargs or {})
     if should_run_locally(source.host, kwargs.get("ssh_user")):
         return ["bash", "-c", command]
     return build_ssh_cmd(source.host, **kwargs) + ["bash", "-c", quote(command)]
 
 
 def _spawn(cmd: list[str], *, merge_stderr: bool = True) -> subprocess.Popen:
-    # Background SSH readers must not consume the CLI/TUI's keystrokes.
+    # stdin MUST be /dev/null. Log readers are spawned from the monitor TUI, whose
+    # fd 0 is the terminal; an inherited stdin lets the ssh children of cluster-scope
+    # reads (remote hosts) consume the user's keystrokes. Local readers never read
+    # stdin, but redirecting all of them is uniform and costs nothing.
     return subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -480,4 +486,8 @@ def print_log_sources(
         logger.info("\nLog following stopped.")
 
 
-__all__ = ["build_read_command", "print_log_sources", "read_log_sources"]
+__all__ = [
+    "build_read_command",
+    "print_log_sources",
+    "read_log_sources",
+]

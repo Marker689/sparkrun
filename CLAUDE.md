@@ -131,7 +131,9 @@ The CLI was split from a single `cli.py` into a package for maintainability. The
 | `_check.py`       | `setup check` command — non-destructive readiness probe of a cluster's hosts against the wizard's setup steps (ordered `SETUP_CHECKS` registry; seed of a future per-platform step system with paired check/apply stages)                                          |
 | `_proxy.py`       | `proxy` command group — thin renderer over `api.proxy` (see Inference Gateway below)                                                                                                                                                                              |
 | `_proxy_systemd.py` | `proxy systemd` group: install/status/uninstall the proxy's systemd unit (see Inference Gateway below)                                                                                                                                                               |
-| `_monitor_tui.py` | Textual TUI for `cluster monitor`                                                                                                                                                                                                                                 |
+| `_monitor_tui.py` | Textual TUI for `cluster monitor` (detail panel with node meters, selectable workloads, in-panel log streaming, and dump modal)                                                                                                                                   |
+| `_monitor_logs.py`| Pure log-view models, Line API `LogView`, `LogPane`, `WorkloadList` and `DumpLogScreen` for monitor TUI                                                                                                                                                           |
+| `_monitor_colorize.py` | Log colorizers: `LogColorizer` base class with one child per runtime, a shared rule vocabulary (levels, severities, phases, status codes, numbers and rates, ids, ranks), the runtime-name map with content-sniffing fallback, and `unclaimed_ranges` for the dim baseline. No `rich` and no `textual` import                                                                                        |
 | `ext.py`          | Plugin CLI-command extension point — `register_cli_command(cmd, parent=…)` + `PluggableGroup` (see below)                                                                                                                                                          |
 
 **Plugin CLI commands** (`cli/ext.py`): external plugins add Click commands via
@@ -1812,7 +1814,13 @@ util/mem/temp) — abstracted the same way status is, by **substrate scope**:
 The `cluster monitor` TUI drives a `LiveMonitorSession`, so its Jobs column and
 detail pane show **all** executors' workloads (docker + local + provider), not
 just the docker containers `host_monitor.sh`'s embedded `docker ps` used to
-report. The `--simple` / `--json` telemetry-only paths still use `ClusterMonitor`
+report. The detail panel shows node meters on top and a selectable workload list below,
+which can open an in-panel live log stream (`LogView`) or dump logs to a local file (`DumpLogScreen`).
+Log viewing pages older history through `LogTarget.page()` (an end-addressed read over the shared tail primitive),
+with rank-grouped multi-source back-scroll for multi-container workloads; dumping goes through `LogTarget.dump()`
+(atomic `.partial` publication). Scopes are container-based (1 container, 2 node, 3 cluster) with frame-derived
+equivalence deduplication.
+The `--simple` / `--json` telemetry-only paths still use `ClusterMonitor`
 directly.
 
 ### Transport Layer (`transports/`)

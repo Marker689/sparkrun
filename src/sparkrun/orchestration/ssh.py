@@ -857,6 +857,11 @@ def start_log_capture(
         cmd = ssh_base + logs_cmd.split()
 
     try:
+        # stdin=/dev/null: a background log reader must never inherit the caller's
+        # terminal.  Over SSH this child is `ssh`, which reads and forwards stdin;
+        # spawned from a program that owns fd 0 (the monitor TUI) it would silently
+        # consume that program's input for as long as it runs.  `docker logs -f`
+        # itself never reads stdin, so redirecting it costs nothing.
         return subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,

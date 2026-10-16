@@ -18,11 +18,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 import math
+import os
 import threading
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 
 from sparkrun.api._errors import JobNotFound, SparkrunError
-from sparkrun.core.log_source import SCOPE_ALL, SCOPE_HEAD, LogLine, LogSource
+from sparkrun.core.log_source import SCOPE_ALL, SCOPE_HEAD, LogLine, LogSource, source_sort_key
 
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
@@ -54,9 +55,17 @@ class LogTarget:
     _executor: Executor = field(repr=False, compare=False)
     _ssh_kwargs: dict = field(repr=False, compare=False)
     _cancel: threading.Event | None = field(default=None, repr=False, compare=False)
+    _host: str | None = field(default=None, repr=False, compare=False)
+    _container: str | None = field(default=None, repr=False, compare=False)
+    _scope: str = field(default=SCOPE_HEAD, repr=False, compare=False)
 
     def read(
-        self, *, follow: bool = False, tail: int | None = None, cancel: threading.Event | None = None, check: bool = True
+        self,
+        *,
+        follow: bool = False,
+        tail: int | None = None,
+        cancel: threading.Event | None = None,
+        check: bool = True,
     ) -> Generator[LogLine, None, None]:
         """Read lazily, rank-grouped or interleaved in arrival order when following.
 
@@ -80,7 +89,11 @@ class LogTarget:
         )
 
     def follow(
-        self, *, tail: int | None = 200, cancel: threading.Event | None = None, check: bool = True
+        self,
+        *,
+        tail: int | None = 200,
+        cancel: threading.Event | None = None,
+        check: bool = True,
     ) -> Generator[LogLine, None, None]:
         """Alias for ``read(follow=True, ...)``, initially tailing 200 lines."""
         return self.read(follow=True, tail=tail, cancel=cancel, check=check)
@@ -129,6 +142,152 @@ class LogTarget:
             return []
         return page[: max(0, total - skip)]
 
+    def dump(
+        self,
+        path: str,
+        *,
+        overwrite: bool = False,
+        cancel: threading.Event | None = None,
+        prefix: bool | str | Callable[[LogLine], str] | None = None,
+    ) -> int:
+        """Stream complete logs for this target to *path*.
+
+        Writes to ``<path>.partial`` and atomically renames to *path* upon completion.
+        If *cancel* (or the target's own cancellation event) is set during dumping,
+        the partial file is removed and the partial line count is returned (callers
+        should check ``cancel.is_set()`` to distinguish cancellation from completion).
+        Refuses an existing path unless *overwrite* is True.
+        """
+
+        if not path:
+            raise SparkrunError("Dump path cannot be empty")
+
+        resolved_path = os.path.abspath(os.path.expanduser(str(os.fspath(path))))
+        if os.path.exists(resolved_path) and not overwrite:
+            raise SparkrunError(f"Target file {path!r} already exists (use overwrite=True to overwrite)")
+
+        parent = os.path.dirname(resolved_path)
+        if not os.path.isdir(parent):
+            raise SparkrunError(f"Directory {parent!r} does not exist")
+
+        cancel = self._cancel if cancel is None else cancel
+        partial_path = f"{resolved_path}.partial"
+
+        multi_host = len({s.host for s in self.sources}) > 1
+        if prefix is None:
+            if len(self.sources) > 1:
+                is_cluster_scope = self._host is None
+                include_host = multi_host or is_cluster_scope
+
+                def _prefix_fn(line: LogLine) -> str:
+                    parts = []
+                    if include_host:
+                        parts.append(line.host)
+                    parts.append(line.role)
+                    if line.rank is not None:
+                        parts.append(str(line.rank))
+                    return f"[{'/'.join(parts)}]"
+
+                effective_prefix = _prefix_fn
+            else:
+                effective_prefix = False
+        else:
+            effective_prefix = prefix
+
+        sorted_sources = sorted(self.sources, key=source_sort_key)
+        if self._container and self._host:
+            scope_desc = f"container ({self._host}/{self._container})"
+        elif self._container:
+            scope_desc = f"container ({self._container})"
+        elif self._host:
+            scope_desc = f"node ({self._host})"
+        else:
+            scope_desc = f"cluster ({self._scope})"
+        src_labels = ", ".join(s.label for s in sorted_sources)
+        header = f"# workload: {self.workload_id} | scope: {scope_desc} | sources: {src_labels}\n"
+
+        try:
+            fd = os.open(partial_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as e:
+            raise SparkrunError(f"A log dump to {path!r} is already in progress ({partial_path!r} exists)") from e
+        except OSError as e:
+            raise SparkrunError(f"Cannot write to {path!r}: {e}") from e
+
+        partial_created = True
+        completed = False
+        try:
+            try:
+                fh = open(fd, "w", encoding="utf-8")
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+
+            try:
+                fh.write(header)
+                count = 0
+                reader = self.read(follow=False, tail=None, cancel=cancel, check=True)
+                try:
+                    for line in reader:
+                        if callable(effective_prefix):
+                            p = effective_prefix(line)
+                            if p:
+                                fh.write(f"{p} " if not p.endswith(" ") else p)
+                            fh.write(f"{line.text}\n")
+                        elif effective_prefix is True:
+                            tag = f"[{line.host}/{line.role}]" if multi_host else f"[{line.role}]"
+                            fh.write(f"{tag} {line.text}\n")
+                        elif isinstance(effective_prefix, str) and effective_prefix:
+                            fh.write(f"{effective_prefix} " if not effective_prefix.endswith(" ") else effective_prefix)
+                            fh.write(f"{line.text}\n")
+                        else:
+                            fh.write(f"{line.text}\n")
+                        count += 1
+                finally:
+                    reader.close()
+            finally:
+                fh.close()
+
+            if cancel is not None and cancel.is_set():
+                try:
+                    os.unlink(partial_path)
+                except OSError:
+                    pass
+                completed = True
+                return count
+
+            if overwrite:
+                try:
+                    os.replace(partial_path, resolved_path)
+                except OSError as e:
+                    raise SparkrunError(f"Cannot finalize log dump to {path!r}: {e}") from e
+            else:
+                try:
+                    try:
+                        os.link(partial_path, resolved_path)
+                        os.unlink(partial_path)
+                    except (AttributeError, OSError) as link_err:
+                        if isinstance(link_err, FileExistsError):
+                            raise SparkrunError(f"Target file {path!r} already exists (use overwrite=True to overwrite)") from link_err
+                        if os.path.exists(resolved_path):
+                            raise SparkrunError(f"Target file {path!r} already exists (use overwrite=True to overwrite)") from link_err
+                        os.replace(partial_path, resolved_path)
+                except SparkrunError:
+                    raise
+                except OSError as e:
+                    raise SparkrunError(f"Cannot finalize log dump to {path!r}: {e}") from e
+
+            completed = True
+            return count
+        finally:
+            if not completed and partial_created:
+                try:
+                    os.unlink(partial_path)
+                except OSError:
+                    pass
+
 
 def logs(
     workload_id: str | None = None,
@@ -157,7 +316,7 @@ def logs(
     """
     if tail is not None:
         _nonnegative_int("tail", tail)
-    return open_log_target(
+    target = open_log_target(
         workload_id,
         recipe=recipe,
         hosts=hosts,
@@ -170,7 +329,10 @@ def logs(
         cache_dir=cache_dir,
         sctx=sctx,
         cancel=cancel,
-    ).read(follow=follow, tail=tail, check=check)
+    )
+    if follow:
+        return target.follow(tail=tail, cancel=cancel, check=check)
+    return target.read(follow=False, tail=tail, cancel=cancel, check=check)
 
 
 def open_log_target(
@@ -294,7 +456,18 @@ def open_log_target(
             sources = []
         else:
             sources = _filter_sources(sources, cluster_id, host=host, container=container, source_id=source_id)
-        return LogTarget(cluster_id, runtime.runtime_name, tuple(sources), executor, {}, cancel)
+
+        return LogTarget(
+            workload_id=cluster_id,
+            runtime=runtime.runtime_name,
+            sources=tuple(sources),
+            _executor=executor,
+            _ssh_kwargs={},
+            _cancel=cancel,
+            _host=host,
+            _container=container,
+            _scope=effective_scope,
+        )
 
     sources = runtime.log_sources(
         cluster_id,
@@ -327,7 +500,17 @@ def open_log_target(
     # or cache claims, even when all selected containers are confirmed absent.
     _verify_log_source_alive(executor, all_sources, ssh_kwargs, cluster_id, cache_dir, scope=effective_scope)
 
-    return LogTarget(cluster_id, runtime.runtime_name, tuple(sources), executor, dict(ssh_kwargs), cancel)
+    return LogTarget(
+        workload_id=cluster_id,
+        runtime=runtime.runtime_name,
+        sources=tuple(sources),
+        _executor=executor,
+        _ssh_kwargs=dict(ssh_kwargs),
+        _cancel=cancel,
+        _host=host,
+        _container=container,
+        _scope=effective_scope,
+    )
 
 
 def _filter_sources(sources, cluster_id, *, host=None, container=None, source_id=None):
@@ -493,8 +676,8 @@ def _detail_suffix(info) -> str:
 def _hint_block(info) -> str:
     """Render an executor's investigation hints as an indented block.
 
-    The commands are the executor's — ``docker logs`` on a Docker host,
-    ``kubectl logs`` on k8s, a plain ``cat`` for a ``local`` job — so this only
+    The executor provides hints as short, copy-pasteable shell commands
+    (e.g. ``docker logs <name>``, ``docker inspect <name>``) and this helper
     lays them out.  An executor with nothing useful to suggest contributes
     nothing rather than a heading with an empty list under it.
     """
