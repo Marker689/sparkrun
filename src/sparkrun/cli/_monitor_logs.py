@@ -37,10 +37,9 @@ from textual.widgets.option_list import Option
 
 from sparkrun.api import LogTarget, SparkrunError, open_log_target
 from sparkrun.cli._monitor_colorize import colorize_log_spans, unclaimed_ranges
-from sparkrun.core.log_source import SCOPE_ALL, source_sort_key
+from sparkrun.core.log_source import SCOPE_ALL, LogLine, LogSource, source_sort_key
 from sparkrun.core.monitoring import HostActivity, MonitorFrame
 from sparkrun.orchestration.job_metadata import load_job_metadata
-from sparkrun.orchestration.logs import LogLine, LogSource
 
 logger = logging.getLogger(__name__)
 

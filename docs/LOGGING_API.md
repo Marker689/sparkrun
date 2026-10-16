@@ -151,14 +151,15 @@ Use `target.runtime` for colorizer selection, `target.sources` for source
 selection, and `source_sort_key` for consistent rank ordering. Follow, finite
 export, and paging all reuse this target and reader stack.
 
-File paths, export headers/prefixes, overwrite policy, partial-file handling,
-and atomic publication belong in the frontend. Keep export contents streaming;
-do not buffer the entire log to call a whole-file write helper. Atomic
-no-overwrite publication must never fall back to a check followed by replacement.
-`LogTarget.dump(path, *, overwrite=False, cancel=None, prefix=None)` streams a
-complete finite read to `path`: it writes `<path>.partial` with `O_EXCL` and mode
-`0600`, finalizes by `link`/`replace`, refuses an existing target without
-`overwrite`, and removes the partial on cancel or failure. There is no
+To export to a file, use `LogTarget.dump(path, *, overwrite=False, cancel=None,
+prefix=None)` rather than writing your own. It streams a complete finite read
+through `read()` (never buffering the whole log), writes `<path>.partial` with
+`O_EXCL` and mode `0600` (logs can carry credentials), and removes the partial on
+cancel or failure. With `overwrite` it publishes by `replace`; without it, by
+`link`, which refuses an existing target atomically. Publication never falls back
+to a check followed by replacement: where hard links are unavailable, Windows
+uses `rename` (which also refuses an existing target) and other platforms raise.
+The frontend chooses the path, the overwrite policy and the prefix. There is no
 `windowing_supported` property — paging is always available for a target with
 sources (see *Page older history*).
 

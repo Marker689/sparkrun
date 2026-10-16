@@ -72,17 +72,14 @@ def build_read_command(
     bare ``docker`` and prints its help instead of the logs. Quoting collapses
     *command* back into the single word ``bash -c`` expects.
     """
-    command = executor.read_logs_cmd(source, follow=follow, tail=tail)
-    return _dispatch_argv(source, command, ssh_kwargs)
-
-
-def _dispatch_argv(source: LogSource, command: str | list[str], ssh_kwargs: dict | None = None) -> list[str]:
     from sparkrun.orchestration.ssh import build_ssh_cmd, should_run_locally
     from sparkrun.utils.shell import quote
 
-    if isinstance(command, list):
-        return list(command)
     kwargs = dict(ssh_kwargs or {})
+    command = executor.read_logs_cmd(source, follow=follow, tail=tail)
+    if isinstance(command, list):
+        return command
+
     if should_run_locally(source.host, kwargs.get("ssh_user")):
         return ["bash", "-c", command]
     return build_ssh_cmd(source.host, **kwargs) + ["bash", "-c", quote(command)]
@@ -486,8 +483,4 @@ def print_log_sources(
         logger.info("\nLog following stopped.")
 
 
-__all__ = [
-    "build_read_command",
-    "print_log_sources",
-    "read_log_sources",
-]
+__all__ = ["build_read_command", "print_log_sources", "read_log_sources"]

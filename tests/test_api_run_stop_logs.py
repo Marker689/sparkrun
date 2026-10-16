@@ -1096,6 +1096,66 @@ def test_log_target_dump_no_overwrite_race_atomic_link(tmp_path):
     assert not partial_path.exists()
 
 
+def test_log_target_dump_without_hard_links_refuses_rather_than_check_and_replace(tmp_path, monkeypatch):
+    """No hard links on POSIX: refuse to publish instead of exists() + replace(), and clean up."""
+    import errno
+
+    from sparkrun.core.log_source import LogSource, MODE_FILE
+
+    head_src = LogSource(host="localhost", container="c0", role="head", rank=0, mode=MODE_FILE)
+    target = api.LogTarget(
+        workload_id="sparkrun_dump123",
+        runtime="vllm-distributed",
+        sources=(head_src,),
+        _executor=_RealShellDumpExecutor(),
+        _ssh_kwargs={},
+    )
+
+    def no_links(src, dst):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    replaced = []
+    monkeypatch.setattr("sparkrun.api._logs.os.link", no_links)
+    monkeypatch.setattr("sparkrun.api._logs.os.replace", lambda *a: replaced.append(a))
+    out_path = tmp_path / "nolinks.log"
+
+    with pytest.raises(api.SparkrunError, match="without risking an overwrite"):
+        target.dump(str(out_path), overwrite=False)
+
+    assert replaced == []
+    assert not out_path.exists()
+    assert not (tmp_path / "nolinks.log.partial").exists()
+
+
+def test_publish_without_overwrite_windows_rename_fallback(tmp_path, monkeypatch):
+    """Without hard links on Windows, rename publishes and an existing target is refused."""
+    import errno
+
+    from sparkrun.api import _logs
+
+    def no_links(src, dst):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(_logs.os, "link", no_links)
+    monkeypatch.setattr(_logs.os, "name", "nt")
+
+    partial = tmp_path / "out.log.partial"
+    partial.write_text("body\n")
+    out = tmp_path / "out.log"
+    _logs._publish_without_overwrite(str(partial), str(out), str(out))
+    assert out.read_text() == "body\n"
+    assert not partial.exists()
+
+    def rename_exists(src, dst):
+        raise FileExistsError(errno.EEXIST, "exists")
+
+    monkeypatch.setattr(_logs.os, "rename", rename_exists)
+    partial.write_text("second\n")
+    with pytest.raises(api.SparkrunError, match="already exists"):
+        _logs._publish_without_overwrite(str(partial), str(out), str(out))
+    assert out.read_text() == "body\n"
+
+
 def test_log_target_dump_missing_directory(tmp_path):
     """dump() raises SparkrunError if parent directory is missing, no partial created."""
     from sparkrun.core.log_source import LogSource

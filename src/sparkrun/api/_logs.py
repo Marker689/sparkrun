@@ -39,6 +39,39 @@ def _nonnegative_int(name: str, value: int) -> None:
         raise ValueError("%s must be a non-negative integer" % name)
 
 
+def _publish_without_overwrite(partial_path: str, resolved_path: str, path: str) -> None:
+    """Atomically publish *partial_path* at *resolved_path*, refusing an existing target.
+
+    Never an existence check followed by a replace: another writer can create the
+    target in between, and the replace would destroy it.
+    """
+    exists = SparkrunError(f"Target file {path!r} already exists (use overwrite=True to overwrite)")
+    try:
+        os.link(partial_path, resolved_path)
+    except FileExistsError as e:
+        raise exists from e
+    except (AttributeError, OSError) as link_err:
+        # No hard links here (FAT, some SMB mounts). Windows rename refuses an
+        # existing target atomically; POSIX rename replaces it, so there is no
+        # safe no-overwrite fallback there.
+        if os.name != "nt":
+            raise SparkrunError(
+                f"Cannot publish log dump to {path!r} without risking an overwrite ({link_err}); retry with overwrite=True"
+            ) from link_err
+        try:
+            os.rename(partial_path, resolved_path)
+        except FileExistsError as e:
+            raise exists from e
+        except OSError as e:
+            raise SparkrunError(f"Cannot finalize log dump to {path!r}: {e}") from e
+        return
+    # Published. A leftover partial would only block the next dump to this path.
+    try:
+        os.unlink(partial_path)
+    except OSError as e:
+        logger.warning("Log dump published to %s but %s could not be removed: %s", path, partial_path, e)
+
+
 @dataclass(frozen=True)
 class LogTarget:
     """Resolved workload log sources; obtain one with :func:`open_log_target`.
@@ -264,20 +297,7 @@ class LogTarget:
                 except OSError as e:
                     raise SparkrunError(f"Cannot finalize log dump to {path!r}: {e}") from e
             else:
-                try:
-                    try:
-                        os.link(partial_path, resolved_path)
-                        os.unlink(partial_path)
-                    except (AttributeError, OSError) as link_err:
-                        if isinstance(link_err, FileExistsError):
-                            raise SparkrunError(f"Target file {path!r} already exists (use overwrite=True to overwrite)") from link_err
-                        if os.path.exists(resolved_path):
-                            raise SparkrunError(f"Target file {path!r} already exists (use overwrite=True to overwrite)") from link_err
-                        os.replace(partial_path, resolved_path)
-                except SparkrunError:
-                    raise
-                except OSError as e:
-                    raise SparkrunError(f"Cannot finalize log dump to {path!r}: {e}") from e
+                _publish_without_overwrite(partial_path, resolved_path, path)
 
             completed = True
             return count
@@ -676,8 +696,8 @@ def _detail_suffix(info) -> str:
 def _hint_block(info) -> str:
     """Render an executor's investigation hints as an indented block.
 
-    The executor provides hints as short, copy-pasteable shell commands
-    (e.g. ``docker logs <name>``, ``docker inspect <name>``) and this helper
+    The commands are the executor's — ``docker logs`` on a Docker host,
+    ``kubectl logs`` on k8s, a plain ``cat`` for a ``local`` job — so this only
     lays them out.  An executor with nothing useful to suggest contributes
     nothing rather than a heading with an empty list under it.
     """
