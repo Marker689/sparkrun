@@ -273,8 +273,9 @@ aliases:
 
 gateways:
   litellm:
-    router_settings:
-      routing_strategy: least-busy
+    balancing: least-in-flight
+    # router_settings:          # optional, emitted verbatim
+    #   num_retries: 2
 ```
 
 For LiteLLM, `LITELLM_MASTER_KEY` supplies the key when no explicit master key is
@@ -357,11 +358,47 @@ queries report what the process is serving. These are LiteLLM implementation
 details, not requirements for other gateway plugins.
 
 `gateways.litellm.router_settings` is emitted verbatim as LiteLLM's
-`router_settings`, for example `routing_strategy: least-busy` in place of the
-default `simple-shuffle`, which picks a random backend per request regardless of
-load. LiteLLM reads it only at startup, so a change is applied like a model
-change: the next sync or discovery sweep regenerates the config and restarts the
-proxy.
+`router_settings`. LiteLLM reads it only at startup, so a change is applied like
+a model change: the next sync or discovery sweep regenerates the config and
+restarts the proxy.
+
+By default LiteLLM routes with `simple-shuffle`, a random backend per request,
+blind to how many requests each one is already serving. With several backends
+serving the same model, long requests can pile up on one node while others sit
+idle. Don't use LiteLLM's own `routing_strategy: least-busy` for this with the
+pinned release: its in-flight counter is only updated from a hook the proxy's
+async request path never calls, so every backend reads 0 and every request goes
+to the first deployment in the list.
+
+`gateways.litellm.balancing: least-in-flight` balances on load instead. sparkrun
+writes its balancer (`plugins/litellm/balancer.py`) beside the generated config
+as `sparkrun_balancer.py` and registers it under `litellm_settings.callbacks`.
+For each request it picks, among the deployments LiteLLM offers for the
+requested model, the backend with the fewest requests in flight, breaking ties
+at random:
+
+- Load is counted per backend address, so a model and its aliases share one
+  view of each backend. Only the requested model's deployments are candidates,
+  so a request never lands on a backend serving a different model.
+- Each HTTP request holds its own slot, keyed by LiteLLM's per-request call id,
+  so concurrent requests that share an `x-litellm-session-id` or
+  `x-litellm-trace-id` are still counted separately.
+- The slot is reserved when the backend is picked and released when the
+  request succeeds or fails, including after retries. A reservation that sees
+  neither expires after 15 minutes.
+- A retry or fallback goes to a backend that request has not tried yet, when
+  the model has one.
+- A backend whose request just failed on its side (anything but a malformed or
+  oversized request: 400, 413, 422) is ranked after the others for 10 seconds.
+  Without this, a backend that errors instantly would always look the least
+  loaded and draw every new request.
+- Counts are local to the proxy process. Traffic sent straight to a backend,
+  bypassing the proxy, is not seen.
+
+Removing the key restores LiteLLM's routing and deletes `sparkrun_balancer.py`;
+changing it restarts the proxy like `router_settings` does. With `balancing`
+set, `router_settings.routing_strategy` has no effect (the balancer hands
+LiteLLM a single backend), and sparkrun warns when both are configured.
 
 ## Python API and gateway plugins
 

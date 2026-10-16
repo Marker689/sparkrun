@@ -2097,6 +2097,155 @@ class TestRouterSettings:
         assert yaml.safe_load(path.read_text())["router_settings"] == {"routing_strategy": "least-busy"}
 
 
+class TestBalancing:
+    """``gateways.litellm.balancing`` registers sparkrun's balancer callback with LiteLLM."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warnings(self, monkeypatch):
+        from sparkrun.plugins.litellm import engine
+
+        monkeypatch.setattr(engine, "_warned", set())
+
+    def test_build_registers_callback_only_for_known_policy(self):
+        from sparkrun.plugins.litellm.engine import build_litellm_config
+
+        assert "callbacks" not in build_litellm_config([_ep("m")], master_key=None)["litellm_settings"]
+        config = build_litellm_config([_ep("m")], master_key=None, balancing="least-in-flight")
+        assert config["litellm_settings"]["callbacks"] == ["sparkrun_balancer.handler"]
+        assert config["litellm_settings"]["drop_params"] is True
+        assert "callbacks" not in build_litellm_config([_ep("m")], master_key=None, balancing="bogus")["litellm_settings"]
+
+    def test_write_config_places_module_beside_config(self, tmp_path: Path):
+        from sparkrun.plugins.litellm import balancer
+        from sparkrun.plugins.litellm.engine import BALANCER_MODULE_FILE, build_litellm_config, write_config
+
+        path = write_config(
+            build_litellm_config([_ep("m")], master_key=None, balancing="least-in-flight"), tmp_path / "litellm_config.yaml"
+        )
+        module = path.parent / BALANCER_MODULE_FILE
+        assert module.read_text() == Path(balancer.__file__).read_text()
+        if os.name == "posix":
+            assert module.stat().st_mode & 0o777 == 0o600
+
+        other = tmp_path / "plain"
+        other.mkdir()
+        write_config(build_litellm_config([_ep("m")], master_key=None), other / "litellm_config.yaml")
+        assert not (other / BALANCER_MODULE_FILE).exists()
+
+        # Turning balancing off removes the module it no longer references.
+        write_config(build_litellm_config([_ep("m")], master_key=None), path)
+        assert not module.exists()
+        assert not [p.name for p in tmp_path.iterdir() if p.name.startswith(".")]
+
+    def test_engine_reads_balancing_from_its_namespace(self, state_dir: Path):
+        from sparkrun.plugins.litellm.engine import ProxyEngine
+        from sparkrun.proxy.config import ProxyConfig
+
+        path = ProxyConfig().config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+
+        path.write_text("balancing: least-in-flight\n")
+        assert engine._configured_balancing() is None
+        path.write_text("gateways:\n  litellm:\n    balancing: least-in-flight\n")
+        assert engine._configured_balancing() == "least-in-flight"
+        path.write_text("gateways:\n  litellm:\n    balancing: least-busy\n")
+        assert engine._configured_balancing() is None
+
+    @pytest.mark.parametrize("value", ["[least-in-flight]", "{policy: least-in-flight}", "3"])
+    def test_non_string_balancing_is_ignored_not_raised(self, state_dir: Path, value: str, caplog):
+        from sparkrun.plugins.litellm.engine import ProxyEngine
+        from sparkrun.proxy.config import ProxyConfig
+
+        path = ProxyConfig().config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("gateways:\n  litellm:\n    balancing: %s\n" % value)
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        with caplog.at_level("WARNING"):
+            assert engine._configured_balancing() is None
+        assert "Ignoring gateways.litellm.balancing" in caplog.text
+        written, _, _ = engine.prepare_config([_ep("m")], {}, write=True)
+        assert "callbacks" not in yaml.safe_load(written.read_text())["litellm_settings"]
+
+    def test_balancing_overrides_a_routing_strategy_that_would_bypass_it(self):
+        """LiteLLM calls the filter only on its async routing path, which usage-based-routing (v1) skips."""
+        from sparkrun.plugins.litellm.engine import BALANCING_ROUTING_STRATEGY, build_litellm_config
+
+        settings = {"routing_strategy": "usage-based-routing", "num_retries": 2}
+        config = build_litellm_config([_ep("m")], master_key=None, router_settings=settings, balancing="least-in-flight")
+        assert config["router_settings"] == {"routing_strategy": BALANCING_ROUTING_STRATEGY, "num_retries": 2}
+        assert settings["routing_strategy"] == "usage-based-routing"
+        plain = build_litellm_config([_ep("m")], master_key=None, router_settings=settings)
+        assert plain["router_settings"]["routing_strategy"] == "usage-based-routing"
+        retries_only = build_litellm_config([_ep("m")], master_key=None, router_settings={"num_retries": 2}, balancing="least-in-flight")
+        assert retries_only["router_settings"] == {"num_retries": 2}
+
+    def test_routing_strategy_alongside_balancing_warns_once(self, state_dir: Path, caplog):
+        from sparkrun.plugins.litellm.engine import ProxyEngine
+
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        with (
+            patch.object(engine, "_configured_router_settings", return_value={"routing_strategy": "least-busy"}),
+            patch.object(engine, "_configured_balancing", return_value="least-in-flight"),
+            caplog.at_level("WARNING"),
+        ):
+            for _ in range(3):  # the auto-discover daemon re-reads proxy.yaml every sweep
+                engine.prepare_config([_ep("m")], {}, write=False)
+        assert caplog.text.count("routing_strategy 'least-busy' is replaced with 'simple-shuffle'") == 1
+
+        caplog.clear()
+        for settings in ({"num_retries": 2}, {"routing_strategy": "simple-shuffle"}):
+            with (
+                patch.object(engine, "_configured_router_settings", return_value=settings),
+                patch.object(engine, "_configured_balancing", return_value="least-in-flight"),
+                caplog.at_level("WARNING"),
+            ):
+                engine.prepare_config([_ep("m")], {}, write=False)
+        assert "is replaced with" not in caplog.text
+
+    def test_changed_balancing_alone_rewrites_and_restarts(self, state_dir: Path):
+        from sparkrun.plugins.litellm.engine import BALANCER_MODULE_FILE, ProxyEngine, build_litellm_config, write_config
+
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        ep = _ep("test/model")
+        write_config(build_litellm_config([ep], master_key="sk-test"), engine.config_path)
+
+        with (
+            patch.object(type(engine), "is_running", return_value=True),
+            patch.object(engine, "_configured_router_settings", return_value={}),
+            patch.object(engine, "_configured_balancing", return_value="least-in-flight"),
+            patch.object(engine, "_restart_proxy", return_value=1234) as mock_restart,
+        ):
+            assert engine.apply_desired_state([ep]) == (0, 0)
+            mock_restart.assert_called_once()
+            on_disk = yaml.safe_load(engine.config_path.read_text())
+            assert on_disk["litellm_settings"]["callbacks"] == ["sparkrun_balancer.handler"]
+            assert (engine.config_path.parent / BALANCER_MODULE_FILE).exists()
+
+            mock_restart.reset_mock()
+            engine.apply_desired_state([ep])
+            mock_restart.assert_not_called()
+
+        with (
+            patch.object(type(engine), "is_running", return_value=True),
+            patch.object(engine, "_configured_router_settings", return_value={}),
+            patch.object(engine, "_configured_balancing", return_value=None),
+            patch.object(engine, "_restart_proxy", return_value=1234) as mock_restart,
+        ):
+            engine.apply_desired_state([ep])
+            mock_restart.assert_called_once()
+            assert "callbacks" not in yaml.safe_load(engine.config_path.read_text())["litellm_settings"]
+
+    def test_prepare_config_includes_balancing(self, state_dir: Path):
+        from sparkrun.plugins.litellm.engine import BALANCER_MODULE_FILE, ProxyEngine
+
+        engine = ProxyEngine(state_dir=state_dir, master_key="sk-test")
+        with patch.object(engine, "_configured_balancing", return_value="least-in-flight"):
+            path, _, _ = engine.prepare_config([_ep("test/model")], {}, write=True)
+        assert yaml.safe_load(path.read_text())["litellm_settings"]["callbacks"] == ["sparkrun_balancer.handler"]
+        assert (path.parent / BALANCER_MODULE_FILE).exists()
+
+
 @pytest.fixture(autouse=True)
 def _gateway_provider(loaded_litellm_plugin):
     pass
