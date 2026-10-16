@@ -1416,7 +1416,12 @@ class Recipe:
         Used by resolvers so they naturally see CLI overrides without
         per-resolver maintenance.
         """
-        v = self._applied_overrides.get(key)
+        from sparkrun.core.dotted_overrides import dotted_root, fold_dotted_overrides, is_dotted_override
+
+        applied = self._applied_overrides
+        if any(is_dotted_override(k) and dotted_root(k) == key for k in applied):
+            applied = fold_dotted_overrides(applied, self.defaults.get)
+        v = applied.get(key)
         if v is not None:
             return v
         return self.defaults.get(key, fallback)
@@ -1519,14 +1524,23 @@ class Recipe:
         ``declared=True`` builds from the declared defaults, without matched
         ``overrides:`` layers: what ``when.config`` predicates read, and what
         the workload identity hashes.
+
+        Dotted override keys (``speculative_config.method``) are folded into
+        their root here, over the lower layers, so they refine whatever value
+        the chain would otherwise hold — including a matched ``overrides:``
+        layer (see :mod:`sparkrun.core.dotted_overrides`).
         """
+        from sparkrun.core.dotted_overrides import fold_dotted_overrides
+
         base = dict(self.declared_defaults if declared else self.defaults)
         base.setdefault("model", self.model)
         if self.model_revision:
             base.setdefault("model_revision", self.model_revision)
         _rmp = getattr(getattr(self, "cluster_config", None), "resolved_model_path", None)
         base.setdefault("resolved_model_path", _rmp or self.model)
-        return Variables(sources=(cli_overrides or {}, user_config or {}, base), env_placement=EnvPlacement.IGNORED)
+        user_config = user_config or {}
+        cli_overrides = fold_dotted_overrides(cli_overrides, lambda root: user_config.get(root, base.get(root)))
+        return Variables(sources=(cli_overrides, user_config, base), env_placement=EnvPlacement.IGNORED)
 
     def render_command(self, config_chain: Variables) -> str | None:
         """Render the command template with values from the config chain.

@@ -1491,7 +1491,13 @@ def recipe_override_options(f):
     unusual and the flag is primarily for advanced users / tests; novice
     users should drive DP via recipe defaults.
     """
-    f = click.option("--option", "-o", "options", multiple=True, help="Override any recipe default: -o key=value (repeatable)")(f)
+    f = click.option(
+        "--option",
+        "-o",
+        "options",
+        multiple=True,
+        help="Override any recipe default: -o key=value; -o key.field=value sets one field of a mapping (repeatable)",
+    )(f)
     f = click.option("--image", default=None, help="Override container image")(f)
     f = click.option("--max-model-len", type=int, default=None, help="Override maximum model context length")(f)
     f = click.option(
@@ -1532,23 +1538,27 @@ def _apply_recipe_overrides(
     the override construction + runtime resolution to the console-free
     core resolver.
     """
+    from sparkrun.core.dotted_overrides import DottedOverrideError
     from sparkrun.core.resolve import apply_recipe_overrides
 
     # Validate the option tuple up-front for the CLI's error message + exit
     # code; the core resolver re-parses the (now-valid) tuple identically.
     _parse_options(options)
 
-    return apply_recipe_overrides(
-        options,
-        tensor_parallel=tensor_parallel,
-        pipeline_parallel=pipeline_parallel,
-        data_parallel=data_parallel,
-        gpu_mem=gpu_mem,
-        max_model_len=max_model_len,
-        image=image,
-        recipe=recipe,
-        **kwargs,
-    )
+    try:
+        return apply_recipe_overrides(
+            options,
+            tensor_parallel=tensor_parallel,
+            pipeline_parallel=pipeline_parallel,
+            data_parallel=data_parallel,
+            gpu_mem=gpu_mem,
+            max_model_len=max_model_len,
+            image=image,
+            recipe=recipe,
+            **kwargs,
+        )
+    except DottedOverrideError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 def dry_run_option(f):

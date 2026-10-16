@@ -780,11 +780,22 @@ def _is_internal_config_key(key: str) -> bool:
     """True for keys excluded from the unmapped-key report regardless of runtime.
 
     A leading underscore marks a value sparkrun injects into the config chain
-    mid-launch (``_gguf_model_path``, ``_mmproj_path``); a dot marks a
-    namespaced override (``-o env.KEY=VALUE``) routed by prefix rather than
-    looked up as a whole key.
+    mid-launch (``_gguf_model_path``, ``_mmproj_path``); a routed prefix
+    (``-o env.KEY=VALUE``) is handled outside the config chain. A dotted path
+    (``speculative_config.method``) is *not* internal: an override is judged by
+    its root (:func:`_config_key_root`), since a typo'd root drops it as surely
+    as an unknown whole key.
     """
-    return key.startswith("_") or "." in key
+    from sparkrun.core.dotted_overrides import ROUTED_PREFIXES
+
+    return key.startswith("_") or key.startswith(ROUTED_PREFIXES)
+
+
+def _config_key_root(key: str) -> str:
+    """The config key *key* reaches: its root for a dotted override, else itself."""
+    from sparkrun.core.dotted_overrides import dotted_root, is_dotted_override
+
+    return dotted_root(key) if is_dotted_override(key) else key
 
 
 def _referenced_placeholders(recipe: Recipe) -> set[str]:
@@ -954,7 +965,10 @@ def report_unmapped_config_keys(
       template — the documented escape hatch for runtime-specific keys
       (RECIPES.md), and the reason this cannot just diff against the flag
       map,
-    * internal or namespaced (see :func:`_is_internal_config_key`).
+    * internal or prefix-routed (see :func:`_is_internal_config_key`).
+
+    A dotted override (``-o speculative_config.method=…``) counts by its root;
+    a dotted ``defaults:`` key is never folded, so it is reported.
 
     Returns the warning lines (logged too unless *log* is False — the
     ``recipe validate`` path renders them itself and would otherwise emit
@@ -986,13 +1000,15 @@ def report_unmapped_config_keys(
     override_keys = set(override_keys_of()) if callable(override_keys_of) else set()
     consumed = set(known) | BASE_CONSUMED_CONFIG_KEYS | _referenced_placeholders(recipe) | override_keys
 
-    def _unmapped(keys) -> list[str]:
-        return sorted(k for k in keys if not _is_internal_config_key(k) and k not in consumed)
+    def _unmapped(keys, *, by_root: bool = False) -> list[str]:
+        return sorted(k for k in keys if not _is_internal_config_key(k) and (_config_key_root(k) if by_root else k) not in consumed)
 
     # An override is reported separately from a recipe default: it was typed
     # at this invocation, so "did nothing" is a failed instruction rather
     # than an inherited defect, and the fix is the user's to make.
-    override_keys = _unmapped(overrides or {})
+    # Only overrides fold dotted paths into their root; a dotted `defaults:` key
+    # is looked up whole, so nothing consumes it.
+    override_keys = _unmapped(overrides or {}, by_root=True)
     default_keys = _unmapped(k for k in recipe.defaults if k not in (overrides or {}))
 
     messages: list[str] = []

@@ -98,10 +98,25 @@ def test_placeholder_referenced_from_another_default_is_not_reported():
     assert _joined(recipe, AtlasRuntime()) == ""
 
 
-@pytest.mark.parametrize("key", ["_gguf_model_path", "env.VLLM_USE_V1", "runtime_cache.enabled"])
-def test_internal_and_namespaced_keys_are_not_reported(key):
-    """Underscore-prefixed values are sparkrun-injected; dotted ones route by prefix."""
+@pytest.mark.parametrize("key", ["_gguf_model_path", "env.VLLM_USE_V1"])
+def test_internal_and_routed_keys_are_not_reported(key):
+    """Underscore-prefixed values are sparkrun-injected; ``env.`` routes by prefix."""
     assert _joined(_recipe(), AtlasRuntime(), {key: "x"}) == ""
+
+
+def test_dotted_override_is_judged_by_its_root():
+    """``-o root.field`` reaches the command exactly when ``root`` does.
+
+    Every dotted key used to be exempt, so a typo'd root vanished silently.
+    """
+    assert _joined(_recipe(), AtlasRuntime(), {"lm_head_dtype.x": "y"}) == ""
+    report = _joined(_recipe(), AtlasRuntime(), {"lm_head_dytpe.x": "y"})
+    assert "-o lm_head_dytpe.x" in report
+
+
+def test_dotted_default_is_reported():
+    """Only overrides fold into their root; a dotted ``defaults:`` key reaches nothing."""
+    assert "lm_head_dtype.x" in _joined(_recipe(defaults={"lm_head_dtype.x": "y"}), AtlasRuntime())
 
 
 # --- The opt-in contract ---

@@ -734,6 +734,15 @@ Without a `command:` template, values are rendered like this:
   ```
   Other JSON-valued flags work the same way: `compilation_config`, `attention_config`, `hf_overrides`,
   `limit_mm_per_prompt`, `default_chat_template_kwargs`, `model_loader_extra_config`, `engram_config`.
+
+  To change one field from the CLI, use a dotted key. The other fields are kept, nested fields work, and a JSON-string
+  value is refined the same way:
+  ```bash
+  sparkrun run my-recipe -o speculative_config.method=dflash -o speculative_config.draft_load_config.load_format=auto
+  ```
+  The value must already be a mapping, whether from the recipe, a matched `overrides:` layer, or an earlier
+  `-o key={...}`. Otherwise the option is refused, so give the whole value as JSON instead. A changed
+  `speculative_config.model` is the drafter that gets distributed. `env.KEY` is not a path: it sets container env.
 - **Plain values** are passed as written. A `$HOME/...` path still expands on the host.
 - **Booleans** emit the bare flag when true. For vLLM flags that are on by default (`enable_prefix_caching`,
   `enable_chunked_prefill`, `async_scheduling`, `enable_flashinfer_autotune`, `scheduler_reserve_full_isl`), `false`

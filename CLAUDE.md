@@ -530,8 +530,15 @@ Three things are deliberately *not* reported, and each was load-bearing in
 getting the false-positive rate to zero across all 292 cached registry
 recipes: keys referenced as a `{placeholder}` in `command:` **or in another
 default's value** (`render_template` iterates, so one default may exist only
-to feed another), `_`-prefixed keys sparkrun injects mid-launch, and dotted
-keys routed by prefix (`-o env.KEY=VALUE`). It warns rather than raises
+to feed another), `_`-prefixed keys sparkrun injects mid-launch, and keys
+routed by prefix (`-o env.KEY=VALUE`). A dotted override path
+(`-o speculative_config.method=…`, `core/dotted_overrides.py`) is *not*
+exempt: it is judged by its root. It is folded into that root only where the
+config chain is built (`build_config_chain`, `_effective_default`), never at
+`-o` parse time, because matched `overrides:` layers land in `defaults` later
+and a merge taken earlier would replace them. A root with no mapping value
+is refused at parse time; every dotted key used to be exempt, so
+`-o speculative_config.method=x` was silently dropped. It warns rather than raises
 because registries version independently of sparkrun — an unknown key is
 routinely a *newer* recipe, and hard-failing would strand a user between two
 published artifacts. It runs from `launch_inference` after the platform

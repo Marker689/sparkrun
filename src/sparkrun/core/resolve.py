@@ -99,6 +99,7 @@ def apply_recipe_overrides(
     ``ValueError`` (the CLI wrapper validates and reports these before
     calling this function, so they should not reach here in practice).
     """
+    from sparkrun.core.dotted_overrides import DottedOverrideError, fold_dotted_overrides
     from sparkrun.utils import coerce_value
 
     if recipe is None:
@@ -150,6 +151,13 @@ def apply_recipe_overrides(
             recipe.env[k[4:]] = str(v)
             recipe._cli_env_keys.add(k[4:])
             del overrides[k]
+
+    # Dotted keys stay as typed (they are folded where the config chain is
+    # built); a path through a non-mapping is refused now, not mid-launch.
+    try:
+        fold_dotted_overrides(overrides, recipe.defaults.get)
+    except DottedOverrideError as exc:
+        raise DottedOverrideError("Invalid --option: %s" % exc) from exc
 
     # Resolve runtime with overrides visible to resolvers
     recipe.resolve(overrides)
