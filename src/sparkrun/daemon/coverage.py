@@ -2,9 +2,11 @@
 
 from sparkrun.daemon.ops import SPECS, OPTION_SPECS
 from sparkrun.daemon.registry_ops import REGISTRY_ACTIONS
+from sparkrun.daemon.model_cache_ops import BINDINGS as MODEL_CACHE_BINDINGS
 
 API_OPERATIONS = {target: name for name, target, *_ in SPECS}
 API_OPERATIONS.update({target: name for name, target, *_ in OPTION_SPECS})
+API_OPERATIONS.update({binding.target: binding.name for binding in MODEL_CACHE_BINDINGS})
 API_OPERATIONS["validate_recipe"] = "recipes.validate"
 API_OPERATIONS["configure_registry"] = " / ".join("catalog.registries." + action for action in REGISTRY_ACTIONS)
 API_OPERATIONS.update(
@@ -30,16 +32,6 @@ API_OPERATIONS.update(
         "tailscale.join": "tailscale.join",
         "tailscale.down": "tailscale.down",
         "tailscale.expose": "tailscale.expose",
-        "model_cache.inspect_model": "model_cache.inspect",
-        "model_cache.resolve_manifest": "model_cache.resolve",
-        "model_cache.repair_model": "model_cache.repair",
-        "model_cache.import_manifest": "model_cache.import",
-        "model_cache.inventory_cache": "model_cache.list",
-        "model_cache.prune_cache": "model_cache.prune",
-        "model_cache.pin_revision": "model_cache.pin",
-        "model_cache.reconcile_claim": "model_cache.reconcile",
-        "model_cache.delete_model": "model_cache.delete",
-        "model_cache.adopt_cache": "model_cache.adopt",
     }
 )
 EXCLUSIONS = {

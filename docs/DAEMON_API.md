@@ -136,7 +136,7 @@ SSE `error` record. Each request resolves its target anew; there is no target-ID
 registry or paging route. See [LOGGING_API.md](LOGGING_API.md) for matching,
 cancellation, ordering, and Python paging contracts.
 
-This snapshot contains **96 operations: 85 core, 8 K8s and 3 SparkRoute**.
+This snapshot contains **97 operations: 86 core, 8 K8s and 3 SparkRoute**.
 
 ## Domain vocabulary
 
@@ -227,13 +227,14 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `model_cache.delete` | `/v1/model_cache/delete` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision: string`, `dry_run: boolean`, `force: boolean`, `allowed_revisions: string[]` |
+| `model_cache.adopt` | `/v1/model_cache/adopt` | job / admin | auto | `model: string`, `revision: string`, `endpoint: string`, `cache_dir!: string`, `hosts: string[]`, `all_models: boolean`, `dry_run: boolean`, `offline: boolean`, `last_used: string`, `pinned: boolean` |
+| `model_cache.delete` | `/v1/model_cache/delete` | job / admin | auto | `model!: string`, `revision: string`, `cache_dir!: string`, `hosts: string[]`, `dry_run: boolean`, `force: boolean`, `allowed_revisions: string[]` |
 | `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]` |
-| `model_cache.pin` | `/v1/model_cache/pin` | job / operate | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision!: string`, `endpoint: string`, `pinned: boolean` |
+| `model_cache.pin` | `/v1/model_cache/pin` | job / operate | auto | `model!: string`, `revision!: string`, `endpoint: string`, `cache_dir!: string`, `hosts: string[]`, `pinned: boolean` |
 | `model_cache.prune` | `/v1/model_cache/prune` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `dry_run: boolean`, `min_age_days: number`, `max_bytes: integer`, `min_free_bytes: integer` |
-| `model_cache.reconcile` | `/v1/model_cache/reconcile` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision!: string`, `endpoint: string`, `claim!: string`, `confirm_inactive!: boolean` |
+| `model_cache.reconcile` | `/v1/model_cache/reconcile` | job / admin | auto | `model!: string`, `revision!: string`, `endpoint: string`, `cache_dir!: string`, `hosts: string[]`, `claim!: string`, `confirm_inactive!: boolean` |
 | `model_cache.repair` | `/v1/model_cache/repair` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `local_cache_dir: string`, `transfer_mode: string`, `checksums: boolean`, `offline: boolean`, `dry_run: boolean` |
 | `model_cache.resolve` | `/v1/model_cache/resolve` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir: string` |
 
@@ -397,6 +398,14 @@ python scripts/render-daemon-api.py --sparkroute-checkout /path/to/sparkrun-spar
 Use `--check` to detect drift without writing. The prose/infrastructure table is
 reviewed separately when routes or semantics change. `/v1/ops` and OpenAPI expose
 full request/result schemas for the running installation.
+
+Model-cache operations use explicit bindings in
+`src/sparkrun/daemon/model_cache_ops.py`. Each binding declares forwarded fields,
+request-object adaptation, server-supplied parameters and intentional exclusions;
+registration, execution and API coverage consume that declaration. Adding a Python
+parameter requires classifying it in the binding and its contract tests. Signature
+inspection does not automatically expose new network inputs. Operation-specific
+schema constraints and the existing result allowlists remain explicit.
 
 ## Diagnostic bundles
 

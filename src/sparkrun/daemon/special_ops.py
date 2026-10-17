@@ -11,6 +11,11 @@ from sparkrun.daemon.ops import unavailable_prompt
 
 
 def execute(name, arguments, sctx, prompt=unavailable_prompt):
+    if name.startswith("model_cache."):
+        from sparkrun.daemon.model_cache_ops import BINDINGS, invoke
+
+        return invoke(next(binding for binding in BINDINGS if binding.name == name), arguments, sctx, prompt)
+
     from sparkrun import api
     from sparkrun.api._resolve import resolve_cluster
     from sparkrun.orchestration.primitives import build_ssh_kwargs
@@ -34,55 +39,6 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
                 resolve_recipe(data["recipe"], sctx=sctx), overrides=data.get("overrides"), config=sctx.config, v=sctx.variables
             )
         )
-    if name.startswith("model_cache."):
-        from sparkrun.models.artifacts import ModelArtifactRequest
-
-        management = {
-            "model_cache.list": api.model_cache.inventory_cache,
-            "model_cache.prune": api.model_cache.prune_cache,
-            "model_cache.pin": api.model_cache.pin_revision,
-            "model_cache.reconcile": api.model_cache.reconcile_claim,
-            "model_cache.delete": api.model_cache.delete_model,
-            "model_cache.adopt": api.model_cache.adopt_cache,
-        }
-        if name in management:
-            data["ssh_kwargs"] = ssh
-            if name == "model_cache.adopt":
-                import os
-
-                model, revision = data.pop("model", None), data.pop("revision", None)
-                endpoint = data.pop("endpoint", None) or os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-                if revision and not model:
-                    raise ValueError("revision needs a model")
-                request = ModelArtifactRequest(model, revision, endpoint=endpoint) if model else None
-                return to_wire(management[name](request, endpoint=None if model else endpoint, **data))
-            if name == "model_cache.delete":
-                return to_wire(management[name](ModelArtifactRequest(data.pop("model"), data.pop("revision", None)), **data))
-            if name in {"model_cache.pin", "model_cache.reconcile"}:
-                request = ModelArtifactRequest(
-                    data.pop("model"), data.pop("revision"), endpoint=data.pop("endpoint", "https://huggingface.co")
-                )
-                return to_wire(management[name](request, **data))
-            return to_wire(management[name](**data))
-        request = ModelArtifactRequest(
-            **{k: data.pop(k) for k in ("model", "revision", "endpoint", "projector", "file_selection") if k in data}
-        )
-        fn = {
-            "model_cache.inspect": api.model_cache.inspect_model,
-            "model_cache.repair": api.model_cache.repair_model,
-            "model_cache.resolve": api.model_cache.resolve_manifest,
-            "model_cache.import": api.model_cache.import_manifest,
-        }[name]
-        if name == "model_cache.import":
-            import json
-            from sparkrun.models.artifacts import ModelArtifactManifest
-
-            data["manifest"] = ModelArtifactManifest.from_json(json.dumps(data["manifest"]))
-        if name != "model_cache.resolve":
-            data["ssh_kwargs"] = ssh
-        if name == "model_cache.repair":
-            data["config"] = sctx.config
-        return to_wire(fn(request, **data))
     if name.startswith("tailscale."):
         assert cluster is not None
         action = name.split(".")[1]
@@ -164,43 +120,11 @@ def register_special_ops():
         ("tailscale.join", "admin", "hosts cluster tag ephemeral enable_ssh hostname dry_run ask_sudo", ""),
         ("tailscale.down", "admin", "hosts cluster remove dry_run ask_sudo", ""),
         ("tailscale.expose", "admin", "cluster proxy head_host port set_proxy_host ask_sudo", ""),
-        ("model_cache.inspect", "read", "model revision endpoint projector file_selection cache_dir hosts checksums", "model cache_dir"),
-        (
-            "model_cache.repair",
-            "operate",
-            "model revision endpoint projector file_selection cache_dir hosts local_cache_dir transfer_mode checksums offline dry_run",
-            "model cache_dir",
-        ),
-        (
-            "model_cache.import",
-            "operate",
-            "model revision endpoint projector file_selection manifest cache_dir hosts checksums",
-            "model manifest cache_dir",
-        ),
-        ("model_cache.resolve", "read", "model revision endpoint projector file_selection cache_dir", "model"),
-        ("model_cache.list", "read", "cache_dir hosts", "cache_dir"),
-        ("model_cache.prune", "admin", "cache_dir hosts dry_run min_age_days max_bytes min_free_bytes", "cache_dir"),
-        ("model_cache.pin", "operate", "cache_dir hosts model revision endpoint pinned", "cache_dir model revision"),
-        ("model_cache.delete", "admin", "cache_dir hosts model revision dry_run force allowed_revisions", "cache_dir model"),
-        (
-            "model_cache.adopt",
-            "admin",
-            "cache_dir hosts model revision endpoint all_models dry_run offline last_used pinned",
-            "cache_dir",
-        ),
-        (
-            "model_cache.reconcile",
-            "admin",
-            "cache_dir hosts model revision endpoint claim confirm_inactive",
-            "cache_dir model revision claim confirm_inactive",
-        ),
     ]
     for name, scope, names, required in specs:
         properties = fields(names)
         if name == "diagnostics.collect":
             properties["max_bytes"] = {"type": "integer", "minimum": 16384, "maximum": 67108864}
-        if "confirm_inactive" in properties:
-            properties["confirm_inactive"] = {"type": "boolean", "enum": [True]}
         register_daemon_op(
             DaemonOp(
                 name,
@@ -212,3 +136,7 @@ def register_special_ops():
                 description=name.replace(".", " ").replace("_", " ").capitalize() + ".",
             )
         )
+
+    from sparkrun.daemon.model_cache_ops import register_model_cache_ops
+
+    register_model_cache_ops()
