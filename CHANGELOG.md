@@ -17,6 +17,12 @@ first tagged release containing them, regardless of their original commit date.
   Unwritable shared-blob locks retain payloads without interrupting bookkeeping
   or reporting their bytes reclaimed. Daemon `model_cache.delete` accepts
   `allowed_revisions` from a confirmed preview, matching the Python API.
+- Cache inventory, pruning and deletion now share allocation planning. Hard-linked
+  snapshot/blob/shared-store names are counted once when all names are removed;
+  retained payloads receive no reclamation credit. Deletion tolerates a selection
+  disappearing before its publication lock is acquired. Model-cache daemon
+  bindings share request, dispatch and API-coverage declarations, with parameter
+  drift checks for all ten operations.
 - Monitor subscriptions reopen when a cluster's executor or transport changes,
   while continuing to share sessions for overlapping host selections.
 

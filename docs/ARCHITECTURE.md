@@ -221,6 +221,35 @@ legacy compatibility and wheel evidence are documented in
 [APPLICATION_PROFILES.md](APPLICATION_PROFILES.md).
 
 
+## Cache cleanup boundaries
+
+`models/cache.py` resolves cache locations and sends the standard-library helper
+`models/_cache_agent.py` plus its contract module to a Linux host. The controller
+does not import the helper; this preserves Windows controller support and avoids
+requiring Sparkrun to be installed on each cache host.
+
+Within the helper, `scan_removal()` gathers filesystem evidence and
+`plan_removal()` calculates allocation credits without filesystem access.
+Inventory, pruning and explicit deletion use this calculation. Each credit names
+the file paths that must all disappear to free an inode; application outcomes
+record retained paths so failed optional payload cleanup cannot inflate reported
+reclamation. Logical sizes, allocation estimates and measured free space remain
+separate report quantities.
+
+`retention_reason()` and `delete_selection_refusal()` implement separate selection
+policies. Pruning respects pins, age and tracking; explicit deletion deliberately
+does not, while preserving its claim, confirmation and download guards.
+`apply_prune()` and `apply_delete()` perform mutations only after their coordinator
+has acquired the publication lock and refreshed its observations. Blob and shared
+payload collection retain their own lock and reference checks. `ObservationContext`
+belongs to one operation and is refreshed at lock and mutation boundaries.
+
+Plans are ephemeral host-local evidence, not serialized deletion authority. The
+controller's all-location delete preview is a refusal gate, not a distributed
+transaction. Mutation failures are not retried through another host alias. Keep
+new helper code in the shipped source unless the source bootstrap and installed
+artifact tests are explicitly updated to ship additional modules.
+
 ## Source type checks
 
 Run the pinned checker over all source with the locked development environment:

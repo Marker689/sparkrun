@@ -200,8 +200,10 @@ both are met or no eligible revision remains. The CLI exits nonzero if a
 target cannot be met; it never overrides protections to reach a target.
 
 Reports separate logical file sizes, reclaimable snapshot allocations, planned
-removals and filesystem free space. Snapshot allocation counts exclude symbolic
-links and multiply linked files. They are estimates of disk reclamation, not a
+removals and filesystem free space. Allocation counts exclude symbolic links and
+count a hard-linked file once only when every name for its inode is being removed,
+including snapshot, repository-blob and shared-store names. A surviving hard link
+prevents crediting that allocation. These are estimates of disk reclamation, not a
 promise about filesystem compression, reflinks or concurrent disk activity;
 `free_bytes_after` is measured again when applying cleanup. Dry-run free-space
 projections use the allocation estimates. Evicting a snapshot in the Hub's layout (entries are symlinks into `blobs/`)

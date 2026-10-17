@@ -120,6 +120,49 @@ def invoke(wheels, tmp_path, *args, env_extra=None):
     return result
 
 
+def test_installed_model_cache_binding_ships_and_executes_the_host_helper(wheels, tmp_path):
+    code = """
+import os
+from pathlib import Path
+from sparkrun import api
+from sparkrun.models import cache
+from sparkrun.core.daemon_registry import get_daemon_op
+from sparkrun.daemon.ops import check_request, register_core_ops
+
+assert 'site-packages' in str(cache.__file__)
+root = Path.cwd() / 'hf'
+revision = 'a' * 40
+repo = root / 'hub/models--org--model'
+snapshot = repo / 'snapshots' / revision
+snapshot.mkdir(parents=True)
+(repo / 'blobs').mkdir()
+payload = repo / 'blobs/weights'
+payload.write_bytes(b'weights' * 4096)
+os.link(payload, snapshot / 'weights.bin')
+allocated = payload.stat().st_blocks * 512
+register_core_ops()
+op = get_daemon_op('model_cache.delete')
+context = api.default_sctx()
+arguments = {'model': 'org/model', 'cache_dir': str(root)}
+
+def call(extra):
+    return op.handler_loader()(check_request(op, {**arguments, **extra}), context)[0]
+
+preview = call({})
+assert preview['dry_run'] and preview['planned_bytes'] == allocated
+assert payload.exists() and snapshot.exists()
+refused = call({'dry_run': False, 'allowed_revisions': []})
+assert not refused['target_met'] and payload.exists()
+applied = call({'dry_run': False, 'allowed_revisions': [revision]})
+assert applied['target_met'] and applied['reclaimed_bytes'] == allocated
+assert not repo.exists()
+print('installed binding and stdlib host helper passed')
+"""
+    result = invoke(wheels, tmp_path, "python", "-I", "-c", code)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "installed binding and stdlib host helper passed" in result.stdout
+
+
 def test_wheel_launchers_help_version_completion_and_isolation(wheels, tmp_path):
     for command in ("sparkrun", "profile-test-app"):
         result = invoke(wheels, tmp_path, command, "--help")

@@ -142,9 +142,9 @@ def test_an_unreadable_sibling_makes_nothing_exclusive(tmp_path):
     elsewhere.mkdir()
     (repo / "snapshots" / ("c" * 40)).symlink_to(elsewhere)
 
-    paths, targets, freed = agent.exclusive_blobs(tmp_path, "models--org--model", REV_A)
+    plan = agent.plan_removal(agent.scan_removal(tmp_path, "models--org--model", [REV_A]))
 
-    assert (paths, targets, freed) == ([], {}, 0)
+    assert plan.scan.blobs == () and plan.scan.targets == {} and plan.planned_bytes == 0
 
 
 def test_a_hard_linked_sibling_protects_the_blob(tmp_path):
@@ -156,7 +156,8 @@ def test_a_hard_linked_sibling_protects_the_blob(tmp_path):
     newer.mkdir()
     os.link(blob(repo, ONLY_A), newer / "w.safetensors")
 
-    assert agent.exclusive_blobs(tmp_path, "models--org--model", REV_A) == ([], {}, 0)
+    plan = agent.plan_removal(agent.scan_removal(tmp_path, "models--org--model", [REV_A]))
+    assert plan.scan.blobs == () and plan.scan.targets == {} and plan.planned_bytes == 0
     prune(tmp_path)
     assert (newer / "w.safetensors").read_bytes() == ONLY_A and blob(repo, ONLY_A).exists()
 
@@ -186,7 +187,7 @@ def test_a_blob_directory_prune_cannot_change_is_neither_credited_nor_fatal(tmp_
     repo = track(tmp_path, REV_A, {"w.safetensors": ONLY_A})
     os.chmod(repo / "blobs", 0o555)
     try:
-        assert agent.exclusive_blobs(tmp_path, "models--org--model", REV_A)[0] == []
+        assert agent.scan_removal(tmp_path, "models--org--model", [REV_A]).blobs == ()
         report = prune(tmp_path)
     finally:
         os.chmod(repo / "blobs", 0o755)
@@ -198,11 +199,12 @@ def test_a_blob_hugging_face_is_busy_with_is_kept_and_not_reported_freed(tmp_pat
     repo = track(tmp_path, REV_A, {"w.safetensors": ONLY_A})
     locks = tmp_path / "hub/.locks/models--org--model"
     locks.mkdir(parents=True)
-    paths, targets, freed = agent.exclusive_blobs(tmp_path, "models--org--model", REV_A)
+    plan = agent.plan_removal(agent.scan_removal(tmp_path, "models--org--model", [REV_A]))
     with open(locks / (blob(repo, ONLY_A).name + ".lock"), "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
-        kept = agent.remove_exclusive_blobs(tmp_path, "models--org--model", paths, targets)
-    assert blob(repo, ONLY_A).exists() and kept == freed > 0
+        kept = agent.remove_exclusive_blobs(tmp_path, "models--org--model", plan)
+    assert blob(repo, ONLY_A).exists() and blob(repo, ONLY_A) in kept
+    assert plan.planned_bytes > 0 and plan.reclaimed_bytes(kept) == 0
 
 
 def test_a_link_made_while_pruning_is_seen_before_the_unlink(tmp_path):
@@ -210,12 +212,12 @@ def test_a_link_made_while_pruning_is_seen_before_the_unlink(tmp_path):
     import os
 
     repo = track(tmp_path, REV_A, {"w.safetensors": ONLY_A})
-    paths, targets, _ = agent.exclusive_blobs(tmp_path, "models--org--model", REV_A)
+    plan = agent.plan_removal(agent.scan_removal(tmp_path, "models--org--model", [REV_A]))
     newer = repo / "snapshots" / REV_B
     newer.mkdir()
     (newer / "w.safetensors").symlink_to(os.path.relpath(blob(repo, ONLY_A), newer))
 
-    agent.remove_exclusive_blobs(tmp_path, "models--org--model", paths, targets)
+    agent.remove_exclusive_blobs(tmp_path, "models--org--model", plan)
 
     assert (newer / "w.safetensors").read_bytes() == ONLY_A
 
