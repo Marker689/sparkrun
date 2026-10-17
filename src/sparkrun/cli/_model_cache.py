@@ -268,6 +268,47 @@ def reconcile_cache(model, revision, claim, confirm_inactive, endpoint, **kwargs
     return api.reconcile_claim(ModelArtifactRequest(model, revision, endpoint=endpoint), claim=claim, confirm_inactive=True, **kwargs)
 
 
+@model_cache.command("adopt")
+@click.argument("model", required=False)
+@click.option("--revision", default=None, help="Adopt only this commit (or ref, e.g. main).")
+@click.option("--all", "all_models", is_flag=True, help="Adopt untracked revisions of every model in the cache.")
+@click.option("--dry-run/--apply", default=True, show_default=True, help="Preview what would be adopted, or explicitly adopt it.")
+@click.option(
+    "--offline",
+    is_flag=True,
+    help="Verify without the model origin; only Hub-layout snapshots (entries linked into blobs/) qualify.",
+)
+@click.option(
+    "--last-used",
+    type=click.Choice(["now", "mtime"]),
+    default="now",
+    show_default=True,
+    help="Start the retention clock now, or at the snapshot's newest file (may make it prune-eligible at once).",
+)
+@click.option("--pin", "pinned", is_flag=True, help="Also pin the adopted revisions against cleanup.")
+@endpoint_option
+@cache_options("adopt")
+def adopt_cache(model, revision, all_models, endpoint, **kwargs):
+    """Start tracking model revisions downloaded outside sparkrun.
+
+    Writes a usage record for each untracked snapshot of MODEL (or of every
+    model with --all), so list shows it and prune can manage it. Each file must
+    match the model origin's inventory for that commit; partial downloads are
+    fine, foreign or resized files refuse. Nothing is downloaded, moved or
+    deleted. Defaults to a preview.
+
+    Adopted revisions then age by sparkrun's use only: with automatic pruning
+    on, one other tools still use becomes a cleanup candidate once the
+    retention window passes. Use --pin for revisions that must stay.
+    """
+    if bool(model) == all_models:
+        raise click.UsageError("Name a MODEL to adopt, or pass --all.")
+    if all_models and revision:
+        raise click.UsageError("--revision needs a MODEL.")
+    request = ModelArtifactRequest(model, revision, endpoint=endpoint) if model else None
+    return api.adopt_cache(request, all_models=all_models, **kwargs)
+
+
 def _interactive() -> bool:
     return sys.stdin.isatty()
 

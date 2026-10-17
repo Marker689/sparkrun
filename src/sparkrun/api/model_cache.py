@@ -12,6 +12,8 @@ never start/evict workloads and do not change api.materialize's contract.
 
 from __future__ import annotations
 
+import os
+
 from sparkrun.models.artifacts import CacheValidationReport, ModelArtifactManifest, ModelArtifactRequest
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.cache_reports import CacheReport
@@ -218,6 +220,60 @@ def reconcile_claim(
         endpoint=request.endpoint,
         claim=claim,
         confirm_inactive=confirm_inactive,
+    )
+
+
+def adopt_cache(
+    request: ModelArtifactRequest | None = None,
+    *,
+    cache_dir,
+    hosts=("localhost",),
+    all_models=False,
+    endpoint=None,
+    dry_run=True,
+    offline=False,
+    last_used="now",
+    pinned=False,
+    token=None,
+    ssh_kwargs=None,
+    session=None,
+    sctx=None,
+) -> tuple[CacheReport, ...]:
+    """Start tracking snapshots downloaded outside sparkrun; preview by default.
+
+    Adopts every untracked revision of ``request.model`` (or only
+    ``request.revision``, a commit or ref), or of every model with
+    *all_models*: one of the two is required, so one command cannot enroll
+    everything other tools on the host also use. Online (default), each
+    present file must match the model origin's inventory for that commit;
+    *offline* accepts only snapshots in the Hub's blob-linked layout. Only the
+    usage record is written, never a manifest. *last_used* is ``now`` (default:
+    nothing becomes prune-eligible on adoption) or ``mtime`` (the snapshot's
+    newest entry). *pinned* adopts and protects in one step. *endpoint* is the
+    origin for *all_models* (a request carries its own); default ``HF_ENDPOINT``.
+
+    Adopted revisions then age by sparkrun's use only: with automatic pruning
+    enabled, one that other tools still use becomes a candidate (with the blobs
+    only it uses) once the retention window passes. *pinned* prevents that.
+    """
+    from sparkrun.core.config import resolve_hf_token
+    from sparkrun.models.adoption import adopt_snapshots
+
+    if (request is None) == (not all_models):
+        raise ValueError("name a model to adopt, or pass all_models (not both)")
+    return adopt_snapshots(
+        cache_dir=cache_dir,
+        hosts=hosts,
+        repo=request.repo if request is not None else None,
+        revision=request.revision if request is not None else None,
+        endpoint=request.endpoint if request is not None else endpoint or os.environ.get("HF_ENDPOINT", "https://huggingface.co"),
+        offline=offline,
+        dry_run=dry_run,
+        last_used=last_used,
+        pinned=pinned,
+        token=token if token is not None or offline else resolve_hf_token(),
+        ssh_kwargs=_ssh(ssh_kwargs, sctx),
+        session=session,
     )
 
 

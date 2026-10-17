@@ -18,12 +18,13 @@ import stat
 import time
 
 try:
-    from ._cache_contract import STATE_DIRECTORY as STATE, CACHE_REASONS, validate_usage
+    from ._cache_contract import STATE_DIRECTORY as STATE, CACHE_REASONS, USAGE_SCHEMA_VERSION, same_origin, validate_usage
 except ImportError:  # Shipped by the controller without installing Sparkrun.
     from importlib import import_module
 
     _contract = import_module("_sparkrun_cache_contract")
     STATE, CACHE_REASONS, validate_usage = _contract.STATE_DIRECTORY, _contract.CACHE_REASONS, _contract.validate_usage
+    USAGE_SCHEMA_VERSION, same_origin = _contract.USAGE_SCHEMA_VERSION, _contract.same_origin
 
 
 def traversal_error(error):
@@ -160,6 +161,8 @@ def run(
     force=False,
     allowed=None,
     now=None,
+    files=None,
+    adopt_last_used=None,
 ):
     root = Path(root)
     if not root.is_absolute() or root == Path("/"):
@@ -167,7 +170,7 @@ def run(
     for value in (min_age_seconds, max_bytes, min_free_bytes):
         if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
             raise ValueError("cache limits must be finite and nonnegative")
-    if action not in {"inventory", "prune", "pin", "reconcile", "delete"}:
+    if action not in {"inventory", "prune", "pin", "reconcile", "delete", "scan", "adopt"}:
         raise ValueError("unknown cache action")
     if any(type(flag) is not bool for flag in (dry_run, pinned, confirm_inactive, force)):
         raise ValueError("cache mutation flags must be boolean")
@@ -175,6 +178,10 @@ def run(
     _REFERENCES.clear()
     if action == "delete":
         return delete(root, repo=repo, revision=revision, force=force, dry_run=dry_run, now=now, allowed=allowed)
+    if action == "scan":
+        return {"snapshots": scan(root, repo=repo, revision=revision)}
+    if action == "adopt":
+        return adopt(root, repo=repo, revision=revision, files=files, endpoint=endpoint, last_used=adopt_last_used, pinned=pinned, now=now)
     policy = dict(now=now, min_age_seconds=min_age_seconds, exclude_repos=exclude_repos)
     rows = inventory(root, **policy)
     probe = root
@@ -236,7 +243,7 @@ def run(
             path = root / STATE / "usage" / slug.removeprefix("models--") / (row["revision"] + ".json")
             if action != "prune":
                 record = fresh["usage"]
-                if endpoint is not None and record["endpoint"] != endpoint:
+                if endpoint is not None and not same_origin(record["endpoint"], endpoint):
                     raise ValueError("cache usage endpoint mismatch")
                 if action == "pin":
                     record["pinned"] = pinned
@@ -626,6 +633,158 @@ def hf_download_active(hub, slug):
         finally:
             os.close(fd)
     return False
+
+
+COMMIT_PATTERN = r"[0-9a-f]{40}"
+
+
+def snapshot_entries(root, slug, snapshot):
+    """Every entry observe() would count, with what it resolves to.
+
+    *kind*: ``blob`` (a link into the repo's or the cache-wide blob store, the
+    Hub's layout), ``regular`` (a plain file), ``link`` (a link elsewhere),
+    ``dangling`` or ``other``. Sizes follow links.
+    """
+    hub = Path(os.path.realpath(root / "hub"))
+    stores = (hub / slug / "blobs", hub / "blobs")
+    entries = []
+    for path in tree_entries(snapshot):
+        info = path.lstat()
+        entry = {"path": str(path.relative_to(snapshot)), "size": None, "mtime": info.st_mtime}
+        try:
+            target = path.stat()
+        except OSError:
+            entry["kind"] = "dangling"
+            entries.append(entry)
+            continue
+        if not stat.S_ISREG(target.st_mode):
+            entry["kind"] = "other"
+        elif stat.S_ISLNK(info.st_mode):
+            real = Path(os.path.realpath(path))
+            entry["kind"] = "blob" if any(inside(real, store) for store in stores) else "link"
+        else:
+            entry["kind"] = "regular"
+        entry["size"] = target.st_size
+        entries.append(entry)
+    return sorted(entries, key=lambda e: e["path"])
+
+
+def scan(root, *, repo=None, revision=None):
+    """Untracked snapshots (of *repo*, or every model) and their entries, for adoption.
+
+    *revision* may be a commit or a ref the repo records (``main``). Read-only.
+    """
+    hub = root / "hub"
+    safe_directory(root)
+    if not hub.is_dir():
+        return []
+    if repo is not None and not re.fullmatch(REPO_PATTERN, repo):
+        raise ValueError("invalid repository")
+    if revision is not None and not re.fullmatch(NAME_PATTERN, revision):
+        raise ValueError("invalid revision")
+    safe_directory(hub)
+    slugs = ["models--" + repo.replace("/", "--")] if repo else sorted(p.name for p in hub.glob("models--*"))
+    found = []
+    for slug in slugs:
+        repo_dir = hub / slug
+        snapshots_dir = repo_dir / "snapshots"
+        try:
+            # The checks every other action makes: a symlinked cache directory
+            # is refused, or the record written here would never verify.
+            safe_directory(snapshots_dir)
+        except ValueError:
+            continue
+        if not snapshots_dir.is_dir():
+            continue
+        name = slug.removeprefix("models--")
+        wanted = revision
+        if revision is not None and not re.fullmatch(COMMIT_PATTERN, revision):
+            wanted = read_ref(repo_dir / "refs" / revision)
+        for snapshot in sorted(snapshots_dir.iterdir()):
+            if not re.fullmatch(COMMIT_PATTERN, snapshot.name) or (revision is not None and snapshot.name != wanted):
+                continue
+            if snapshot.is_symlink() or not snapshot.is_dir():
+                continue
+            record = root / STATE / "usage" / name / (snapshot.name + ".json")
+            problem = None
+            if record.exists() or record.is_symlink():
+                try:
+                    read_record(record, name, snapshot.name)
+                    continue  # already tracked
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    # observe() reports this revision unverifiable; say why here
+                    # rather than skip it as if it were tracked.
+                    problem = "its usage record is unreadable (%s); remove %s to adopt it again" % (exc, record)
+            found.append(
+                {
+                    "repo": name.replace("--", "/", 1),
+                    "revision": snapshot.name,
+                    "snapshot": str(snapshot),
+                    "entries": snapshot_entries(root, slug, snapshot),
+                    "problem": problem,
+                }
+            )
+    return found
+
+
+def adopt(root, *, repo, revision, files, endpoint, last_used, pinned, now):
+    """Start tracking an existing snapshot: write its usage record, under the publication lock.
+
+    The record lists exactly the files found, so nothing in the snapshot is
+    "untracked files". Refuses when the snapshot changed since the caller's
+    scan, or became tracked meanwhile.
+    """
+    if not isinstance(repo, str) or not re.fullmatch(REPO_PATTERN, repo):
+        raise ValueError("invalid repository")
+    if not isinstance(revision, str) or not re.fullmatch(COMMIT_PATTERN, revision):
+        raise ValueError("adoption needs a full commit revision")
+    if not isinstance(files, list) or not files or not all(isinstance(f, list) and len(f) == 3 for f in files):
+        raise ValueError("adoption needs the snapshot's scanned entries")
+    if type(last_used) not in (int, float) or not math.isfinite(last_used) or last_used < 0:
+        raise ValueError("invalid adoption time")
+    if not isinstance(endpoint, str) or not endpoint.startswith(("https://", "http://")):
+        raise ValueError("adoption needs the model origin endpoint")
+    name = repo.replace("/", "--")
+    slug = "models--" + name
+    snapshot = root / "hub" / slug / "snapshots" / revision
+    lock = root / STATE / (name + ".lock")
+    record_path = root / STATE / "usage" / name / (revision + ".json")
+    for path in (root / STATE, record_path.parent, snapshot.parent):
+        safe_directory(path)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("invalid publication lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("cache busy: another operation holds this model's lock") from None
+        if record_path.exists():
+            raise ValueError("revision is already tracked")
+        if snapshot.is_symlink() or not snapshot.is_dir():
+            raise ValueError("snapshot is no longer present")
+        # Path, kind and size: the caller verified exactly these against the origin.
+        found = sorted([e["path"], e["kind"], e["size"]] for e in snapshot_entries(root, slug, snapshot))
+        if found != sorted(files):
+            raise ValueError("snapshot changed since it was scanned; scan again")
+        record = {
+            "schema": USAGE_SCHEMA_VERSION,
+            "repo": repo,
+            "revision": revision,
+            "endpoint": endpoint,
+            "first_seen": now,
+            "last_used": last_used,
+            "last_adopted": now,
+            "files": sorted(f[0] for f in files),
+            "claims": {},
+            "pinned": pinned,
+        }
+        validate_usage(record, name, revision)
+        write_record(record_path, record)
+    finally:
+        os.close(fd)
+    return observe(root, slug, revision, now=now, min_age_seconds=0, exclude_repos=())
 
 
 def delete(root, *, repo, revision, force, dry_run, now, allowed=None):

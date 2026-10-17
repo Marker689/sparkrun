@@ -15,7 +15,7 @@ import time
 import uuid
 
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactRequest
-from sparkrun.models._cache_contract import STATE_DIRECTORY, USAGE_SCHEMA_VERSION, validate_usage
+from sparkrun.models._cache_contract import STATE_DIRECTORY, USAGE_SCHEMA_VERSION, same_origin, validate_usage
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +115,13 @@ def record_use(io, host, root, manifest, *, event="prepared", acquired=False):
         "claims": {},
         "pinned": False,
     }
-    if record["endpoint"] != manifest.endpoint:
-        raise ModelArtifactError("cache usage endpoint mismatch")
+    if not same_origin(record["endpoint"], manifest.endpoint):
+        if "last_adopted" in record and not any(k in record for k in ("last_prepared", "last_acquired", "last_distributed")):
+            # Adoption recorded whatever origin the adopter named (or, offline,
+            # none it consulted); the first preparation is the authoritative one.
+            record["endpoint"] = manifest.endpoint
+        else:
+            raise ModelArtifactError("cache usage endpoint mismatch")
     record["files"] = sorted(set(record["files"]) | {f.path for f in manifest.files})
     record["last_" + event] = now
     record["last_used"] = max(record["last_used"], now)

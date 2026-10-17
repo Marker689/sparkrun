@@ -1003,6 +1003,8 @@ _CACHE_ACTION_LABELS = {
     "reconcile": "claim released",
     "would_delete": "would delete",
     "deleted": "deleted",
+    "would_adopt": "would adopt",
+    "adopted": "adopted",
 }
 
 
@@ -1026,11 +1028,14 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
     everything = sorted(report.entries, key=lambda e: (e.repo, e.last_used or 0, e.revision))
     # Untracked snapshots carry no usage data and are never pruned; on a cache
     # sparkrun has not prepared they can outnumber managed revisions 50:1.
-    entries = everything if show_untracked or action == "delete" else [e for e in everything if e.tracked or e.action]
+    entries = everything if show_untracked or action in ("delete", "adopt") else [e for e in everything if e.tracked or e.action]
     hidden = len(everything) - len(entries)
     hidden_note = "  %d untracked snapshot(s) not shown (not managed by sparkrun; never pruned). Use --all to list them." % hidden
     if not entries and action == "delete":
         lines.append("  Not cached on this host.")
+        return lines
+    if not entries and action == "adopt":
+        lines.append("  No untracked snapshots to adopt.")
         return lines
     if not entries:
         lines.append("  No managed revisions." if hidden else "  No cached revisions.")
@@ -1042,7 +1047,8 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
     rows = []
     for e in entries:
         status = e.reason
-        measured = e.action in ("would_delete", "deleted")  # delete sizes every revision it removes
+        # delete sizes every revision it removes; adopt every snapshot it considers
+        measured = e.action in ("would_delete", "deleted") or action == "adopt"
         if show_action and e.action:
             status = "%s (%s)" % (_CACHE_ACTION_LABELS.get(e.action, e.action), status)
         rows.append(
@@ -1050,7 +1056,8 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
                 e.repo,
                 e.revision,
                 format_bytes(e.logical_bytes) if e.tracked or measured else "-",
-                format_bytes(e.reclaimable_bytes) if e.tracked or measured else "-",
+                # An untracked snapshot is not accounted, so it has no reclaimable figure yet.
+                format_bytes(e.reclaimable_bytes) if e.tracked or (measured and action != "adopt") else "-",
                 format_age(e.last_used, now=now),
                 "yes" if e.pinned else "",
                 str(len(e.claims)) if e.claims else "",
@@ -1127,4 +1134,10 @@ def format_model_cache_reports(reports, *, action: str = "inventory", now: float
     blocks = ["\n".join(_format_cache_report(r, action, now, show_untracked)) for r in reports]
     if action == "prune" and any(e.action == "would_remove" for r in reports for e in r.entries):
         blocks.append("Dry run: nothing was removed. Re-run with --apply to remove the revisions marked above.")
+    if action == "adopt" and any(e.action == "would_adopt" for r in reports for e in r.entries):
+        blocks.append(
+            "Dry run: nothing was adopted. Re-run with --apply to track the revisions marked above.\n"
+            "Adopted revisions age by sparkrun's use only: with automatic pruning on, one other tools still use\n"
+            "becomes a cleanup candidate after the retention window. Add --pin for those that must stay."
+        )
     return "\n\n".join(blocks)

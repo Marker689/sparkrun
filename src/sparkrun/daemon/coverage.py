@@ -39,6 +39,7 @@ API_OPERATIONS.update(
         "model_cache.pin_revision": "model_cache.pin",
         "model_cache.reconcile_claim": "model_cache.reconcile",
         "model_cache.delete_model": "model_cache.delete",
+        "model_cache.adopt_cache": "model_cache.adopt",
     }
 )
 EXCLUSIONS = {

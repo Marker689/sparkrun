@@ -43,9 +43,19 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
             "model_cache.pin": api.model_cache.pin_revision,
             "model_cache.reconcile": api.model_cache.reconcile_claim,
             "model_cache.delete": api.model_cache.delete_model,
+            "model_cache.adopt": api.model_cache.adopt_cache,
         }
         if name in management:
             data["ssh_kwargs"] = ssh
+            if name == "model_cache.adopt":
+                import os
+
+                model, revision = data.pop("model", None), data.pop("revision", None)
+                endpoint = data.pop("endpoint", None) or os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+                if revision and not model:
+                    raise ValueError("revision needs a model")
+                request = ModelArtifactRequest(model, revision, endpoint=endpoint) if model else None
+                return to_wire(management[name](request, endpoint=None if model else endpoint, **data))
             if name == "model_cache.delete":
                 return to_wire(management[name](ModelArtifactRequest(data.pop("model"), data.pop("revision", None)), **data))
             if name in {"model_cache.pin", "model_cache.reconcile"}:
@@ -172,6 +182,12 @@ def register_special_ops():
         ("model_cache.prune", "admin", "cache_dir hosts dry_run min_age_days max_bytes min_free_bytes", "cache_dir"),
         ("model_cache.pin", "operate", "cache_dir hosts model revision endpoint pinned", "cache_dir model revision"),
         ("model_cache.delete", "admin", "cache_dir hosts model revision dry_run force", "cache_dir model"),
+        (
+            "model_cache.adopt",
+            "admin",
+            "cache_dir hosts model revision endpoint all_models dry_run offline last_used pinned",
+            "cache_dir",
+        ),
         (
             "model_cache.reconcile",
             "admin",

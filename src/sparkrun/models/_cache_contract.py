@@ -25,7 +25,30 @@ CACHE_REASONS = {
     "delete_blocked": "not deleted: another revision of this model has a workload claim",
     "download_in_progress": "a Hugging Face download holds this repository's lock",
     "selection_changed": "revisions appeared since the confirmed preview; preview again",
+    "adoptable": "adoptable",
+    "not_adoptable": "not adoptable",
+    "adopt_unverifiable": "cannot verify against the model origin",
+    "adopt_failed": "adoption failed",
 }
+
+
+def same_origin(a, b):
+    """Whether two model-origin endpoints name the same origin.
+
+    Compared normalized (scheme and host case, a trailing slash), because the
+    recorded endpoint is matched against every later launch: a record made by
+    ``adopt`` as ``https://hf-mirror.com/`` must not fail a launch configured as
+    ``https://HF-mirror.com``.
+    """
+    from urllib.parse import urlsplit
+
+    def key(value):
+        parts = urlsplit(value) if isinstance(value, str) else None
+        if parts is None or not parts.scheme or not parts.netloc:
+            return value
+        return parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/")
+
+    return key(a) == key(b)
 
 
 def validate_usage(record, slug, revision):

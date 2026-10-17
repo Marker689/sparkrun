@@ -144,17 +144,22 @@ sparkrun model-cache repair org/model-name --cluster <cluster_name> --dry-run
 sparkrun model-cache prune --cluster <cluster_name> --max-bytes 107374182400 --dry-run
 sparkrun model-cache pin org/model-name --revision <commit_id> --cluster <cluster_name>
 sparkrun model-cache delete org/model-name --cluster <cluster_name> --dry-run
+sparkrun model-cache adopt org/model-name --cluster <cluster_name>   # preview; --apply to track
 ```
 
 Targets resolve like other commands: `--cluster`/`--hosts`/`--hosts-file`, else the
-default cluster, else localhost. Output is a per-host table; add `--json` to parse it.
+default cluster, else localhost. Output is one table per cache (hosts sharing one cache,
+such as an NFS export, are listed together); add `--json` to parse it.
 Prune previews by default; `--apply` needs authorization for cleanup. It uses LRU
-among eligible managed revisions, respects pins/live claims, and leaves untracked
-snapshots/shared blobs alone. Usage records cover Sparkrun lifecycle activity,
+among eligible managed revisions, respects pins/live claims, leaves untracked snapshots
+alone, and removes only blobs no other revision uses. Usage records cover Sparkrun lifecycle activity,
 not every external read. To remove a specific model regardless of pins, use
 `model-cache delete` (preview first; it needs explicit confirmation or `--yes`,
 and `--force` for revisions a workload claims). Do not replace either with
-recursive cache deletion.
+recursive cache deletion. Revisions downloaded outside sparkrun are untracked until
+`model-cache adopt` (preview by default; name a model or pass `--all`): each file is
+checked against the model origin, or with `--offline` only Hub-layout snapshots qualify;
+adoption starts the retention clock now unless `--last-used mtime`.
 
 Transfer modes: `auto`, `local`, `push`, `delegated`, `pull` (per-node origin fetches).
 Delegated acquisition downloads on the chosen head and distributes to workers;

@@ -3038,6 +3038,19 @@ Before launching, sparkrun can pre-sync models and container images from the con
   path, read back through the others, retrying for NFS caching), into a persistent file rewritten in place,
   because a new name can sit behind negative-lookup caching. Previews never write. `CacheReport.location`
   carries the hosts; `inspect`/`repair` stay per host (they validate bindings, which are per host).
+- **Adoption** (`models/adoption.py`, agent `scan` / `adopt`): `model-cache adopt` makes an externally downloaded
+  revision tracked by writing its usage record, and nothing else. In particular **no manifest**: snapshots are often a
+  deliberate subset of their revision (one GGUF quant), and a saved manifest is what a pinned launch reads as the
+  complete inventory. The record lists exactly the files present (anything else would read as "untracked files",
+  which is never eligible), and the agent re-checks that list under the publication flock. Online, every present
+  file must exist in the origin's `file_selection="all"` inventory at its size (missing files are fine); offline,
+  only blob-linked (Hub-layout) entries qualify. `last_used` defaults to now, so adopting never makes anything
+  prune-eligible on the spot. A model or `--all` is required. The re-check under the flock compares `(path, kind,
+  size)`, which is what was verified against the origin, not names alone. `record_use` (every launch) compares
+  endpoints exactly, so an adopted record's endpoint would fail launches spelled differently: origins compare
+  normalized (`_cache_contract.same_origin`), and a record that was only adopted takes over the first preparing
+  launch's endpoint. `scan` validates existing records like `observe`, so an unreadable one is reported, not
+  silently treated as tracked.
 - **Containers** (`containers/`): Pulls image locally (`containers/registry.py`), then streams via
   `docker save | ssh docker load` (`containers/distribute.py`, `containers/sync.py`). Checks image IDs to skip hosts
   that already have the correct image.

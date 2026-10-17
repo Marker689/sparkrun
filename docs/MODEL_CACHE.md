@@ -264,11 +264,46 @@ Inventory and cleanup use Python 3 and standard filesystem tools on Linux cache
 hosts, through the existing SSH/host session. They never contact the model
 origin or install tools. Existing metadata inspection remains independent of
 this Python helper. CLI and daemon callers use the same Python API:
-`inventory_cache`, `prune_cache`, `pin_revision`, and `reconcile_claim`.
-The daemon exposes `model_cache.list`, `model_cache.prune`, `model_cache.pin`
-and `model_cache.reconcile` (and matching `/v1/model_cache/...` routes).
-Prune and reconciliation require admin scope; prune defaults to dry-run over
-the API as well.
+`inventory_cache`, `prune_cache`, `pin_revision`, `reconcile_claim` and `adopt_cache`.
+The daemon exposes `model_cache.list`, `model_cache.prune`, `model_cache.pin`,
+`model_cache.reconcile` and `model_cache.adopt` (and matching `/v1/model_cache/...`
+routes). Prune, reconciliation and adoption require admin scope; prune and adopt
+default to dry-run over the API as well.
+
+## Adopting existing downloads
+
+A revision downloaded outside sparkrun (`hf download`, a notebook, an older sparkrun)
+has no usage record: `list` hides it and `prune` never frees it. `adopt` writes that
+record, and only that: nothing is downloaded, moved, deleted, or written as a manifest.
+
+```sh
+sparkrun model-cache adopt org/model --cluster lab              # preview
+sparkrun model-cache adopt org/model --cluster lab --apply
+sparkrun model-cache adopt --all --cluster lab --offline         # every model, no origin requests
+```
+
+Name a model (optionally `--revision`, a commit or a ref such as `main`) or pass `--all`;
+one is required, so a single command cannot enroll everything other tools on the host
+use. Each snapshot is judged before it is adopted:
+
+- **Online** (default): every file present must exist in the model origin's inventory
+  for that commit, at the same size. Missing files are fine (a partial download, such as
+  one GGUF quant, is normal); a file the origin does not know, or knows at another size,
+  refuses adoption.
+- **`--offline`**: every entry must be a link into the blob store, the layout the Hub
+  client writes and names by content. A plain file proves nothing offline and refuses.
+
+`last_used` starts *now*, so nothing becomes prune-eligible the moment it is adopted;
+`--last-used mtime` uses the snapshot's newest file instead, which can make an old
+download eligible at once. `--pin` adopts and protects in one step. Once adopted, a
+Hub-layout revision is pruned with the blobs only it uses.
+
+Adopted revisions age by **sparkrun's** use only: use by other tools (notebooks, `hf`,
+containers started outside sparkrun) never refreshes `last_used`. With automatic pruning
+enabled, a revision other tools still rely on therefore becomes a cleanup candidate once
+the retention window passes; pin those. The origin an adoption records is replaced by the
+first launch that prepares the revision, so adopting with a different spelling of the
+endpoint (or `--offline`) never makes a later launch fail on an origin mismatch.
 
 ## Explicit deletion
 
