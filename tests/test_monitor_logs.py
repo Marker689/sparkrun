@@ -2218,6 +2218,47 @@ def test_log_pane_wrapped_search_navigation_and_input(monkeypatch):
     asyncio.run(_run())
 
 
+def test_log_pane_search_slash_inserts_into_open_input(monkeypatch):
+    """A '/' typed into the open search input is inserted, not treated as 'open search'.
+
+    Regression: the LogPane 'slash' binding was priority=True, so it fired before the
+    focused Input could consume the key and action_open_search reset the value mid-typing.
+    """
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", role="head", rank=0, text=f"step {i}: status ok") for i in range(10)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            search_inp = pane.query_one("#log-search", Input)
+
+            # '/' opens the search bar while the log view has focus
+            await pilot.press("slash")
+            assert search_inp.display is True
+            assert search_inp.has_focus is True
+
+            # Typing a pattern containing '/' must insert the character, not reset
+            await pilot.press("f", "o", "o", "slash")
+            await pilot.pause(0.05)
+            assert search_inp.value == "foo/"
+            assert search_inp.display is True
+            assert search_inp.has_focus is True
+
+            # The pattern still submits as a regex
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert search_inp.display is False
+            assert pane.buffer.search_pattern is not None
+            assert pane.buffer.search_pattern.pattern == "foo/"
+
+    asyncio.run(_run())
+
+
 def test_log_pane_wrap_eviction_no_phantom_rows(monkeypatch):
     """Buffer eviction in wrap mode leaves no phantom rows in _wrap_map."""
     import asyncio
