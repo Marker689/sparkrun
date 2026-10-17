@@ -253,6 +253,10 @@ def run(
                 row.update(eligible=False, reason=CACHE_REASONS["usage_changed_during_cleanup"], reason_code="usage_changed_during_cleanup")
                 continue
             amount = row["reclaimable_bytes"]
+            if amount == 0 and (max_bytes is not None or min_free_bytes is not None):
+                # Every byte is shared with another revision (hard-linked reuse):
+                # evicting it would report a removal that frees nothing.
+                continue
             result["planned_bytes"] += amount
             row["action"] = "would_remove" if dry_run else "removed"
             if not dry_run:
@@ -630,6 +634,34 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
         # Blobs no selected snapshot uses (interrupted downloads) go to the first row.
         orphans = sum(blob_bytes.values()) + sum(shared_bytes.values())
         per_row.setdefault(selected[0], [0, 0])[1] += orphans
+        # allocation() credits a name only when it is its inode's last, so an
+        # inode several removed names share (a sparkrun snapshot entry hard-
+        # linked to the HF blob it was reused from) was credited to none of
+        # them, and a whole-model delete previewed nothing freed. Credit such
+        # an inode once, to its first snapshot, when every name goes.
+        shared_inodes = {}
+
+        def count(path, owner):
+            try:
+                info = path.lstat()
+            except OSError:
+                return
+            if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                shared_inodes.setdefault((info.st_dev, info.st_ino), [info, 0, owner])[1] += 1
+
+        for snap in snapshots:
+            for path in tree_entries(snap):
+                count(path, snap.name)
+        for path in blob_paths:
+            count(path, None)
+        for target in set(targets.values()):
+            references = manifest_references(target, hub, store)
+            if references and references <= set(blob_paths):
+                count(target, None)
+        for info, names, owner in shared_inodes.values():
+            if names == info.st_nlink:
+                per_row.setdefault(owner or selected[0], [0, 0])[1] += info.st_blocks * 512
+                planned += info.st_blocks * 512
 
         for row in rows:
             logical, private = per_row.get(row["revision"], (0, 0))

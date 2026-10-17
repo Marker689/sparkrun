@@ -2995,6 +2995,23 @@ Before launching, sparkrun can pre-sync models and container images from the con
   These are presence heuristics, not read-permission or snapshot-completeness checks. A false hit skips the remote
   download, but head fan-out still runs; with the old flags retries repeated the broken transfer. Corrected rsync
   flags repair existing destinations without cache deletion (issue #299).
+- **Reuse before transfer** (`models/snapshot_links.py`): manifest preparation keeps sparkrun snapshots
+  self-contained regular files (what lets the cache agent budget and prune them), and neither the repair
+  download (`hf_hub_download(local_dir=…)`, which never consults the cache) nor the `--copy-links` fan-out looked
+  at what a host already held. A revision bump of a ~450 GiB model whose files sat unchanged in the repo's HF
+  `blobs/<etag>` was downloaded and copied again in full and filled the disks. Before the first observation,
+  `prepare_model` now runs a bash pass on every host (under the publication lease) that makes each manifest
+  entry a **hard link** to `blobs/<checksum>` (the etag *is* the manifest checksum) when it has the expected
+  size. Missing entries need no transfer, and a duplicate copy is replaced and its space reported. Five rules,
+  each silently wrong if broken: hard links, not symlinks or new blobs (a symlinked snapshot is invisible to
+  prune, and blobs are never pruned); **link before hashing** (an unlinkable blob, EPERM under
+  `fs.protected_hardlinks` or EXDEV, is reported once at INFO and never hashed); a copy we hold is replaced
+  only after `cmp` or the checksum policy proves the blob identical (name plus size suffices only for a
+  *missing* entry, as with `hf_hub_download`); `_cache_agent.delete()` credits an inode once every name of it
+  is removed, since `allocation()` credits no individual name of a shared inode; and a budget prune skips a
+  snapshot that would free nothing. The repair download reports progress the way the copy leg does: the
+  adapter prints `SPARKRUN_MODEL_PROGRESS <done> <total>` from a staging-dir sampler, and
+  `acquisition.RepairProgress` turns it into feedback events (log line every 10s).
 - **Containers** (`containers/`): Pulls image locally (`containers/registry.py`), then streams via
   `docker save | ssh docker load` (`containers/distribute.py`, `containers/sync.py`). Checks image IDs to skip hosts
   that already have the correct image.

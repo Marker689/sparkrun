@@ -148,3 +148,109 @@ def test_generated_adapter_uses_the_hub_transport(hub_origin, tmp_path, capsys, 
         result = json.loads(capsys.readouterr().out.split("SPARKRUN_MODEL_RESULT=", 1)[1])
         assert result["revision"] == REVISION
         assert result["weight_map"] == {"layer": "model.safetensors"}
+
+
+def test_repair_reports_progress_by_bytes(hub_origin, tmp_path):
+    endpoint, _ = hub_origin
+    calls = []
+    sizes = {name: len(data) for name, data in FILES.items()}
+
+    acquisition.repair_snapshot_files(
+        "org/tiny", REVISION, str(tmp_path), endpoint, False, tuple(FILES), sizes=sizes, progress=lambda *a: calls.append(a)
+    )
+
+    total = sum(sizes.values())
+    assert calls[-1] == (total, total)
+    assert [done for done, _ in calls] == sorted(done for done, _ in calls)
+    # Downloads stay private regular files: the cache agent budgets and prunes those.
+    snapshot = tmp_path / "hub/models--org--tiny/snapshots" / REVISION
+    assert all((snapshot / name).is_file() and not (snapshot / name).is_symlink() for name in FILES)
+    assert not (tmp_path / "hub/models--org--tiny/blobs").exists()
+
+
+def test_generated_adapter_repair_streams_progress(hub_origin, tmp_path, capsys):
+    endpoint, _ = hub_origin
+    request = ModelArtifactRequest("org/tiny", endpoint=endpoint)
+    selected = manifest.select_manifest(request, manifest.fetch_inventory(request, token=False))
+    files = tuple(f.path for f in selected.files)
+
+    script = acquisition.hub_script(request, str(tmp_path), token=None, manifest=selected, files=files)
+    program = script.split("<<'SPARKRUN_HUB_ADAPTER'\n", 1)[1].rsplit("\nSPARKRUN_HUB_ADAPTER", 1)[0]
+    exec(compile(program, "remote-adapter", "exec"), {})
+
+    out = capsys.readouterr().out
+    result = json.loads(out.split("SPARKRUN_MODEL_RESULT=", 1)[1])
+    assert result["repaired"] == len(files)
+    progress = acquisition.RepairProgress("h1")
+    progress.feed(out.encode())
+    total = sum(f.size for f in selected.files)
+    assert progress.state == (total, total)
+
+
+def test_repair_progress_throttles_and_reports_rate():
+    from unittest import mock
+
+    clock = SimpleNamespace(now=100.0)
+    progress = acquisition.RepairProgress("h1", clock=lambda: clock.now)
+    progress.reporter = mock.Mock()
+    report = progress.reporter.report
+    clock.now += 2
+    progress.feed(b"SPARKRUN_MODEL_PROGRESS %d %d\nnoise\nSPARKRUN_MODEL_PRO" % (2**30, 20 * 2**30))
+    clock.now += 0.1
+    progress.feed(b"GRESS %d %d\n" % (2 * 2**30, 20 * 2**30))  # split marker, throttled
+    clock.now += 1.9
+    progress.feed(b"SPARKRUN_MODEL_PROGRESS garbage\n")
+    progress.finish(True)
+    messages = [call.args[0] for call in report.call_args_list]
+    assert messages == [
+        "Model download on h1: 1.00 / 20.00 GiB (512.0 MiB/s)",
+        "Model download on h1: 2.00 / 20.00 GiB (512.0 MiB/s)",
+    ]
+    final = report.call_args_list[-1].kwargs
+    assert final["status"] == "succeeded" and final["log_message"] is True
+    assert final["current"] == 2 * 2**30 and final["total"] == 20 * 2**30 and final["unit"] == "bytes"
+
+
+def _tiny_manifest():
+    request = ModelArtifactRequest("org/tiny")
+    return request, manifest.ModelArtifactManifest(
+        "org/tiny", REVISION, request.endpoint, "auto", (manifest.ModelArtifactFile("config.json", 3, "git-sha1", "1" * 40),)
+    )
+
+
+def test_run_adapter_streams_repair_output_to_progress():
+    from unittest import mock
+
+    from sparkrun.transports.session import HostCommandResult
+
+    request, selected = _tiny_manifest()
+    io = mock.Mock()
+
+    def execute(host, script, *, timeout, stdout=None):
+        assert stdout is not None and timeout == 7200
+        stdout(b"SPARKRUN_MODEL_PROGRESS 3 3\n")
+        return HostCommandResult(host, 0, b'SPARKRUN_MODEL_RESULT={"revision":"%s","repaired":1}\n' % REVISION.encode(), b"")
+
+    io.execute.side_effect = execute
+    with (
+        mock.patch.object(acquisition.RepairProgress, "update") as update,
+        mock.patch.object(acquisition.RepairProgress, "finish") as finish,
+    ):
+        result = acquisition.run_adapter(io, "h1", request, "/cache", token=None, manifest=selected, files=("config.json",))
+    update.assert_called_once_with(3, 3)
+    finish.assert_called_once_with(True)
+    assert result["repaired"] == 1
+
+
+def test_run_adapter_closes_progress_when_the_session_fails():
+    """A frontend must not be left showing a download as running forever."""
+    from unittest import mock
+
+    from sparkrun.models.artifacts import ModelArtifactError
+
+    request, selected = _tiny_manifest()
+    io = mock.Mock()
+    io.execute.side_effect = ModelArtifactError("model transfer deadline exceeded")
+    with mock.patch.object(acquisition.RepairProgress, "finish") as finish, pytest.raises(ModelArtifactError):
+        acquisition.run_adapter(io, "h1", request, "/cache", token=None, manifest=selected, files=("config.json",))
+    finish.assert_called_once_with(False)

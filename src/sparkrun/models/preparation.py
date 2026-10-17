@@ -27,6 +27,7 @@ from sparkrun.models.artifacts import (
 )
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
+from sparkrun.models.snapshot_links import link_existing_blobs
 from sparkrun.models.transport import builtin_copy
 from sparkrun.utils.shell import quote
 
@@ -100,11 +101,28 @@ def _acquire(
         result = try_model_transfer(pull, pull=True)
     if result is None:
         if host is None:
-            from sparkrun.models.acquisition import repair_snapshot_files
+            from sparkrun.models.acquisition import RepairProgress, repair_snapshot_files
             from sparkrun.models.hub import configure_hub_client
 
             configure_hub_client()
-            repair_snapshot_files(request.repo, manifest.revision, root, request.endpoint, token, files, cancelled=io.cancelled)
+            progress = RepairProgress(None)
+            wanted = set(files)
+            try:
+                repair_snapshot_files(
+                    request.repo,
+                    manifest.revision,
+                    root,
+                    request.endpoint,
+                    token,
+                    files,
+                    cancelled=io.cancelled,
+                    sizes={f.path: f.size for f in manifest.files if f.path in wanted},
+                    progress=progress.update,
+                )
+            except BaseException:
+                progress.finish(False)
+                raise
+            progress.finish(True)
         else:
             run_adapter(io, host, request, root, token=token, manifest=manifest, files=files)
     verified = io.observe(host, manifest, root, checksums=checksums)
@@ -215,6 +233,11 @@ def prepare_model(
                 _persist_manifest(io, host, root, request, manifest)
             except ModelArtifactError as exc:
                 logger.warning("Could not persist expected model inventory on %s: %s", host or "control", exc)
+        # Before observing: content a host already holds as HF blobs becomes
+        # hard links here, so it is neither downloaded nor copied again, and a
+        # duplicate copy left by an earlier run is reclaimed. Under the leases.
+        for host, root in dict.fromkeys([(source_host, source_root), *roots.items()]):
+            link_existing_blobs(io, host, root, manifest, checksums=checksums)
         logger.info(
             "Model %s pinned to %s: %d selected files, %.2f GiB",
             model,
