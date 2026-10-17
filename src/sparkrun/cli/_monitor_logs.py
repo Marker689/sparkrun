@@ -1433,7 +1433,7 @@ class LogPane(Vertical):
         Binding("l", "toggle_wrap", "Wrap", priority=True),
         Binding("c", "toggle_color", "Color", priority=True),
         Binding("h", "toggle_highlight", "Highlight", priority=True),
-        Binding("slash", "open_search", "Search", key_display="/", priority=True),
+        Binding("slash", "open_search", "Search", key_display="/"),
         Binding("n", "search_next", "Next match", priority=True),
         Binding("b", "search_prev", "Prev match", priority=True),
         Binding("d", "dump_logs", "Dump", priority=True),
