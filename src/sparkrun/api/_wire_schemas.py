@@ -3288,6 +3288,19 @@ _CACHE_ENTRY = {
     ],
     "additionalProperties": False,
 }
+_CACHE_LOCATION = {
+    "type": "object",
+    "properties": {
+        "key": {"type": "string"},
+        "kind": {"type": "string", "enum": ["network", "local", "unknown"]},
+        "source": {"type": "string"},
+        "hosts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "paths": {"type": "object", "additionalProperties": {"type": "string"}},
+        "verified": {"type": "boolean"},
+    },
+    "required": ["key", "kind", "source", "hosts", "paths", "verified"],
+    "additionalProperties": False,
+}
 _CACHE_REPORT = {
     "type": "array",
     "items": {
@@ -3305,6 +3318,7 @@ _CACHE_REPORT = {
             "budget_scope": {"type": "string", "enum": ["private_managed_snapshots"]},
             "reclaimed_bytes_kind": {"type": "string", "enum": ["allocated_bytes_estimate"]},
             "free_bytes_after_kind": {"type": "string", "enum": ["measured", "projected"]},
+            "location": {**_CACHE_LOCATION, "type": ["object", "null"]},
         },
         "required": [
             "host",
@@ -3318,6 +3332,7 @@ _CACHE_REPORT = {
             "budget_scope",
             "reclaimed_bytes_kind",
             "free_bytes_after_kind",
+            "location",
         ],
         "additionalProperties": False,
     },

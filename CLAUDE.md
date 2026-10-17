@@ -3022,6 +3022,20 @@ Before launching, sparkrun can pre-sync models and container images from the con
   snapshot that would free nothing. The repair download reports progress the way the copy leg does: the
   adapter prints `SPARKRUN_MODEL_PROGRESS <done> <total>` from a staging-dir sampler, and
   `acquisition.RepairProgress` turns it into feedback events (log line every 10s).
+- **Cache locations** (`models/cache_locations.py`): the retention operations (`list` / `prune` / `pin` /
+  `reconcile` / `delete`) run once per *cache*, not per host. Run per host on a shared NFS cache, `list`
+  repeated one table N times and `delete` previewed and confirmed N times the bytes it frees. `cache_operation`
+  groups hosts by a read-only identity probe:
+  - a network filesystem is keyed by mount source, path in the export, and inode (the server's file id agrees
+    across clients);
+  - a local filesystem is keyed by `boot_id`, device and inode, so identically imaged machines' disks never
+    merge, but one machine under two names does;
+  - a failed probe stays its own location.
+
+  The key can only err toward *more* locations. Mutating actions also nonce-verify (write through one host's
+  path, read back through the others, retrying for NFS caching), into a persistent file rewritten in place,
+  because a new name can sit behind negative-lookup caching. Previews never write. `CacheReport.location`
+  carries the hosts; `inspect`/`repair` stay per host (they validate bindings, which are per host).
 - **Containers** (`containers/`): Pulls image locally (`containers/registry.py`), then streams via
   `docker save | ssh docker load` (`containers/distribute.py`, `containers/sync.py`). Checks image IDs to skip hosts
   that already have the correct image.

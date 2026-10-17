@@ -1006,8 +1006,23 @@ _CACHE_ACTION_LABELS = {
 }
 
 
+def _cache_report_heading(report) -> list[str]:
+    """One heading per cache: a cache several hosts share is named once, with its hosts."""
+    location = getattr(report, "location", None)
+    free = "(free %s)" % format_bytes(report.free_bytes)
+    if location is None or len(location.hosts) < 2:
+        return ["%s  %s  %s" % (report.host, report.cache_root, free)]
+    storage = location.source if location.kind == "network" else report.cache_root
+    lines = ["%s  %s" % (storage, free), "  shared by %d hosts: %s" % (len(location.hosts), ", ".join(location.hosts))]
+    if len(set(location.paths.values())) > 1:
+        lines.append("  mounted at: " + ", ".join("%s %s" % (host, location.paths[host]) for host in location.hosts))
+    elif location.kind == "network":
+        lines.append("  mounted at: " + report.cache_root)
+    return lines
+
+
 def _format_cache_report(report, action: str, now: float | None, show_untracked: bool) -> list[str]:
-    lines = ["%s  %s  (free %s)" % (report.host, report.cache_root, format_bytes(report.free_bytes))]
+    lines = _cache_report_heading(report)
     everything = sorted(report.entries, key=lambda e: (e.repo, e.last_used or 0, e.revision))
     # Untracked snapshots carry no usage data and are never pruned; on a cache
     # sparkrun has not prepared they can outnumber managed revisions 50:1.
@@ -1102,7 +1117,8 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
 def format_model_cache_reports(reports, *, action: str = "inventory", now: float | None = None, show_untracked: bool = False) -> str:
     """Render ``CacheReport`` results from ``model-cache list/prune/pin/reconcile``.
 
-    *action* selects the footer: ``inventory`` totals eligible bytes, ``prune``
+    One block per cache location: hosts sharing one cache are listed under it
+    rather than repeated. *action* selects the footer: ``inventory`` totals eligible bytes, ``prune``
     states what was (or would be) reclaimed and whether the space target was met.
     Untracked snapshots are counted but not listed unless *show_untracked*.
     """

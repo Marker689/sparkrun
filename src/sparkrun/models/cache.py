@@ -43,14 +43,55 @@ def host_cache(io, host, root, **options):
     return report
 
 
-def cache_operation(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None, **options):
+def _mutates(options) -> bool:
+    return options.get("action") in {"pin", "reconcile"} or (
+        options.get("action") in {"prune", "delete"} and not options.get("dry_run", True)
+    )
+
+
+def resolve_cache_locations(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None, verify=False):
+    """The cache locations *hosts* see; nonce-verified when *verify* (see ``models.cache_locations``)."""
+    from sparkrun.models.cache_locations import resolve_locations, verify_locations
+
+    with ModelHostIO(ssh_kwargs, session=session) as io:
+        locations = resolve_locations(io, hosts if hosts is not None else ("localhost",), cache_dir)
+        return verify_locations(io, locations) if verify else locations
+
+
+def cache_operation(*, cache_dir, hosts=("localhost",), ssh_kwargs=None, session=None, locations=None, **options):
+    """Run one cache-agent action once per cache location, not once per host.
+
+    Hosts that see the same cache (one NFS export, or one machine under two
+    names) form a location; the action runs on its first host and the report
+    carries the location. A mutating action first confirms each location by a
+    nonce round-trip; a preview stays read-only and relies on the probed
+    identity alone. Pass *locations* to reuse a grouping across calls (delete
+    gates its apply on a preview of exactly the caches it will change).
+
+    Only a read-only action moves on to another host of the same cache when one
+    fails: a mutating action that failed may still have changed the cache, so
+    its error is reported rather than masked by a second run.
+    """
+    from dataclasses import replace
+
+    from sparkrun.models.cache_reports import CacheReport
+
+    mutating = _mutates(options)
+    if locations is None:
+        locations = resolve_cache_locations(cache_dir=cache_dir, hosts=hosts, ssh_kwargs=ssh_kwargs, session=session, verify=mutating)
     reports = []
     with ModelHostIO(ssh_kwargs, session=session) as io:
-        for host in dict.fromkeys(hosts if hosts is not None else ("localhost",)):
-            root = io.root(host, cache_dir)
-            from sparkrun.models.cache_reports import CacheReport
-
-            reports.append(CacheReport.from_dict(host_cache(io, host, root, **options)))
+        for location in locations:
+            for index, host in enumerate(location.hosts):
+                try:
+                    report = host_cache(io, host, location.paths[host], **options)
+                except ModelArtifactError:
+                    if mutating or index == len(location.hosts) - 1:
+                        raise
+                    logger.info("Cache inventory on %s failed; asking another host of the same cache", host)
+                    continue
+                reports.append(replace(CacheReport.from_dict(report), location=location))
+                break
     return tuple(reports)
 
 

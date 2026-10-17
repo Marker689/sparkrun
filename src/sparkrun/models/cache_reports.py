@@ -1,7 +1,7 @@
 """Public retention DTOs. Mapping access is available to report renderers."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
@@ -39,6 +39,25 @@ class CacheEntry(ReportMapping):
 
 
 @dataclass(frozen=True)
+class CacheLocation(ReportMapping):
+    """One model cache and the hosts that see it.
+
+    *kind* is ``network``, ``local`` or ``unknown`` (the probe failed).
+    *source* names the storage: the mount source for a network share, else the
+    host. *paths* maps each host to its own path to the cache, which may differ
+    per host for one share. *verified* is true when sharing was confirmed by a
+    nonce round-trip (always true for a single host).
+    """
+
+    key: str
+    kind: str
+    source: str
+    hosts: tuple[str, ...]
+    paths: dict[str, str] = field(default_factory=dict)
+    verified: bool = False
+
+
+@dataclass(frozen=True)
 class CacheReport(ReportMapping):
     host: str
     cache_root: str
@@ -52,7 +71,13 @@ class CacheReport(ReportMapping):
     reclaimed_bytes_kind: str
     free_bytes_after_kind: str
     free_bytes_after: int | None = None
+    #: The cache this report covers and every host that sees it; the operation
+    #: ran once, on ``host``. Set by every ``api.model_cache`` operation.
+    location: CacheLocation | None = None
 
     @classmethod
     def from_dict(cls, value):
-        return cls(**{**value, "entries": tuple(CacheEntry(**entry) for entry in value["entries"])})
+        location = value.get("location")
+        if isinstance(location, dict):
+            location = CacheLocation(**{**location, "hosts": tuple(location["hosts"])})
+        return cls(**{**value, "entries": tuple(CacheEntry(**entry) for entry in value["entries"]), "location": location})

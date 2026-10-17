@@ -246,13 +246,19 @@ def delete_model(
     returned instead. Pass the revisions a user confirmed as *allowed_revisions*
     so a revision that appeared after the confirmation is refused, not deleted.
     """
-    from sparkrun.models.cache import cache_operation
+    from sparkrun.models.cache import cache_operation, resolve_cache_locations
 
+    ssh = _ssh(ssh_kwargs, sctx)
+    # Applying: verify the grouping once and gate on a preview of exactly the
+    # caches the apply will change. An unverified preview could have merged a
+    # cache the verified apply splits off, which no refusal would then cover.
+    locations = None if dry_run else resolve_cache_locations(cache_dir=cache_dir, hosts=hosts, ssh_kwargs=ssh, session=session, verify=True)
     options = dict(
         cache_dir=cache_dir,
         hosts=hosts,
-        ssh_kwargs=_ssh(ssh_kwargs, sctx),
+        ssh_kwargs=ssh,
         session=session,
+        locations=locations,
         action="delete",
         repo=request.repo,
         revision=request.revision,

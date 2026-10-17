@@ -161,8 +161,17 @@ Sparkrun metadata directory, including for a warm cache.
 The records belong to the cache host, not the controller's daemon database.
 Delegated downloads and fan-out therefore record usage on the head and workers
 without storing model weights on the controller. Shared cache mounts share the
-same usage records and claims; each host's inventory report is a view of that
-cache, not an additional copy to add to a cluster-wide byte total.
+same usage records and claims.
+
+`list`, `prune`, `pin`, `reconcile` and `delete` work per **cache location**, not
+per host: hosts that see the same cache (one NFS/SMB export, or one machine
+reached under two names) get a single report naming all of them, and the action
+runs once. Identity is probed read-only: mount source, the path within the
+export and its inode for a network filesystem; boot id, device and inode for a
+local one, so two machines' local disks are never merged. Before a mutating
+action, sharing is also confirmed by writing a nonce through one host's path and
+reading it back through each other's; a host that cannot confirm it is handled
+separately. Byte totals across reports can therefore be added up.
 
 ```sh
 # Read-only inventory, including untracked snapshots and protection reasons.
@@ -429,8 +438,11 @@ remain deployment acceptance checks before removing the default compatibility fa
 
 ## Retention report contract and lifecycle
 
-Python retention methods return `CacheReport` objects with typed `CacheEntry`
-entries; mapping access is also supported. CLI `--json` and daemon results use the
+Python retention methods return one `CacheReport` per cache location, with typed
+`CacheEntry` entries; mapping access is also supported. `host` is the host the
+action ran on; `location` (`CacheLocation`: `kind` network/local/unknown,
+`source`, `hosts`, per-host `paths`, `verified`) names every host that shares
+that cache. CLI `--json` and daemon results use the
 same fields. `reason_code` is the stable machine-readable eligibility outcome;
 `reason` is explanatory text. `budget_scope: private_managed_snapshots` makes the
 scope of `max_bytes` explicit. `reclaimed_bytes_kind: allocated_bytes_estimate`

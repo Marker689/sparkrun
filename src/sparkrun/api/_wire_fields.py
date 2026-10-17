@@ -6,7 +6,7 @@ calls the same value ``workload_id``.
 """
 
 from dataclasses import fields as _dataclass_fields
-from sparkrun.models.cache_reports import CacheEntry, CacheReport
+from sparkrun.models.cache_reports import CacheEntry, CacheLocation, CacheReport
 
 DTO_FIELDS = {
     "sparkrun.api._build_models.BuildOptions": [
@@ -782,5 +782,5 @@ DTO_FIELDS.update(
 
 # Retention DTOs own their public field declarations.
 
-for _report in (CacheEntry, CacheReport):
+for _report in (CacheEntry, CacheLocation, CacheReport):
     DTO_FIELDS[_report.__module__ + "." + _report.__name__] = [field.name for field in _dataclass_fields(_report)]

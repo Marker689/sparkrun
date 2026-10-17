@@ -97,7 +97,7 @@ def options(function):
                 ctx.exit(1)
 
     for decorator in (
-        json_option("Print the per-host reports as JSON."),
+        json_option("Print the per-cache reports as JSON."),
         click.option("--checksum", "checksums", is_flag=True, help="Hash selected files; normal inspection checks size and readability."),
         _target_options,
         endpoint_option,
@@ -197,7 +197,7 @@ def _cache_options(function, action):
         if any(not r.get("target_met", True) for r in reports):
             ctx.exit(1)
 
-    return click.pass_context(_target_options(json_option("Print the per-host reports as JSON.")(wrapped)))
+    return click.pass_context(_target_options(json_option("Print the per-cache reports as JSON.")(wrapped)))
 
 
 @model_cache.command("list")
@@ -276,7 +276,7 @@ def _interactive() -> bool:
 @click.option("--force", is_flag=True, help="Also delete revisions with outstanding workload claims (likely in use).")
 @click.pass_context
 @_target_options
-@json_option("Print the per-host reports as JSON.")
+@json_option("Print the per-cache reports as JSON.")
 def delete_cache(ctx, model, revision, dry_run, assume_yes, force, output_json, **targets):
     """Delete a model, or one revision of it, from the target hosts' caches.
 
@@ -303,8 +303,10 @@ def delete_cache(ctx, model, revision, dry_run, assume_yes, force, output_json, 
             if output_json or not _interactive():
                 raise click.ClickException("Refusing to delete without confirmation; pass --yes")
             planned = sum(r.planned_bytes for r in reports)
+            hosts = sum(len(r.location.hosts) if r.location else 1 for r in reports)
+            where = "%d host(s)" % hosts if hosts == len(reports) else "%d cache(s) on %d host(s)" % (len(reports), hosts)
             click.confirm(
-                "\nDelete %d revision(s) of %s from %d host(s), freeing ~%s?" % (doomed, request.repo, len(reports), format_bytes(planned)),
+                "\nDelete %d revision(s) of %s from %s, freeing ~%s?" % (doomed, request.repo, where, format_bytes(planned)),
                 abort=True,
             )
         if proceed:

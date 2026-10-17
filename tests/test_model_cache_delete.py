@@ -207,6 +207,8 @@ def test_apply_deletes_nowhere_when_any_host_refuses(monkeypatch):
         return (SimpleNamespace(target_met=True), refused)
 
     monkeypatch.setattr("sparkrun.models.cache.cache_operation", operation)
+    # The apply verifies its grouping once, before the gating preview.
+    monkeypatch.setattr("sparkrun.models.cache.resolve_cache_locations", lambda **kwargs: ())
     reports = model_cache.delete_model(ModelArtifactRequest("org/model"), cache_dir="/c", hosts=("a", "b"), dry_run=False)
     assert calls == [True]
     assert not reports[1].target_met
