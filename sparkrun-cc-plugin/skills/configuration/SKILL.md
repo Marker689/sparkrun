@@ -138,14 +138,15 @@ not enable feature flags or install plugins.
 ## Models, transfers, and optional cleanup
 
 ```bash
-sparkrun model-cache list --host <host1> --host <host2>
-sparkrun model-cache inspect org/model-name --host <host1>
-sparkrun model-cache repair org/model-name --host <host1> --dry-run
-sparkrun model-cache prune --host <host1> --max-bytes 107374182400 --dry-run
-sparkrun model-cache pin org/model-name --revision <commit_id> --host <host1>
+sparkrun model-cache list --cluster <cluster_name>
+sparkrun model-cache inspect org/model-name --hosts <host1>,<host2>
+sparkrun model-cache repair org/model-name --cluster <cluster_name> --dry-run
+sparkrun model-cache prune --cluster <cluster_name> --max-bytes 107374182400 --dry-run
+sparkrun model-cache pin org/model-name --revision <commit_id> --cluster <cluster_name>
 ```
 
-Use repeated singular `--host`, not `--cluster`/`--hosts`; default is localhost.
+Targets resolve like other commands: `--cluster`/`--hosts`/`--hosts-file`, else the
+default cluster, else localhost. Output is a per-host table; add `--json` to parse it.
 Prune previews by default; `--apply` needs authorization for cleanup. It uses LRU
 among eligible managed revisions, respects pins/live claims, and leaves untracked
 snapshots/shared blobs alone. Usage records cover Sparkrun lifecycle activity,

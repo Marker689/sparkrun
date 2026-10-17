@@ -9,12 +9,48 @@ import click
 
 from sparkrun.api import model_cache as api
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest, ModelArtifactRequest
-from ._common import HIDE_ADVANCED_OPTIONS, _get_context
+from sparkrun.utils.cli_formatters import format_cache_validation_reports, format_model_cache_reports
+from ._common import HIDE_ADVANCED_OPTIONS, _get_cluster_manager, _get_context, host_options, json_option, resolve_host_context
 
 
 @click.group("model-cache", hidden=HIDE_ADVANCED_OPTIONS)
 def model_cache():
-    """Inspect, repair, retain and prune model caches on selected hosts."""
+    """Inspect, repair, retain and prune model caches on cluster hosts.
+
+    Targets the hosts of --cluster, --hosts or --hosts-file, else the default
+    cluster, else config default_hosts, else localhost.
+    """
+
+
+def _resolve_targets(sctx, *, legacy_hosts, hosts, hosts_file, cluster_name, cache_dir):
+    """Resolve target hosts and their HF home like every other cluster command.
+
+    Returns ``(host_list, cache_dir, banner)``. ``--host`` (repeatable, legacy)
+    is merged into ``--hosts``. With no host source at all the control
+    machine's own cache (localhost) is the target, as before clusters were
+    supported. The cache dir is ``--cache-dir`` → the cluster's ``cache_dir`` →
+    the head's HF home probed over SSH (what a launch would use), so a remote
+    host is never pointed at the control machine's home directory.
+    """
+    from sparkrun.core.launcher import resolve_effective_cache_dir
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    config = sctx.config
+    hosts = ",".join([*legacy_hosts, *([hosts] if hosts else [])]) or None
+    if not (hosts or hosts_file or cluster_name or config.default_hosts or _get_cluster_manager(sctx=sctx).get_default()):
+        host_list, cluster_cache, banner = ["localhost"], None, "Hosts: localhost (no cluster configured)"
+    else:
+        hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx=sctx)
+        host_list, cluster_cache, banner = hctx.host_list, hctx.cluster.cache_dir, hctx.describe()
+    cache_dir = resolve_effective_cache_dir(cache_dir or cluster_cache, host_list, build_ssh_kwargs(config), config)
+    return host_list, cache_dir, banner
+
+
+def _target_options(function):
+    """``--cluster/--hosts/--hosts-file``, the hidden legacy ``--host`` and ``--cache-dir``."""
+    function = click.option("--cache-dir", default=None, help="HF_HOME on the target hosts, not its hub subdirectory.")(function)
+    function = click.option("--host", "legacy_hosts", multiple=True, hidden=True, help="Target host (repeatable; legacy).")(function)
+    return host_options(function)
 
 
 endpoint_option = click.option(
@@ -25,19 +61,25 @@ endpoint_option = click.option(
 )
 
 
+def _pop_targets(kwargs):
+    return {key: kwargs.pop(key) for key in ("legacy_hosts", "hosts", "hosts_file", "cluster_name", "cache_dir")}
+
+
 def options(function):
     @wraps(function)
-    def wrapped(ctx, model, revision, file_selection, projector, endpoint, cache_dir, hosts, checksums, **kwargs):
-        from sparkrun.core.config import resolve_hf_cache_home
+    def wrapped(ctx, model, revision, file_selection, projector, endpoint, checksums, output_json, **kwargs):
         from sparkrun.orchestration.primitives import build_ssh_kwargs
 
         sctx = _get_context(ctx)
         try:
+            host_list, cache_dir, banner = _resolve_targets(sctx, **_pop_targets(kwargs))
+            if not output_json:
+                click.echo(banner)
             request = ModelArtifactRequest(model, revision, endpoint, projector, file_selection)
             result = function(
                 request,
-                cache_dir=resolve_hf_cache_home(cache_dir),
-                hosts=hosts or ("localhost",),
+                cache_dir=cache_dir,
+                hosts=tuple(host_list),
                 checksums=checksums,
                 ssh_kwargs=build_ssh_kwargs(sctx.config),
                 config=sctx.config,
@@ -46,14 +88,17 @@ def options(function):
         except (ModelArtifactError, OSError) as error:
             raise click.ClickException(str(error)) from error
         if result is not None:
-            click.echo(json.dumps([asdict(report) for report in result], indent=2))
+            if output_json:
+                click.echo(json.dumps([asdict(report) for report in result], indent=2))
+            else:
+                click.echo(format_cache_validation_reports(result))
             if any(not report.complete for report in result):
                 ctx.exit(1)
 
     for decorator in (
+        json_option("Print the per-host reports as JSON."),
         click.option("--checksum", "checksums", is_flag=True, help="Hash selected files; normal inspection checks size and readability."),
-        click.option("--host", "hosts", multiple=True, help="Target host (repeatable; default localhost)."),
-        click.option("--cache-dir", default=None, help="HF_HOME on the target hosts."),
+        _target_options,
         endpoint_option,
         click.option("--projector", default=None),
         click.option("--file-selection", type=click.Choice(["auto", "all", "safetensors"]), default="auto", show_default=True),
@@ -72,14 +117,26 @@ def inspect_cache(request, *, config, **kwargs):
 
 
 @model_cache.command("resolve")
+@click.argument("model")
+@click.option("--revision", default=None)
+@click.option("--file-selection", type=click.Choice(["auto", "all", "safetensors"]), default="auto", show_default=True)
+@click.option("--projector", default=None)
+@endpoint_option
+@click.option("--cache-dir", default=None, help="HF_HOME on this control machine, used for the weight index download.")
 @click.option("--output", required=True, type=click.Path(path_type=Path), help="Write the portable manifest here.")
-@options
-def resolve(request, *, output, cache_dir, **kwargs):
-    """Resolve origin metadata online; download only the small weight index."""
-    from sparkrun.core.config import resolve_hf_token
+def resolve(model, revision, file_selection, projector, endpoint, cache_dir, output):
+    """Resolve origin metadata online; download only the small weight index.
 
-    manifest = api.resolve_manifest(request, token=resolve_hf_token(), cache_dir=cache_dir)
-    output.write_text(manifest.to_json() + "\n")
+    Runs on the control machine only; import the manifest onto cluster hosts.
+    """
+    from sparkrun.core.config import resolve_hf_cache_home, resolve_hf_token
+
+    try:
+        request = ModelArtifactRequest(model, revision, endpoint, projector, file_selection)
+        manifest = api.resolve_manifest(request, token=resolve_hf_token(), cache_dir=resolve_hf_cache_home(cache_dir))
+        output.write_text(manifest.to_json() + "\n")
+    except (ModelArtifactError, OSError) as error:
+        raise click.ClickException(str(error)) from error
     click.echo("Wrote %d files at revision %s to %s" % (len(manifest.files), manifest.revision, output))
 
 
@@ -108,35 +165,43 @@ def repair(request, **kwargs):
     return tuple(binding.report for binding in prepared.bindings)
 
 
-def cache_options(function):
+def cache_options(action):
+    """Shared host/cache options for retention commands; *action* selects the summary footer."""
+    return lambda function: _cache_options(function, action)
+
+
+def _cache_options(function, action):
     @wraps(function)
-    def wrapped(ctx, cache_dir, hosts, **kwargs):
-        from sparkrun.core.config import resolve_hf_cache_home
+    def wrapped(ctx, output_json, **kwargs):
         from sparkrun.orchestration.primitives import build_ssh_kwargs
 
         sctx = _get_context(ctx)
+        show_all = kwargs.pop("show_all", False)
         try:
+            host_list, cache_dir, banner = _resolve_targets(sctx, **_pop_targets(kwargs))
+            if not output_json:
+                click.echo(banner)
             reports = function(
-                cache_dir=resolve_hf_cache_home(cache_dir),
-                hosts=hosts or ("localhost",),
+                cache_dir=cache_dir,
+                hosts=tuple(host_list),
                 ssh_kwargs=build_ssh_kwargs(sctx.config),
                 **kwargs,
             )
         except (ValueError, OSError) as exc:
             raise click.ClickException(str(exc)) from exc
-        click.echo(json.dumps([asdict(report) for report in reports], indent=2))
+        if output_json:
+            click.echo(json.dumps([asdict(report) for report in reports], indent=2))
+        else:
+            click.echo(format_model_cache_reports(reports, action=action, show_untracked=show_all))
         if any(not r.get("target_met", True) for r in reports):
             ctx.exit(1)
 
-    return click.pass_context(
-        click.option("--host", "hosts", multiple=True, help="Cache host; repeat for multiple hosts (default localhost).")(
-            click.option("--cache-dir", help="HF_HOME on the target hosts, not its hub subdirectory.")(wrapped)
-        )
-    )
+    return click.pass_context(_target_options(json_option("Print the per-host reports as JSON.")(wrapped)))
 
 
 @model_cache.command("list")
-@cache_options
+@click.option("--all", "show_all", is_flag=True, help="Also list untracked snapshots (always included in --json).")
+@cache_options("inventory")
 def list_cache(**kwargs):
     """List cached revisions, usage, pins and workload claims without changing files.
 
@@ -157,7 +222,7 @@ def list_cache(**kwargs):
 )
 @click.option("--max-bytes", type=click.IntRange(min=0), help="Target budget for private managed snapshot bytes; excludes shared blobs.")
 @click.option("--min-free-bytes", type=click.IntRange(min=0), help="Target free space on the cache filesystem in bytes.")
-@cache_options
+@cache_options("prune")
 def prune_cache(**kwargs):
     """Remove eligible revisions in least-recently-used order.
 
@@ -173,7 +238,7 @@ def prune_cache(**kwargs):
 @click.option("--revision", required=True, help="Full immutable model commit ID.")
 @click.option("--remove", is_flag=True, help="Remove the retention pin instead of setting it.")
 @endpoint_option
-@cache_options
+@cache_options("pin")
 def pin_cache(model, revision, remove, endpoint, **kwargs):
     """Keep a tracked revision out of cleanup on each selected cache host."""
     return api.pin_revision(ModelArtifactRequest(model, revision, endpoint=endpoint), pinned=not remove, **kwargs)
@@ -185,7 +250,7 @@ def pin_cache(model, revision, remove, endpoint, **kwargs):
 @click.option("--claim", required=True, help="Exact outstanding claim ID shown by model-cache list.")
 @click.option("--confirm-inactive", is_flag=True, help="Confirm all workloads/launches sharing this claim have stopped.")
 @endpoint_option
-@cache_options
+@cache_options("reconcile")
 def reconcile_cache(model, revision, claim, confirm_inactive, endpoint, **kwargs):
     """Release an interrupted workload's claim after inspecting its hosts.
 

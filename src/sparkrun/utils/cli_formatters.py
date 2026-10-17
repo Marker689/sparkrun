@@ -933,3 +933,161 @@ def format_launch_timings(
 
     walk(None, 0)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# model-cache reports
+# ---------------------------------------------------------------------------
+
+_MAX_LISTED_FAILURES = 20
+
+
+def format_bytes(value: int | float | None) -> str:
+    """Binary-unit size (``15.2 GiB``); ``-`` when unknown."""
+    if value is None:
+        return "-"
+    value = max(0.0, float(value))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return "%d B" % value if unit == "B" else "%.1f %s" % (value, unit)
+        value /= 1024
+    raise AssertionError("unreachable")
+
+
+def format_age(timestamp: float | None, *, now: float | None = None) -> str:
+    """Coarse age of an epoch timestamp (``3d ago``); ``-`` when unknown."""
+    import time
+
+    if timestamp is None:
+        return "-"
+    seconds = max(0.0, (time.time() if now is None else now) - timestamp)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return "%d%s ago" % (seconds // size, unit)
+    return "just now"
+
+
+def _columns(header: tuple[str, ...], rows: list[tuple[str, ...]], indent: str = "") -> list[str]:
+    """Left-aligned columns sized to their widest cell; the last column is free-width."""
+    widths = [max(len(row[i]) for row in (header, *rows)) for i in range(len(header) - 1)]
+
+    def line(cells):
+        return (indent + "  ".join(c.ljust(w) for c, w in zip(cells[:-1], widths, strict=True)) + "  " + cells[-1]).rstrip()
+
+    return [line(header), *(line(row) for row in rows)]
+
+
+def format_cache_validation_reports(reports) -> str:
+    """Render ``CacheValidationReport`` rows from ``model-cache inspect/import/repair``."""
+    if not reports:
+        return "No hosts inspected."
+    rows = [(r.host, r.status, r.level, str(r.checked_files), r.detail or "") for r in reports]
+    lines = _columns(("HOST", "STATUS", "LEVEL", "FILES", "DETAIL"), rows)
+    for report in reports:
+        if not report.failures:
+            continue
+        lines.append("")
+        lines.append("%s: %d problem file(s)" % (report.host, len(report.failures)))
+        for failure in report.failures[:_MAX_LISTED_FAILURES]:
+            lines.append("  %s: %s" % (failure.path, failure.reason))
+        hidden = len(report.failures) - _MAX_LISTED_FAILURES
+        if hidden > 0:
+            lines.append("  ... and %d more (use --json for the full list)" % hidden)
+    return "\n".join(lines)
+
+
+_CACHE_ACTION_LABELS = {
+    "would_remove": "would remove",
+    "removed": "removed",
+    "pin": "updated",
+    "reconcile": "claim released",
+}
+
+
+def _format_cache_report(report, action: str, now: float | None, show_untracked: bool) -> list[str]:
+    lines = ["%s  %s  (free %s)" % (report.host, report.cache_root, format_bytes(report.free_bytes))]
+    everything = sorted(report.entries, key=lambda e: (e.repo, e.last_used or 0, e.revision))
+    # Untracked snapshots carry no usage data and are never pruned; on a cache
+    # sparkrun has not prepared they can outnumber managed revisions 50:1.
+    entries = everything if show_untracked else [e for e in everything if e.tracked or e.action]
+    hidden = len(everything) - len(entries)
+    hidden_note = "  %d untracked snapshot(s) not shown (not managed by sparkrun; never pruned). Use --all to list them." % hidden
+    if not entries:
+        lines.append("  No managed revisions." if hidden else "  No cached revisions.")
+        if hidden:
+            lines.append(hidden_note)
+        return lines
+    show_action = any(e.action for e in entries)
+    header = ("REPO", "REVISION", "SIZE", "RECLAIMABLE", "LAST USED", "PINNED", "CLAIMS", "STATUS")
+    rows = []
+    for e in entries:
+        status = e.reason
+        if show_action and e.action:
+            status = "%s (%s)" % (_CACHE_ACTION_LABELS.get(e.action, e.action), status)
+        rows.append(
+            (
+                e.repo,
+                e.revision,
+                format_bytes(e.logical_bytes) if e.tracked else "-",
+                format_bytes(e.reclaimable_bytes) if e.tracked else "-",
+                format_age(e.last_used, now=now),
+                "yes" if e.pinned else "",
+                str(len(e.claims)) if e.claims else "",
+                status,
+            )
+        )
+    lines.extend(_columns(header, rows, indent="  "))
+
+    claimed = [e for e in entries if e.claims]
+    if claimed:
+        lines.append("")
+        lines.append("  Outstanding claims:")
+        for e in claimed:
+            for claim_id, claim in sorted(e.claims.items()):
+                claim = claim if isinstance(claim, dict) else {}
+                parts = ["%s@%s" % (e.repo, e.revision[:12]), claim_id]
+                if claim.get("workload"):
+                    parts.append("workload=%s" % claim["workload"])
+                if claim.get("hosts"):
+                    parts.append("hosts=%s" % ",".join(str(h) for h in claim["hosts"]))
+                if claim.get("created") is not None:
+                    parts.append("created %s" % format_age(claim["created"], now=now))
+                lines.append("    " + "  ".join(parts))
+
+    if action == "prune":
+        selected = sum(1 for e in entries if e.action in ("would_remove", "removed"))
+        lines.append("")
+        if report.dry_run:
+            lines.append("  Would reclaim ~%s from %d revision(s)." % (format_bytes(report.planned_bytes), selected))
+        else:
+            lines.append("  Reclaimed ~%s from %d revision(s)." % (format_bytes(report.reclaimed_bytes), selected))
+        if report.free_bytes_after is not None:
+            lines.append("  Free space after: %s (%s)" % (format_bytes(report.free_bytes_after), report.free_bytes_after_kind))
+        if not report.target_met:
+            lines.append("  Space target not met: remaining revisions are protected or share blobs.")
+    elif action == "inventory":
+        tracked = [e for e in everything if e.tracked]
+        eligible = [e for e in tracked if e.eligible]
+        lines.append("")
+        lines.append(
+            "  %d revision(s), %d tracked; %d eligible for pruning (~%s reclaimable)."
+            % (len(everything), len(tracked), len(eligible), format_bytes(sum(e.reclaimable_bytes for e in eligible)))
+        )
+    if hidden:
+        lines.append(hidden_note)
+    return lines
+
+
+def format_model_cache_reports(reports, *, action: str = "inventory", now: float | None = None, show_untracked: bool = False) -> str:
+    """Render ``CacheReport`` results from ``model-cache list/prune/pin/reconcile``.
+
+    *action* selects the footer: ``inventory`` totals eligible bytes, ``prune``
+    states what was (or would be) reclaimed and whether the space target was met.
+    Untracked snapshots are counted but not listed unless *show_untracked*.
+    """
+    if not reports:
+        return "No cache hosts reported."
+    blocks = ["\n".join(_format_cache_report(r, action, now, show_untracked)) for r in reports]
+    if action == "prune" and any(e.action == "would_remove" for r in reports for e in r.entries):
+        blocks.append("Dry run: nothing was removed. Re-run with --apply to remove the revisions marked above.")
+    return "\n\n".join(blocks)

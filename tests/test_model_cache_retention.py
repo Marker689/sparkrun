@@ -27,6 +27,12 @@ from sparkrun.models.usage import (
 from test_model_artifacts import artifact, cache, SHA
 
 
+def cli_context(*, default_cluster=None, default_hosts=None):
+    """Fake CLI context with no saved clusters unless one is given."""
+    config = SimpleNamespace(ssh_user=None, ssh_key=None, ssh_options=None, default_hosts=default_hosts)
+    return SimpleNamespace(config=config, cluster_manager=Mock(get_default=Mock(return_value=default_cluster)))
+
+
 def tracked(root, *, revision=SHA, shared=False, last_used=1, repo="org/model"):
     manifest = replace(artifact(), revision=revision, repo=repo)
     snapshot = cache(root, manifest, shared=shared)
@@ -265,9 +271,9 @@ def test_cli_preview_default_and_daemon_wire_report(tmp_path, monkeypatch):
     from sparkrun.daemon.special_ops import execute
 
     _, snapshot, _ = tracked(tmp_path)
-    context = SimpleNamespace(config=SimpleNamespace(ssh_user=None, ssh_key=None, ssh_options=None))
+    context = cli_context()
     monkeypatch.setattr(cli, "_get_context", lambda ctx: context)
-    result = CliRunner().invoke(cli.model_cache, ["prune", "--cache-dir", str(tmp_path), "--min-age-days", "0"])
+    result = CliRunner().invoke(cli.model_cache, ["prune", "--cache-dir", str(tmp_path), "--min-age-days", "0", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)[0]["dry_run"] and snapshot.exists()
     report = execute("model_cache.list", {"cache_dir": str(tmp_path)}, context)
@@ -364,7 +370,7 @@ def test_cli_retention_preserves_custom_endpoint(monkeypatch, tmp_path, command,
     from click.testing import CliRunner
     from sparkrun.cli import _model_cache as cli
 
-    context = SimpleNamespace(config=SimpleNamespace(ssh_user=None, ssh_key=None, ssh_options=None))
+    context = cli_context()
     monkeypatch.setattr(cli, "_get_context", lambda ctx: context)
     mutation = Mock(return_value=())
     monkeypatch.setattr(model_cache, function, mutation)

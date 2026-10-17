@@ -100,9 +100,13 @@ that same revision. It never picks an arbitrary cached snapshot at launch.
 
 ## Inspect, migrate and repair
 
-These commands print structured JSON reports; inspection/import return nonzero
-when a target is incomplete or unverified. `--host` is repeatable and uses the
-configured SSH credentials; `--cache-dir` is the target's HF home, not `hub/`.
+These commands print per-host tables; pass `--json` for the structured reports.
+Inspection/import return nonzero when a target is incomplete or unverified.
+Targets resolve like every other cluster command: `--cluster`, `--hosts` or
+`--hosts-file`, else the default cluster, else `default_hosts` from config, else
+localhost. The cluster's SSH user applies. `--cache-dir` is the target's HF home, not
+`hub/`; without it the cluster's `cache_dir` is used, else the head node's HF
+home is probed the way `run` does. `resolve` runs on the control machine only.
 
 ```sh
 # Metadata only, offline and read-only; no recursive cache traversal.
@@ -115,7 +119,7 @@ sparkrun model-cache resolve org/model --revision COMMIT --output manifest.json
 sparkrun model-cache import org/model --revision COMMIT --manifest manifest.json
 
 # Repair exactly the missing/wrong-size files and revalidate each target.
-sparkrun model-cache repair org/model --revision COMMIT --host node1 --host node2
+sparkrun model-cache repair org/model --revision COMMIT --hosts node1,node2
 
 # Explicit checksum audit/repair, including same-size corruption.
 sparkrun model-cache inspect org/model --revision COMMIT --checksum
@@ -161,20 +165,21 @@ same usage records and claims; each host's inventory report is a view of that
 cache, not an additional copy to add to a cluster-wide byte total.
 
 ```sh
-# Read-only JSON inventory, including untracked snapshots and protection reasons.
-sparkrun model-cache list --host node1 --host node2 --cache-dir /models/hf
+# Read-only inventory, including untracked snapshots and protection reasons.
+sparkrun model-cache list --cluster lab
+sparkrun model-cache list --hosts node1,node2 --cache-dir /models/hf --json
 
 # Preview LRU cleanup (the default); a byte budget applies per cache.
-sparkrun model-cache prune --host node1 --cache-dir /models/hf \
+sparkrun model-cache prune --hosts node1 --cache-dir /models/hf \
   --min-age-days 7 --max-bytes 536870912000
 
 # Explicitly apply the same policy. Nothing deletes automatically by default.
-sparkrun model-cache prune --host node1 --cache-dir /models/hf \
+sparkrun model-cache prune --hosts node1 --cache-dir /models/hf \
   --min-age-days 7 --max-bytes 536870912000 --apply
 
 # Keep an immutable revision; use --remove to remove its retention pin.
 sparkrun model-cache pin org/model --revision FULL_COMMIT \
-  --host node1 --cache-dir /models/hf
+  --hosts node1 --cache-dir /models/hf
 ```
 
 `prune` defaults to a dry run and a seven-day minimum age. Without a byte
@@ -215,7 +220,7 @@ any in-flight launch, then explicitly release the exact claim shown by `list`:
 
 ```sh
 sparkrun model-cache reconcile org/model --revision FULL_COMMIT \
-  --claim CLAIM_ID --host node1 --cache-dir /models/hf --confirm-inactive
+  --claim CLAIM_ID --hosts node1 --cache-dir /models/hf --confirm-inactive
 ```
 
 Reconciliation removes a protection record, not model files, and refreshes its
@@ -387,7 +392,7 @@ remain deployment acceptance checks before removing the default compatibility fa
 ## Retention report contract and lifecycle
 
 Python retention methods return `CacheReport` objects with typed `CacheEntry`
-entries; mapping access is also supported. CLI JSON and daemon results use the
+entries; mapping access is also supported. CLI `--json` and daemon results use the
 same fields. `reason_code` is the stable machine-readable eligibility outcome;
 `reason` is explanatory text. `budget_scope: private_managed_snapshots` makes the
 scope of `max_bytes` explicit. `reclaimed_bytes_kind: allocated_bytes_estimate`

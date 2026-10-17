@@ -51,11 +51,19 @@ def test_cli_inspect_is_offline_and_nonzero_when_unverified(tmp_path, monkeypatc
     from sparkrun.cli._model_cache import model_cache as cli
     from sparkrun.cli import _model_cache
 
-    monkeypatch.setattr(_model_cache, "_get_context", lambda ctx: Mock(config=Mock(ssh_user=None, ssh_key=None, ssh_options=None)))
+    context = Mock(
+        config=Mock(ssh_user=None, ssh_key=None, ssh_options=None, default_hosts=None),
+        cluster_manager=Mock(get_default=Mock(return_value=None)),
+    )
+    monkeypatch.setattr(_model_cache, "_get_context", lambda ctx: context)
     monkeypatch.setattr("sparkrun.models.manifest.fetch_inventory", Mock(side_effect=AssertionError("network")))
-    result = CliRunner().invoke(cli, ["inspect", "org/model", "--cache-dir", str(tmp_path)])
+    result = CliRunner().invoke(cli, ["inspect", "org/model", "--cache-dir", str(tmp_path), "--json"])
     assert result.exit_code == 1, result.output
     assert '"status": "unverified"' in result.output
+    human = CliRunner().invoke(cli, ["inspect", "org/model", "--cache-dir", str(tmp_path)])
+    assert human.exit_code == 1, human.output
+    assert "Hosts: localhost" in human.output
+    assert "HOST" in human.output and "unverified" in human.output and "{" not in human.output
 
 
 def test_small_index_is_checked_against_typed_inventory(tmp_path, monkeypatch):
