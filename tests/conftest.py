@@ -3,19 +3,84 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import sys
+from tempfile import TemporaryDirectory, mkdtemp
 from typing import Any
 
 import pytest
 import yaml
 
 from _telemetry_guard import describe_escapes, install_telemetry_blocker
-from sparkrun.core.bootstrap import init_sparkrun
-from sparkrun.core.registry import RegistryManager
-from sparkrun.utils.net import is_local_host as _REAL_IS_LOCAL_HOST
+from _test_isolation import IOGuard, isolate_environment
+
+# Collection imports the CLI, which reads config before autouse fixtures run.
+_collection_home = TemporaryDirectory(prefix="sparkrun-collection-")
+_collection_patch = pytest.MonkeyPatch()
+isolate_environment(_collection_patch, Path(_collection_home.name), clean_overrides=True)
+_io_guard = IOGuard()
+sys.addaudithook(_io_guard)
+
+from sparkrun.core.bootstrap import init_sparkrun  # noqa: E402 - isolate home before application imports
+from sparkrun.core.registry import RegistryManager  # noqa: E402 - isolate home before application imports
+from sparkrun.utils.net import is_local_host as _REAL_IS_LOCAL_HOST  # noqa: E402 - isolate home before application imports
 
 #: Captured before ``isolate_stateful`` stubs it out, so the ``real_registry_git``
 #: opt-out fixture can hand the genuine implementation back.
 _REAL_CLONE_OR_PULL = RegistryManager._clone_or_pull
+
+
+def pytest_unconfigure(config):
+    _io_guard.active = False
+    _collection_patch.undo()
+    _collection_home.cleanup()
+
+
+def pytest_collection_finish(session):
+    if _io_guard.attempts:
+        pytest.fail("External I/O during collection:\n" + "\n".join(_io_guard.attempts), pytrace=False)
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    _io_guard.attempts.clear()
+    yield
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    if _io_guard.attempts:
+        pytest.fail("External I/O escaped test mocks:\n" + "\n".join(dict.fromkeys(_io_guard.attempts)), pytrace=False)
+
+
+@pytest.fixture(scope="session")
+def test_directory_roots(tmp_path_factory):
+    roots = tuple(tmp_path_factory.mktemp(name) for name in ("cases", "runtime-state"))
+    _io_guard.fixture_roots.extend(roots)
+    # Other integration fixtures use tmp_path_factory directly.
+    _io_guard.fixture_roots.append(tmp_path_factory.getbasetemp().resolve())
+    return roots
+
+
+@pytest.fixture
+def tmp_path(request, test_directory_roots):
+    """Keep per-test directories without pytest's repeated sibling scans.
+
+    Retain artifacts under basetemp for diagnosis and pytest's session cleanup.
+    A second root keeps runtime/home files out of tests' transfer source trees.
+    """
+    prefix = re.sub(r"[\W]", "_", request.node.name)[:30] + "-"
+    return Path(mkdtemp(prefix=prefix, dir=test_directory_roots[0]))
+
+
+@pytest.fixture
+def host_service_manager():
+    """Allow the explicit user-systemd integration test's real service manager."""
+    _io_guard.allowed_commands.update({"systemctl", "systemd-run"})
+    try:
+        yield
+    finally:
+        _io_guard.allowed_commands.difference_update({"systemctl", "systemd-run"})
 
 
 @pytest.fixture
@@ -34,12 +99,13 @@ def unavailable_model_inventory(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolate_stateful(tmp_path: Path, monkeypatch):
+def isolate_stateful(tmp_path: Path, monkeypatch, isolate_runtime_state):
     """Redirect SAF stateful root to temp dir for test isolation.
 
     Prevents tests from writing to the real ~/.config/sparkrun/.
     Also resets the bootstrap singleton between tests.
     """
+    isolate_environment(monkeypatch, isolate_runtime_state / "home")
     from sparkrun.core.application_profile import _reset_application_profile_for_tests
     from sparkrun.core.installed_plugins import reset_installed_plugins
     import sparkrun.core.config as config_module
@@ -219,7 +285,7 @@ def isolate_stateful(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolate_runtime_state(tmp_path_factory, monkeypatch):
+def isolate_runtime_state(test_directory_roots, monkeypatch):
     """Point runtime-lease coordination state at a per-test directory.
 
     ``core/runtime_lease.py`` keys it off the *OS account* home and ignores
@@ -240,7 +306,7 @@ def isolate_runtime_state(tmp_path_factory, monkeypatch):
         if os.name != "nt":
             # Beside tmp_path, not in it: tests assert on tmp_path's contents
             # or use it as an (empty) transfer source.
-            root = tmp_path_factory.mktemp("runtime-state")
+            root = Path(mkdtemp(prefix="test-", dir=test_directory_roots[1]))
         else:
             # Private storage refuses pytest's shared temp parent on Windows
             # (see daemon_test_directory), so own a secured root instead.
@@ -743,7 +809,11 @@ def daemon_test_directory(tmp_path):
     with TemporaryDirectory(prefix="sparkrun-tests-") as temporary:
         root = Path(temporary)
         secure_path(root)
-        yield root
+        _io_guard.fixture_roots.append(root.resolve())
+        try:
+            yield root
+        finally:
+            _io_guard.fixture_roots.remove(root.resolve())
 
 
 @pytest.fixture
@@ -759,3 +829,51 @@ def loaded_litellm_plugin():
     # Supplying it must not resolve config and bind the default profile early.
     with patch("sparkrun.core.features.feature_gate_enabled", return_value=True):
         load_and_register_plugin(lambda: import_module(module), None, source=source, identity=PluginIdentity("litellm", module, source))
+
+
+@pytest.fixture
+def unavailable_hardware_probe(monkeypatch):
+    """Plumbing tests use configured inventory, without probing fixture hosts."""
+    monkeypatch.setattr("sparkrun.core.hardware_probe.probe_hosts", lambda *a, **kw: {})
+
+
+@pytest.fixture
+def benchmark_version(monkeypatch):
+    """Argument/placement tests do not resolve an installed benchmark tool."""
+    monkeypatch.setattr("sparkrun.benchmarking.llama_benchy.LlamaBenchyFramework.detect_version", lambda self: "test-version")
+
+
+@pytest.fixture
+def external_control(monkeypatch):
+    """Synthetic remote clusters do not contain this test controller."""
+    monkeypatch.setattr("sparkrun.core.hosts.is_control_in_cluster", lambda hosts: False)
+    monkeypatch.setattr("sparkrun.orchestration.distribution.is_control_in_cluster", lambda hosts: False)
+
+
+@pytest.fixture
+def no_cache_diagnostics(monkeypatch):
+    """Failure classification tests have no remote disk inventory to display."""
+    monkeypatch.setattr("sparkrun.orchestration.disk_info.probe_cache_status", lambda *a, **kw: {})
+
+
+@pytest.fixture
+def remote_cache_paths(monkeypatch):
+    """Deterministic remote paths for launch plumbing tests."""
+    monkeypatch.setattr("sparkrun.orchestration.primitives.probe_remote_sparkrun_cache", lambda *a, **kw: "/remote/.cache/sparkrun")
+    monkeypatch.setattr("sparkrun.orchestration.primitives.probe_remote_hf_cache", lambda *a, **kw: "/remote/.cache/huggingface")
+
+
+@pytest.fixture
+def reachable_init_workers(monkeypatch):
+    """Rendezvous/lifecycle tests use a reachable management network."""
+    from sparkrun.orchestration.ssh import RemoteResult
+
+    monkeypatch.setattr(
+        "sparkrun.orchestration.primitives.run_command_on_host",
+        lambda host, *a, **kw: RemoteResult(host=host, returncode=0, stdout="", stderr=""),
+    )
+
+
+@pytest.fixture
+def no_page_cache_clear(monkeypatch):
+    monkeypatch.setattr("sparkrun.orchestration.primitives.try_clear_page_cache", lambda *a, **kw: None)

@@ -12,6 +12,13 @@ from sparkrun.core.cluster_manager import ClusterManager
 from sparkrun.orchestration.ssh import RemoteResult
 
 
+@pytest.fixture(autouse=True)
+def _controller_without_ssh_server(monkeypatch):
+    """Wizard fixtures describe the cluster, not the developer's SSH server."""
+    monkeypatch.setattr("sparkrun.utils.net.local_ip_for", lambda host: "192.0.2.254")
+    monkeypatch.setattr("sparkrun.utils.net.accepts_tcp", lambda *a, **kw: False)
+
+
 @pytest.fixture
 def runner():
     return CliRunner()

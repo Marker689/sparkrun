@@ -365,6 +365,7 @@ def test_dry_run_never_evicts():
     _run_with_stubbed_launcher(_run_options(dry_run=True)).assert_not_called()
 
 
+@pytest.mark.usefixtures("unavailable_hardware_probe")
 def test_real_run_evicts_before_starting_containers():
     """Positive control for the test above: a non-dry-run reaches the
     eviction step, and hands it the launch's own cluster_id so it can't tear
@@ -377,6 +378,7 @@ def test_real_run_evicts_before_starting_containers():
     assert kwargs["cluster_id_for_launch"].startswith("sparkrun_%s_" % kwargs["intent_id"])
 
 
+@pytest.mark.usefixtures("unavailable_hardware_probe")
 def test_launch_that_dies_before_starting_containers_evicts_nothing():
     """An interrupted launch must leave the running deployment alone.
 

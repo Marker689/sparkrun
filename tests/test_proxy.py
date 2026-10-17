@@ -1501,6 +1501,7 @@ class TestEngineAliases:
 # =====================================================================
 
 
+@pytest.mark.usefixtures("external_control")
 class TestLaunchInferenceAutoPort:
     """Test auto_port behavior in launch_inference (used by proxy load and benchmark)."""
 
@@ -1663,6 +1664,7 @@ class TestLaunchInferenceAutoPort:
         mock_fap.assert_called_once_with("10.0.0.1", 8000, ssh_kwargs={}, dry_run=True)
 
 
+@pytest.mark.usefixtures("external_control")
 class TestAutoPortDoesNotMoveIdentity:
     """``auto_port`` must not change the workload's *identity*.
 

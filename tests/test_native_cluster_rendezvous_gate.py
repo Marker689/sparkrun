@@ -74,6 +74,7 @@ def native_cluster(monkeypatch):
     return build_runtime, ctx, calls
 
 
+@pytest.mark.usefixtures("reachable_init_workers")
 def test_rendezvous_gate_waits_when_a_store_exists(native_cluster):
     """The default (dp == 1 / tp across nodes) behaviour is unchanged."""
     build_runtime, ctx, calls = native_cluster
@@ -90,6 +91,7 @@ def test_rendezvous_gate_waits_when_a_store_exists(native_cluster):
     assert calls["find_port"] == [25000]
 
 
+@pytest.mark.usefixtures("reachable_init_workers")
 def test_no_gate_when_runtime_reports_no_rendezvous(native_cluster):
     """Independent replicas: workers start immediately, nothing is probed.
 

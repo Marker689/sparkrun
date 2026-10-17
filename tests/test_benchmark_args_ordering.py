@@ -111,6 +111,7 @@ def _spy_task_args(runner, recipe_path, extra_argv=()):
     return result, seen.get("base_args")
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_served_model_name_reaches_the_scheduled_tasks(runner, bench_env):
     """Issue #257's fix, which was inert on this path."""
     result, base_args = _spy_task_args(runner, bench_env)
@@ -120,6 +121,7 @@ def test_served_model_name_reaches_the_scheduled_tasks(runner, bench_env):
     assert base_args.get("served_model_name") == "served-alias"
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_api_key_stays_out_of_scheduled_task_definitions(runner, bench_env):
     """Authentication is injected into execution, not persisted task inputs."""
     result, base_args = _spy_task_args(runner, bench_env)
@@ -128,6 +130,7 @@ def test_api_key_stays_out_of_scheduled_task_definitions(runner, bench_env):
     assert "api_key" not in base_args
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_the_rendered_command_carries_them(runner, bench_env):
     """End of the chain: what the scheduler would actually exec."""
     from sparkrun.benchmarking.llama_benchy import LlamaBenchyFramework
@@ -143,6 +146,7 @@ def test_the_rendered_command_carries_them(runner, bench_env):
     assert cmd[cmd.index("--served-model-name") + 1] == "served-alias"
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_user_bench_args_still_win(runner, bench_env):
     """The merge is ``setdefault``; moving it earlier must not change that."""
     result, base_args = _spy_task_args(runner, bench_env, ["-b", "served_model_name=explicit"])
@@ -151,6 +155,7 @@ def test_user_bench_args_still_win(runner, bench_env):
     assert base_args.get("served_model_name") == "explicit"
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_return_token_ids_suppression_reaches_the_scheduled_tasks(runner, bench_env):
     """The sglang workaround travels the same road, and hit the same pothole.
 
@@ -164,6 +169,7 @@ def test_return_token_ids_suppression_reaches_the_scheduled_tasks(runner, bench_
     assert base_args.get("extra_body") == "return_token_ids=false"
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_user_can_re_enable_token_ids_end_to_end(runner, bench_env):
     result, base_args = _spy_task_args(runner, bench_env, ["-b", "extra_body=return_token_ids=true"])
 

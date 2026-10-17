@@ -137,6 +137,7 @@ def _make_fake_run_result(workload_id: str = "sparkrun_0123456789abcdef_aabbccdd
     return rr
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_benchmark_run_uses_api_run_and_threads_scheduler_flag(fake_recipe_env, monkeypatch):
     """``sparkrun benchmark run --scheduler greedy <recipe> --solo --dry-run``
     must call ``api.run`` exactly once with ``RunOptions.scheduler == 'greedy'``.
@@ -188,6 +189,7 @@ def test_benchmark_run_uses_api_run_and_threads_scheduler_flag(fake_recipe_env, 
     mock_stop.assert_not_called()
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_benchmark_dry_run_does_not_require_the_execution_toolchain(fake_recipe_env):
     """``--dry-run`` must work without ``uvx`` on PATH.
 
@@ -221,6 +223,7 @@ def test_benchmark_dry_run_does_not_require_the_execution_toolchain(fake_recipe_
     assert len(captured_options) == 1
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_benchmark_run_scheduler_flag_defaults_to_none(fake_recipe_env):
     """Without --scheduler, ``RunOptions.scheduler`` must be ``None`` (let
     the registry default kick in).
@@ -312,6 +315,8 @@ def test_benchmark_perf_skip_run_bypasses_scheduler_capacity(fake_recipe_env):
     mock_stop.assert_not_called()
 
 
+@pytest.mark.usefixtures("external_control")
+@pytest.mark.usefixtures("idle_occupancy")
 def test_benchmark_cli_reports_image_plan_failure(fake_recipe_env, monkeypatch):
     from sparkrun.core.images import ImagePlanError
 

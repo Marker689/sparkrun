@@ -1420,34 +1420,34 @@ def test_log_pane_home_pageup_stay_scrolled_after_animation(monkeypatch):
 
             # home from the bottom: animation must not flip back to FOLLOWING
             await pilot.press("home")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             await _assert_holds_scroll(pane)
 
             # Resume, then pageup from the bottom
             await pilot.press("end")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             assert pane.view_state.state == FollowState.FOLLOWING
             assert pane.log_view.is_at_bottom is True
 
             await pilot.press("pageup")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             await _assert_holds_scroll(pane)
 
             # pageup immediately after an End-resume must also stay SCROLLED
             await pilot.press("end")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             assert pane.view_state.state == FollowState.FOLLOWING
             await pilot.press("pageup")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             await _assert_holds_scroll(pane)
 
             # home while PAUSED stays PAUSED after the animation settles
             await pilot.press("end")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             await pilot.press("space")
             assert pane.view_state.state == FollowState.PAUSED
             await pilot.press("home")
-            await pilot.pause(0.6)
+            await pilot.wait_for_scheduled_animations()
             assert pane.view_state.state == FollowState.PAUSED
             assert pane.log_view.scroll_y < pane.log_view.max_scroll_y
             paused_y = pane.log_view.scroll_y
@@ -4253,7 +4253,7 @@ def test_log_view_compensation_after_immediate_user_scroll_keeps_target(monkeypa
             lv.action_scroll_up()
             assert lv.scroll_target_y == 49
             lv.compensate_scroll(4)
-            await asyncio.sleep(0.5)
+            await pilot.wait_for_scheduled_animations()
             assert lv.scroll_y == 53
             assert pane.view_state.state == FollowState.SCROLLED
 
@@ -4261,14 +4261,14 @@ def test_log_view_compensation_after_immediate_user_scroll_keeps_target(monkeypa
             lv.action_page_up()
             expected = 53 - lv.scrollable_content_region.height - 3
             lv.compensate_scroll(-3)
-            await asyncio.sleep(1.5)
+            await pilot.wait_for_scheduled_animations()
             assert lv.scroll_y == expected
             assert pane.view_state.state == FollowState.SCROLLED
 
             # home keeps targeting the very top after a compensating prepend
             lv.action_scroll_home()
             lv.compensate_scroll(5)
-            await asyncio.sleep(1.5)
+            await pilot.wait_for_scheduled_animations()
             assert lv.scroll_y == 0
             assert pane.view_state.state == FollowState.SCROLLED
 

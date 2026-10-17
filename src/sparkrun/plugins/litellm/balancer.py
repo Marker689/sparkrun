@@ -60,17 +60,17 @@ import asyncio
 import random
 import threading
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-if __name__ == "sparkrun.plugins.litellm.balancer":
+if TYPE_CHECKING or __name__ == "sparkrun.plugins.litellm.balancer":
     # Imported by sparkrun itself (tests, and to copy the file), which has no
     # LiteLLM installed.  Inside the gateway LiteLLM loads this file under its
     # own module name and the import below must succeed: LiteLLM only calls
     # callbacks that are ``CustomLogger`` instances, so a fallback there would
     # turn balancing off without a word.
-    CustomLogger = object
+    from builtins import object as CustomLogger
 else:  # pragma: no cover - runs inside the LiteLLM gateway process
-    from litellm.integrations.custom_logger import CustomLogger
+    from litellm.integrations.custom_logger import CustomLogger  # pyright: ignore[reportMissingImports] - gateway-only dependency
 
 STRATEGY = "least-in-flight"
 STALE_AFTER_S = 900.0

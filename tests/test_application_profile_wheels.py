@@ -1,4 +1,8 @@
-"""Opt-in offline wheel composition proof: SPARKRUN_TEST_WHEELS=1 pytest ... ."""
+"""Opt-in offline wheel composition proof: SPARKRUN_TEST_WHEELS=1 pytest ... .
+
+Supply UV_CACHE_DIR pointing at the artifact cache primed during dependency
+setup. Application homes remain isolated; CI uses a cache under RUNNER_TEMP.
+"""
 
 from __future__ import annotations
 

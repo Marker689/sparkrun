@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from sparkrun.core.config import SparkrunConfig
 from sparkrun.core.cluster_manager import ClusterManager
 from sparkrun.core.setup_manifest import ManifestManager
 
@@ -39,7 +40,7 @@ def _invoke_uninstall(config_root, args):
     """Invoke uninstall command with mocked config root."""
     from sparkrun.cli._setup._uninstall import setup_uninstall
 
-    with patch("sparkrun.core.config.SparkrunConfig"):
+    with patch("sparkrun.core.config.SparkrunConfig", return_value=SparkrunConfig(config_root / "config.yaml")):
         with patch("sparkrun.core.config.get_config_root", return_value=config_root):
             with patch("sparkrun.orchestration.primitives.build_ssh_kwargs", return_value={"ssh_user": "testuser"}):
                 runner = CliRunner()
@@ -90,18 +91,11 @@ def test_uninstall_keep_cluster(setup_env):
     assert cluster_mgr.get("test-cluster") is not None
 
 
-def test_uninstall_no_cluster():
+def test_uninstall_no_cluster(tmp_path):
     """Uninstall with no cluster and no default exits with error."""
-    from sparkrun.cli._setup._uninstall import setup_uninstall
-
-    with patch("sparkrun.core.config.SparkrunConfig"):
-        with patch("sparkrun.core.config.get_config_root") as mock_root:
-            mock_root.return_value = Path("/tmp/nonexistent-sparkrun-test")
-            runner = CliRunner()
-            result = runner.invoke(setup_uninstall, [], catch_exceptions=False)
-
-            assert result.exit_code != 0
-            assert "no cluster" in result.output.lower() or "not found" in result.output.lower()
+    result = _invoke_uninstall(tmp_path / "missing", [])
+    assert result.exit_code != 0
+    assert "no cluster" in result.output.lower() or "not found" in result.output.lower()
 
 
 def test_uninstall_no_manifest(tmp_path: Path):
@@ -186,3 +180,15 @@ def test_uninstall_only_applied_phases(tmp_path: Path):
     assert "Phase: docker_group" not in result.output
     assert "Phase: cx7" not in result.output
     assert "Phase: ssh_mesh" not in result.output
+
+
+def test_uninstall_keeps_coordination_state_under_config(setup_env, tmp_path, monkeypatch):
+    """A mocked config must never become a relative MagicMock SQLite path."""
+    config_root, _, _ = setup_env
+    cwd = tmp_path / "invocation"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    result = _invoke_uninstall(config_root, ["test-cluster", "--dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert list(cwd.iterdir()) == []
+    assert (config_root / "operations.sqlite3").is_file()

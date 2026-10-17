@@ -10,6 +10,7 @@ in-tree callers that haven't been threaded yet).
 
 from __future__ import annotations
 
+import pytest
 from unittest.mock import MagicMock
 
 from sparkrun.core.hardware import AcceleratorSpec, HostHardware
@@ -198,6 +199,7 @@ def test_runtime_run_pops_placement_in_overriding_runtimes():
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_api_run_passes_placement_to_launch_inference():
     """When api.run computes a placement, it is forwarded to launch_inference
     via the ``placement=`` kwarg — verifying the single-compute path."""

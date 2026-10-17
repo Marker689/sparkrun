@@ -478,6 +478,11 @@ def test_forced_cancel_reaps_child_in_separate_session(controlled_plugin):
     from sparkrun.core.coordination import reservations, reconcile_reservation
 
     binding = controlled_plugin
+    from sparkrun.core.config import SparkrunConfig
+
+    config = SparkrunConfig(binding.config_path)
+    config.set("daemon.cancel_grace", 1)
+    config.save()
     with real_server(binding) as (_, client):
         job = client.call("plugins.daemon-fixture.wait", {"mode": "tree"})["job_id"]
         deadline = time.monotonic() + 15
@@ -499,11 +504,12 @@ def test_forced_cancel_reaps_child_in_separate_session(controlled_plugin):
         assert not reservations(binding.config_path.parent)
 
 
-def test_actual_systemd_api_restart_preserves_independent_worker(controlled_plugin):
+def test_actual_systemd_api_restart_preserves_independent_worker(controlled_plugin, host_service_manager):
     import shutil
     from sparkrun.core.application_profile import child_environment
     from sparkrun.daemon.client import Client
     from sparkrun.core.process_identity import alive
+    from sparkrun.core.runtime_lease import TEST_STATE_ROOT_ENV, TEST_SESSION_MARKER_ENV
 
     binding = controlled_plugin
     if not shutil.which("systemd-run"):
@@ -515,6 +521,9 @@ def test_actual_systemd_api_restart_preserves_independent_worker(controlled_plug
     env = {
         **child_environment(config_path=binding.config_path),
         "XDG_RUNTIME_DIR": os.environ["XDG_RUNTIME_DIR"],
+        "HOME": os.environ["HOME"],
+        TEST_STATE_ROOT_ENV: os.environ[TEST_STATE_ROOT_ENV],
+        TEST_SESSION_MARKER_ENV: os.environ[TEST_SESSION_MARKER_ENV],
         "SPARKRUN_NO_EXTERNAL_PLUGINS": "0",
         "SPARKRUN_NO_TELEMETRY": "1",
     }

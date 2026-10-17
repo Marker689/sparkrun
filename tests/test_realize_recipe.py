@@ -60,6 +60,7 @@ def _options(tmp_path, *, overrides=None, data=None):
     return api.RunOptions(recipe=recipe, cluster=cluster, hosts=_HOSTS, overrides=overrides or {})
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_realize_bakes_matched_layers_and_drops_the_rest(tmp_path, v, planned):
     import sparkrun.api as api
 
@@ -72,6 +73,7 @@ def test_realize_bakes_matched_layers_and_drops_the_rest(tmp_path, v, planned):
     assert data["metadata"]["realized_for"] == {"nodes": 2, "platform": "DGX Spark", "accelerator": "nvidia/gb10"}
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_realize_plans_for_real_so_hardware_is_probed(tmp_path, v, planned):
     import sparkrun.api as api
 
@@ -80,6 +82,7 @@ def test_realize_plans_for_real_so_hardware_is_probed(tmp_path, v, planned):
     assert planned[0].dry_run is False  # a dry-run plan skips the probe
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_selector_only_keys_are_dropped(tmp_path, v, planned):
     import sparkrun.api as api
 
@@ -88,6 +91,7 @@ def test_selector_only_keys_are_dropped(tmp_path, v, planned):
     assert realized.dropped_keys == ("speculator",)
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_a_selector_key_given_on_the_cli_is_kept(tmp_path, v, planned):
     import sparkrun.api as api
 
@@ -96,6 +100,7 @@ def test_a_selector_key_given_on_the_cli_is_kept(tmp_path, v, planned):
     assert realized.dropped_keys == ()
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_cli_overrides_are_baked_in(tmp_path, v, planned):
     import sparkrun.api as api
 
@@ -103,6 +108,7 @@ def test_cli_overrides_are_baked_in(tmp_path, v, planned):
     assert realized.recipe["defaults"]["max_model_len"] == 4096
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_executor_overrides_are_not_baked_in_as_serve_flags(tmp_path, v, planned):
     """``-o entrypoint=''`` configures the container; written into ``defaults``
     it would be an unmapped serve flag in the realized recipe."""
@@ -114,6 +120,7 @@ def test_executor_overrides_are_not_baked_in_as_serve_flags(tmp_path, v, planned
     assert "shm_size" not in realized.recipe["defaults"]
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_realized_recipe_loads_with_the_same_effective_config(tmp_path, v, planned):
     import sparkrun.api as api
 
@@ -141,6 +148,7 @@ def test_cli_rejects_launch_options_without_realize(tmp_path):
     assert "--keep-include" in result.output
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_cli_realize_writes_plain_yaml_to_stdout(tmp_path, v, planned):
     from sparkrun.cli import main
 

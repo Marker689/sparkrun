@@ -375,6 +375,7 @@ def _plan(tmp_path, overrides, *, hosts=("s1", "s2"), recipe_extra=None, **optio
     return api.plan(options)
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_plan_applies_matched_overrides_and_reports_them(tmp_path, v):
     run_plan = _plan(tmp_path, [{"when": {"platform": "dgx-spark", "nodes": 1}, "defaults": {"max_num_seqs": 3}}])
     assert run_plan.override_resolution.matched == (0,)
@@ -384,6 +385,7 @@ def test_plan_applies_matched_overrides_and_reports_them(tmp_path, v):
     assert run_plan.recipe_fingerprint == derive_recipe_fingerprint(fresh)
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_plan_without_overrides_has_no_resolution(tmp_path, v):
     run_plan = _plan(tmp_path, [])
     assert run_plan.override_resolution is None
@@ -412,6 +414,7 @@ def _mixed_plan(tmp_path, hosts, *, tp=1, layout=None, status=None, monkeypatch=
 
 
 @pytest.mark.parametrize("hosts,group,seqs", [(("s1", "w1"), {"s1"}, 121), (("w1", "s1"), {"w1"}, 120)])
+@pytest.mark.usefixtures("idle_occupancy")
 def test_mixed_cluster_lands_in_the_group_the_scheduler_picks(tmp_path, v, hosts, group, seqs):
     """Greedy places rank 0 on the first candidate; its hardware group wins and its overrides apply."""
     run_plan = _mixed_plan(tmp_path, hosts)
@@ -421,6 +424,7 @@ def test_mixed_cluster_lands_in_the_group_the_scheduler_picks(tmp_path, v, hosts
     assert run_plan.candidate_hosts == hosts  # identity inputs stay the whole cluster
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_mixed_cluster_falls_back_to_a_group_that_fits(tmp_path, v):
     """tp=2: the probe puts rank 0 on w1, whose group is one host; the GB10 pair fits."""
     run_plan = _mixed_plan(tmp_path, ("w1", "s1", "s2"), tp=2)
@@ -428,6 +432,7 @@ def test_mixed_cluster_falls_back_to_a_group_that_fits(tmp_path, v):
     assert run_plan.recipe.defaults["max_num_seqs"] == 121
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_mixed_cluster_without_any_fitting_group_reports_the_groups(tmp_path, v):
     from sparkrun.api import InsufficientCapacity
 
@@ -437,6 +442,7 @@ def test_mixed_cluster_without_any_fitting_group_reports_the_groups(tmp_path, v)
     assert "[s1]" in message and "[w1]" in message  # every group's reason, not just the last one
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_mixed_cluster_identity_does_not_depend_on_the_group(tmp_path, v):
     a = _mixed_plan(tmp_path, ("s1", "w1"))
     b = _mixed_plan(tmp_path, ("w1", "s1"))
@@ -693,6 +699,7 @@ def _plan_with(tmp_path, *, gpu_mem, overrides=None, cli=None, hosts=("s1", "s2"
     return api.plan(api.RunOptions(recipe=recipe, cluster=cluster, hosts=tuple(hosts), dry_run=True, overrides=cli or {}))
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_recipe_memory_utilization_is_served_as_written(tmp_path, v):
     # Recipe content is never rewritten for the hardware: the fix for GB10 is the
     # unified-memory tag (above), which keeps discrete-card overrides off it.

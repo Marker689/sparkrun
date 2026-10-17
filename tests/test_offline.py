@@ -267,6 +267,7 @@ def test_job_metadata_records_the_resident_digest(tmp_path):
     assert "effective_container_digest" not in load_job_metadata(cid2, cache_dir=str(tmp_path))
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_plan_resolves_offline_from_the_cluster(tmp_path, v):
     import sparkrun.api as api
     from sparkrun.core.recipe import Recipe

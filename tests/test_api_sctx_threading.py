@@ -13,6 +13,7 @@ to internal helpers and to ``launch_inference``.  These tests verify:
 
 from __future__ import annotations
 
+import pytest
 import inspect
 from pathlib import Path
 from unittest.mock import patch
@@ -140,6 +141,7 @@ def test_resolve_cluster_explicit_overrides_sctx_default():
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_api_run_forwards_sctx_to_launch_inference():
     """When a caller passes sctx=, api.run must forward it (and sctx.variables) to launch_inference."""
     from sparkrun.core.context import SparkrunContext
@@ -203,6 +205,7 @@ def test_api_run_forwards_sctx_to_launch_inference():
     assert captured.get("config") is custom_sctx.config
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_api_run_builds_default_sctx_when_omitted():
     """When sctx is omitted, api.run still wires v/sctx (built from default_sctx)."""
     from sparkrun.core.recipe import Recipe

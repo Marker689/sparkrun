@@ -257,6 +257,7 @@ def test_container_launch_still_requires_image_before_distribution(monkeypatch, 
 
 
 @pytest.mark.parametrize("command", [None, "", "   "])
+@pytest.mark.usefixtures("external_control")
 def test_launcher_rejects_invalid_runtime_command_before_submission(tmp_path, monkeypatch, command):
     from sparkrun.core.config import SparkrunConfig
     from sparkrun.core.launcher import launch_inference

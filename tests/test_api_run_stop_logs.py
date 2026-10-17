@@ -76,6 +76,7 @@ def test_run_no_hosts_no_cluster_raises_hosts_unreachable():
         api.run(api.RunOptions(recipe=recipe))
 
 
+@pytest.mark.usefixtures("unavailable_hardware_probe", "idle_occupancy")
 def test_run_options_immutable_through_run():
     """Passing the same RunOptions twice must not mutate its overrides dict."""
     from sparkrun.core.recipe import Recipe
@@ -83,11 +84,12 @@ def test_run_options_immutable_through_run():
     recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm", "model": "test/m"})
     opts = api.RunOptions(recipe=recipe, hosts=("h1",), overrides={"port": 8000})
     snapshot = dict(opts.overrides)
-    try:
-        api.run(opts)
-    except api.SparkrunError:
-        pass  # Don't care about launch failure here; just probe input invariance.
-    assert opts.overrides == snapshot
+    with patch("sparkrun.core.launcher.launch_inference", side_effect=api.SparkrunError("fixture launch failure")) as launch:
+        for _ in range(2):
+            with pytest.raises(api.SparkrunError, match="fixture launch failure"):
+                api.run(opts)
+            assert opts.overrides == snapshot
+        assert launch.call_count == 2
 
 
 # --------------------------------------------------------------------------
@@ -276,12 +278,14 @@ def test_stop_with_hosts_skips_metadata_lookup(tmp_path, idle_occupancy):
     from sparkrun.orchestration.ssh import RemoteResult
 
     fake_result = RemoteResult(host="h1", returncode=0, stdout="", stderr="")
-    with patch("sparkrun.orchestration.ssh.run_remote_script", return_value=fake_result):
+    with patch("sparkrun.orchestration.primitives.run_remote_command", return_value=fake_result) as remote:
         result = api.stop(
             workload_id="sparkrun_explicithost",
             hosts=("h1",),
             cache_dir=str(tmp_path),
         )
+    remote.assert_called_once()
+    assert not result.hosts_failed
     assert isinstance(result, api.StopResult)
     assert result.workload_id == "sparkrun_explicithost"
     assert result.hosts_targeted == ("h1",)
@@ -357,7 +361,7 @@ def test_logs_without_metadata_refuses_to_guess(tmp_path):
     assert "recipe" in str(exc.value)
 
 
-def test_logs_returns_iterator_when_metadata_names_the_runtime(tmp_path):
+def test_logs_returns_iterator_when_metadata_names_the_runtime(tmp_path, monkeypatch):
     """With metadata recording the runtime, ``api.logs`` returns a lazy iterator.
 
     Resolution happens eagerly (so bad targets raise at call time); only the
@@ -372,6 +376,9 @@ def test_logs_returns_iterator_when_metadata_names_the_runtime(tmp_path):
     cluster_id = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
     save_job_metadata(cluster_id, recipe, ["h1"], cache_dir=str(tmp_path))
 
+    from sparkrun.core.cluster_status import empty_status
+
+    monkeypatch.setattr("sparkrun.orchestration.executors.docker.DockerExecutor.query_status", lambda self, hosts, **kw: empty_status([]))
     gen = api.logs(cluster_id, hosts=("h1",), cache_dir=str(tmp_path), tail=10)
     assert isinstance(gen, Iterator)
 

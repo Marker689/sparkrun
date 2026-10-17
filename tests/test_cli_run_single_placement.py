@@ -71,7 +71,7 @@ def runner():
 
 
 @pytest.fixture
-def cluster_env(tmp_path, monkeypatch, v):
+def cluster_env(tmp_path, monkeypatch, v, external_control):
     """A 4-host ``occupancy-sparse`` cluster plus a discoverable tp=2 recipe."""
     import sparkrun.core.config
     from sparkrun.core.cluster_manager import ClusterManager

@@ -634,6 +634,7 @@ def test_execution_strategy_prepares_capsules_and_skips_model_before_activation(
         assert "observed_ib" not in transfer_calls[0]
 
 
+@pytest.mark.usefixtures("no_page_cache_clear")
 def test_execution_strategy_records_the_same_job_identity_as_a_normal_launch(monkeypatch, tmp_path):
     """The strategy path writes job metadata itself, so it must write all of it.
 
@@ -1101,6 +1102,7 @@ def test_post_launch_lifecycle_dry_run_skips_health_waits(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("remote_cache_paths")
 def test_launch_inference_metadata_failure_aborts_before_submission(monkeypatch, tmp_path):
     """An unrecordable workload must not be submitted and become unmanageable."""
     from sparkrun.core import launcher
@@ -1209,6 +1211,7 @@ def test_launch_inference_metadata_failure_aborts_before_submission(monkeypatch,
     runtime.run.assert_not_called()
 
 
+@pytest.mark.usefixtures("remote_cache_paths")
 def test_launch_inference_records_cluster_and_ssh_user(monkeypatch, tmp_path):
     """Every metadata write carries the launch's cluster name and SSH user.
 

@@ -469,6 +469,8 @@ def test_download_client_selection_and_pinned_fallback(tmp_path, monkeypatch, mo
         # Exercise the installed CLI parser too: modern hf requires one --include
         # per pattern; otherwise mmproj is a positional filename and the quant
         # filter is silently ignored.
+        # CLI output auto-detection fetches a registry at import time.
+        monkeypatch.setattr("huggingface_hub.utils._detect_agent.is_agent", lambda: False)
         from click.testing import CliRunner
         from huggingface_hub.cli import download
         from huggingface_hub.cli.hf import app

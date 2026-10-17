@@ -81,6 +81,7 @@ def test_run_handler_preserves_api_error_boundary(monkeypatch, failure):
 
 
 @pytest.mark.parametrize("reverse,fail_first", [(False, False), (True, False), (False, True)])
+@pytest.mark.usefixtures("unavailable_hardware_probe")
 def test_shared_context_isolates_cluster_users(monkeypatch, reverse, fail_first):
     from sparkrun.api import plan, RunOptions
     from sparkrun.api._context import default_sctx

@@ -124,6 +124,7 @@ def _invoke(runner, extra_argv):
     return result, captured
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_tp_flag_reaches_the_launch_overrides(runner, bench_env):
     """``--tp 4`` lands in ``RunOptions.overrides`` — the reported bug."""
     result, captured = _invoke(runner, ["--tp", "4"])
@@ -133,6 +134,7 @@ def test_tp_flag_reaches_the_launch_overrides(runner, bench_env):
     assert captured["options"].overrides.get("tensor_parallel") == 4
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_tp_flag_places_on_four_nodes(runner, bench_env):
     """The end-user symptom: ``--tp 4`` must not resolve to solo."""
     result, captured = _invoke(runner, ["--tp", "4"])
@@ -144,6 +146,7 @@ def test_tp_flag_places_on_four_nodes(runner, bench_env):
     assert "Placement: 4 hosts from" in result.output
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_without_the_flag_the_recipe_value_still_wins(runner, bench_env):
     """No ``--tp`` → the recipe's own ``tensor_parallel: 1`` → solo."""
     result, captured = _invoke(runner, [])
@@ -153,6 +156,7 @@ def test_without_the_flag_the_recipe_value_still_wins(runner, bench_env):
     assert captured["plan"].is_solo is True
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_every_recipe_override_flag_is_forwarded(runner, bench_env):
     """``--pp``/``--dp``/``--gpu-mem``/``--max-model-len``/``-o`` share the defect.
 
@@ -178,6 +182,7 @@ def test_every_recipe_override_flag_is_forwarded(runner, bench_env):
     assert "gpu_mem" not in overrides
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_dash_o_values_are_coerced(runner, bench_env):
     """``-o max_model_len=4096`` yields an int, as it does on the ``run`` path."""
     result, captured = _invoke(runner, ["-o", "max_model_len=4096", "-o", "enforce_eager=true"])
@@ -196,6 +201,7 @@ def test_malformed_dash_o_is_rejected(runner, bench_env):
     assert "--option must be key=value" in result.output
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_dash_o_executor_keys_configure_the_executor(runner, bench_env):
     """``-o entrypoint=''`` is what the ENTRYPOINT preflight tells users to
     pass; on the benchmark path it used to land in the serve overrides, be

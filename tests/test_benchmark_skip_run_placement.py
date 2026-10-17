@@ -278,6 +278,7 @@ def _invoke(runner, extra_argv, *, arm=None):
         return runner.invoke(main, argv)
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_skip_run_banner_names_the_workloads_host(runner, bench_env, cluster_status):
     """The end-user symptom: a solo workload reported as ``cluster (4 nodes)``."""
     result = _invoke(runner, ["--skip-run"], arm=cluster_status)
@@ -288,6 +289,7 @@ def test_skip_run_banner_names_the_workloads_host(runner, bench_env, cluster_sta
     assert "cluster (4 nodes)" not in result.output
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_skip_run_without_a_running_workload_warns(runner, bench_env, cluster_status):
     """Nothing found → previous behaviour, but said out loud rather than implied."""
     result = _invoke(runner, ["--skip-run"])
@@ -296,6 +298,7 @@ def test_skip_run_without_a_running_workload_warns(runner, bench_env, cluster_st
     assert "no running workload matched" in result.output
 
 
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_without_skip_run_placement_is_unchanged(runner, bench_env, cluster_status):
     """The planning path must not acquire the discovery behaviour."""
     result = _invoke(runner, [])
@@ -314,6 +317,7 @@ def test_without_skip_run_placement_is_unchanged(runner, bench_env, cluster_stat
         (["--hosts", _HOSTS[-1]], ""),
     ],
 )
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_benchmark_launch_keeps_effective_cluster(runner, bench_env, cluster_status, flags, expected_cluster):
     from sparkrun import api
     from sparkrun.core.cluster_manager import ClusterManager

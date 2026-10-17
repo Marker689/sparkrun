@@ -27,6 +27,7 @@ from test_launch_summary import _hw, _placement
 
 
 @pytest.mark.parametrize("category", ["performance", "tools"])
+@pytest.mark.usefixtures("benchmark_version", "external_control")
 def test_benchmark_matches_run_without_replanning(cluster_env, busy_cluster_status, monkeypatch, category):
     # Inventory with different capacities proves the memory block uses the
     # actual winning hosts, not an estimate with unknown target capacity.

@@ -78,6 +78,7 @@ def test_no_builder_declared_is_silent(v):
     assert not {"builder-unknown", "builder-disabled"} & _codes(validate_recipe(_recipe(), v=v))
 
 
+@pytest.mark.usefixtures("external_control")
 def test_unknown_builder_aborts_the_launch(v):
     """``launch_inference`` must not warn-and-skip: nothing would build."""
     from sparkrun.core import launcher

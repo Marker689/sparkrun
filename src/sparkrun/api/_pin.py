@@ -159,7 +159,9 @@ def unpinned_references(data: dict[str, Any]) -> list[str]:
     """References a pin does not cover, for the caller to report."""
     notes = []
     spec = (data.get("defaults") or {}).get("speculative_config")
-    draft = spec.get("model") if isinstance(spec, dict) else None
+    if not isinstance(spec, dict):
+        return notes
+    draft = spec.get("model")
     if isinstance(draft, str) and draft and draft != data.get("model") and not spec.get("revision"):
         notes.append("speculative_config.model %s (draft model revision is not pinned)" % draft)
     return notes

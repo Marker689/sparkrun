@@ -7,6 +7,7 @@ on launch failure and to surface the real error from the serve log file.
 
 from __future__ import annotations
 
+import pytest
 from sparkrun.core.recipe import Recipe
 import logging
 from unittest import mock
@@ -280,6 +281,7 @@ def test_dump_serve_log_dry_run_skips_logging(monkeypatch, caplog):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("reachable_init_workers")
 def test_native_cluster_step6_head_serve_failure_triggers_cleanup(monkeypatch):
     """When the head serve exec returns non-zero, cleanup_after_failure runs."""
     from sparkrun.orchestration.comm_env import ClusterCommEnv

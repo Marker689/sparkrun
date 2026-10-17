@@ -165,6 +165,7 @@ def test_staging_inspects_each_hosts_bound_id(monkeypatch):
 
 
 @pytest.mark.parametrize("container_images", [True, False])
+@pytest.mark.usefixtures("remote_cache_paths")
 def test_launch_hands_off_ids_to_probes_and_executors_but_preserves_metadata(monkeypatch, tmp_path, container_images):
     from sparkrun.core import launcher
     from sparkrun.core.recipe import Recipe

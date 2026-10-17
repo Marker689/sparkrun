@@ -700,6 +700,10 @@ class TestDistributeImageTransferHosts:
 class TestDistributeImageFromHead:
     """Test distribute_image_from_head."""
 
+    @pytest.fixture(autouse=True)
+    def _images_missing(self, monkeypatch):
+        monkeypatch.setattr("sparkrun.containers.distribute._check_remote_image_identities", lambda *a, **kw: {})
+
     @mock.patch("sparkrun.orchestration.ssh.run_remote_script_streaming")
     def test_single_host(self, mock_run):
         """Single host: pull only, no distribution."""
@@ -901,6 +905,10 @@ class TestDistributeImageFromHead:
 
 class TestDistributeModelFromLocal:
     """Test distribute_model_from_local."""
+
+    @pytest.fixture(autouse=True)
+    def _writable_remote_cache(self, monkeypatch, no_cache_diagnostics):
+        monkeypatch.setattr("sparkrun.models.distribute.ensure_remote_dir_ownership", lambda *a, **kw: [])
 
     @mock.patch("sparkrun.models.distribute.run_rsync_parallel")
     @mock.patch("sparkrun.models.distribute.download_model")
@@ -1794,6 +1802,7 @@ class TestDistributeResourcesTransferMode:
     @mock.patch("sparkrun.orchestration.infiniband.validate_ib_connectivity")
     @mock.patch("sparkrun.orchestration.infiniband.detect_ib_for_hosts")
     @mock.patch("sparkrun.orchestration.primitives.build_ssh_kwargs", return_value={})
+    @pytest.mark.usefixtures("external_control")
     def test_auto_resolves_to_local_with_ib(self, mock_ssh, mock_ib, mock_validate, mock_img):
         """Auto mode resolves to local when IB is reachable from control node."""
         mock_ib.return_value = mock.MagicMock(

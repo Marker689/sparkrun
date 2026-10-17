@@ -901,6 +901,7 @@ class TestRunCopyCommandErrorClassification:
 
     @mock.patch("sparkrun.orchestration.primitives.run_script_on_host")
     @mock.patch("sparkrun.orchestration.ssh.run_rsync_parallel")
+    @pytest.mark.usefixtures("no_cache_diagnostics")
     def test_disk_space_raises_transfer_error(self, mock_rsync, mock_run_script):
         """rsync failure with 'No space left on device' raises TransferError with classified reason."""
         from sparkrun.orchestration.hooks import _run_copy_command
@@ -929,6 +930,7 @@ class TestRunCopyCommandErrorClassification:
 
     @mock.patch("sparkrun.orchestration.primitives.run_script_on_host")
     @mock.patch("sparkrun.orchestration.ssh.run_rsync_parallel")
+    @pytest.mark.usefixtures("no_cache_diagnostics")
     def test_first_failure_wins_over_downstream_lstat(self, mock_rsync, mock_run_script):
         """When mkdir fails (disk space) AND a later step would fail, the FIRST failure (mkdir) is reported."""
         from sparkrun.orchestration.hooks import _run_copy_command

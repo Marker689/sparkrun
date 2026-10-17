@@ -351,6 +351,7 @@ def _options(tmp_path, data=None):
     return api.RunOptions(recipe=Recipe.load(str(path), resolve=False), cluster=cluster, hosts=_HOSTS)
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_realize_pins_from_the_registry_and_the_hub_by_default(tmp_path, v, dry_plan, resolvers):
     import sparkrun.api as api
 
@@ -365,6 +366,7 @@ def test_realize_pins_from_the_registry_and_the_hub_by_default(tmp_path, v, dry_
     assert "hosts" not in resolvers and "cached" not in resolvers
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_offline_pins_from_the_placed_hosts(tmp_path, v, dry_plan, resolvers):
     import sparkrun.api as api
 
@@ -375,6 +377,7 @@ def test_offline_pins_from_the_placed_hosts(tmp_path, v, dry_plan, resolvers):
     assert "registry" not in resolvers and "hub" not in resolvers
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_offline_falls_back_to_the_control_cache_only_for_missing_hosts(tmp_path, v, dry_plan, resolvers, monkeypatch):
     import sparkrun.api as api
 
@@ -393,6 +396,7 @@ def test_offline_falls_back_to_the_control_cache_only_for_missing_hosts(tmp_path
         api.realize_recipe(_options(tmp_path), offline=True)
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_no_pin_leaves_references_alone(tmp_path, v, dry_plan, resolvers):
     import sparkrun.api as api
 
@@ -403,6 +407,7 @@ def test_no_pin_leaves_references_alone(tmp_path, v, dry_plan, resolvers):
     assert resolvers == {}
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_already_pinned_references_are_kept(tmp_path, v, dry_plan, resolvers):
     import sparkrun.api as api
 
@@ -413,6 +418,7 @@ def test_already_pinned_references_are_kept(tmp_path, v, dry_plan, resolvers):
     assert "registry" not in resolvers
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_a_locally_built_image_refuses_to_pin(tmp_path, v, dry_plan, resolvers, monkeypatch):
     import sparkrun.api as api
     import sparkrun.containers.registry as registry
@@ -423,6 +429,7 @@ def test_a_locally_built_image_refuses_to_pin(tmp_path, v, dry_plan, resolvers, 
         api.realize_recipe(_options(tmp_path, data))
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_a_separate_draft_model_is_reported_unpinned(tmp_path, v, dry_plan, resolvers):
     import sparkrun.api as api
 
@@ -432,6 +439,7 @@ def test_a_separate_draft_model_is_reported_unpinned(tmp_path, v, dry_plan, reso
     )
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_a_draft_model_with_its_own_revision_is_not_reported(tmp_path, v, dry_plan, resolvers):
     import sparkrun.api as api
 

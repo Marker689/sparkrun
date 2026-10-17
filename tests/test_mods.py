@@ -627,6 +627,7 @@ class TestRsyncToHeadErrorClassification:
     """_rsync_to_head raises TransferError with classified reason on failure."""
 
     @mock.patch("sparkrun.core.mods.run_rsync")
+    @pytest.mark.usefixtures("no_cache_diagnostics")
     def test_disk_space_raises_transfer_error(self, mock_rsync):
         """Disk-space rsync failure yields TransferError with 'out of disk space'."""
         from sparkrun.orchestration.ssh import RemoteResult

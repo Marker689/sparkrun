@@ -69,6 +69,12 @@ _TEST_RECIPE_DATA = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _fixture_image_available(monkeypatch, external_control):
+    """The synthetic recipe image exists without consulting local Docker."""
+    monkeypatch.setattr("sparkrun.containers.registry.image_exists_locally", lambda image: True)
+
+
 @pytest.fixture
 def runner():
     """Create a CliRunner instance."""
@@ -2854,6 +2860,12 @@ class TestEnvOverrides:
 
 class TestFollowLogs:
     """Test --no-follow flag and follow_logs integration."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ib_fabric(self, monkeypatch):
+        from sparkrun.orchestration.infiniband import IBDetectionResult
+
+        monkeypatch.setattr("sparkrun.orchestration.infiniband.detect_ib_for_hosts", lambda *a, **kw: IBDetectionResult())
 
     def test_run_help_shows_no_follow(self, runner):
         """sparkrun run --help shows --no-follow option."""

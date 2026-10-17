@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from enum import Enum
 import json
 from pathlib import Path
@@ -352,6 +353,7 @@ def test_setup_telemetry_command_persists_preference(tmp_path, monkeypatch):
     assert data["telemetry"]["enabled"] is True
 
 
+@pytest.mark.usefixtures("idle_occupancy")
 def test_api_run_calls_api_level_telemetry():
     recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm", "model": "org/model"})
     options = api.RunOptions(recipe=recipe, hosts=("h1",), solo=True, dry_run=True)

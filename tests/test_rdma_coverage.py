@@ -53,6 +53,7 @@ def _run(dets, *, facts=None, cluster=None, round_fn=_success, suite="perftest",
         mock.patch("sparkrun.api.setup._rdma._run_round", side_effect=round_fn) as rounds,
         mock.patch("sparkrun.api.setup._rdma._prepare_container") as prepare,
         mock.patch("sparkrun.api.setup._rdma._run_nccl") as nccl,
+        mock.patch("sparkrun.api.setup._rdma._stop_containers"),
     ):
         report = rdma_test(_Sctx(), list(dets), {}, cluster=cluster, suite=suite, **options)
     return report, rounds, prepare, nccl

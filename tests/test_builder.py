@@ -1321,9 +1321,10 @@ class TestEugrDelegatedMode:
         # No mods or build_args, image exists => no-op
         assert result == "vllm-node"
 
-    def test_eugr_prepare_delegated_builds_remotely(self, eugr_builder_with_repo):
+    def test_eugr_prepare_delegated_builds_remotely(self, eugr_builder_with_repo, monkeypatch):
         """In delegated mode, build is dispatched to head via _build_image_remote."""
         builder, repo_dir = eugr_builder_with_repo
+        monkeypatch.setattr(builder, "_image_exists_on_host", lambda *a, **kw: False)
         recipe = Recipe.from_dict(
             {
                 "name": "test",
