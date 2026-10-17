@@ -335,26 +335,17 @@ class ClusterMonitorApp(App):
             return
 
         self._pinned_host = host
-        wl = self.query_one("#workload-list", WorkloadList)
-        wl.reveal()
-        wl.focus()
+        self.query_one("#workload-list", WorkloadList).focus()
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         if getattr(event.control, "id", None) == "host-table":
             if self._is_log_open():
                 self._close_log_pane(refocus_list=False)
             self._pinned_host = None
-            try:
-                wl = self.query_one("#workload-list", WorkloadList)
-                wl.conceal()
-            except Exception:
-                pass
             self._refresh_detail()
 
     def on_workload_list_back_to_hosts(self, event: WorkloadList.BackToHosts) -> None:
         self._pinned_host = None
-        wl = self.query_one("#workload-list", WorkloadList)
-        wl.conceal()
         self.query_one("#host-table", DataTable).focus()
 
     def on_workload_list_open_log(self, event: WorkloadList.OpenLog) -> None:

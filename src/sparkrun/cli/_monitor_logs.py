@@ -1,6 +1,6 @@
-"""Pure log-view models, scope helpers, and SelectionList for monitor TUI log streaming.
+"""Pure log-view models, scope helpers, and monitor TUI widgets for log streaming.
 
-Implements rule 0b selection list, LogBuffer with per-source paging offsets
+Implements LogBuffer with per-source paging offsets
 and eviction, ViewState stream state machine, and log dump/prefix formatting.
 """
 
@@ -667,46 +667,8 @@ class ViewState:
         return False
 
 
-class SelectionList(OptionList):
-    """OptionList adhering to rule 0b:
-
-    - Hidden highlight initially via `-concealed` CSS class.
-    - First arrow (`up`/`down` etc.) or `enter` sets `revealed` and lets the key through.
-    - `reveal()` and `conceal()` programmatic toggles.
-    - Highlighted index is preserved while concealed.
-    """
-
-    DEFAULT_CSS = """
-    SelectionList.-concealed > .option-list--option-highlighted,
-    SelectionList.-concealed:focus > .option-list--option-highlighted {
-        color: $foreground;
-        background: transparent;
-        text-style: none;
-    }
-    """
-
-    def __init__(self, *options: Any, revealed: bool = False, **kwargs: Any) -> None:
-        super().__init__(*options, **kwargs)
-        self.revealed: bool = revealed
-        if not self.revealed:
-            self.add_class("-concealed")
-
-    def reveal(self) -> None:
-        self.revealed = True
-        self.remove_class("-concealed")
-
-    def conceal(self) -> None:
-        self.revealed = False
-        self.add_class("-concealed")
-
-    async def _on_key(self, event: events.Key) -> None:
-        if not self.revealed and event.key in ("up", "down", "enter", "home", "end", "pageup", "pagedown"):
-            self.reveal()
-        await super()._on_key(event)
-
-
-class WorkloadList(SelectionList):
-    """Workload container selection list adhering to rule 0b."""
+class WorkloadList(OptionList):
+    """Workload container selection list."""
 
     class OpenLog(Message):
         """Posted when a container is chosen to open logs."""
@@ -783,9 +745,8 @@ class WorkloadList(SelectionList):
             self.highlighted = None
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        """Rule 0b: a mouse click selects the workload the same way Enter does."""
+        """A mouse click selects the workload the same way Enter does."""
         event.stop()
-        self.reveal()
         self.action_select_container()
 
     def action_select_container(self) -> None:
@@ -2310,25 +2271,22 @@ class DumpLogScreen(ModalScreen[Any]):
         with Vertical(id="dump-dialog"):
             yield Static(f"Dump logs: {self.label}", id="dump-title")
             if self._has_scope_list:
-                yield SelectionList(
+                yield OptionList(
                     *[Option(prompt=text, id=str(int(s))) for s, text in self._scope_options],
                     id="dump-scope-list",
-                    revealed=False,
                 )
             yield Static("File path:", id="dump-path-label")
             yield Input(value=self._initial_path, id="dump-path-input")
-            yield SelectionList(
+            yield OptionList(
                 Option("Overwrite", id="overwrite"),
                 Option("Cancel", id="cancel"),
                 id="dump-overwrite-list",
-                revealed=False,
             )
             yield Static(id="dump-error")
 
     def on_mount(self) -> None:
         if self._has_scope_list:
-            scope_list = self.query_one("#dump-scope-list", SelectionList)
-            scope_list.conceal()
+            scope_list = self.query_one("#dump-scope-list", OptionList)
             scope_list.highlighted = self._default_scope_idx
             scope_list.focus()
         else:
@@ -2343,7 +2301,7 @@ class DumpLogScreen(ModalScreen[Any]):
             if self._pending_dump_path is not None and event.value != self._pending_dump_path:
                 self._pending_dump_path = None
                 try:
-                    overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+                    overwrite_list = self.query_one("#dump-overwrite-list", OptionList)
                     overwrite_list.display = False
                     self._set_error("")
                 except Exception:
@@ -2392,9 +2350,8 @@ class DumpLogScreen(ModalScreen[Any]):
     def _prompt_overwrite(self, resolved_path: str) -> None:
         self._pending_dump_path = resolved_path
         self._set_error("[yellow]File exists. Confirm overwrite:[/yellow]")
-        overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+        overwrite_list = self.query_one("#dump-overwrite-list", OptionList)
         overwrite_list.display = True
-        overwrite_list.conceal()
         overwrite_list.highlighted = 1  # Cancel is default
         overwrite_list.focus()
 
@@ -2412,7 +2369,7 @@ class DumpLogScreen(ModalScreen[Any]):
             return
         focused = self.focused
         if focused and focused.id == "dump-path-input" and self._has_scope_list:
-            self.query_one("#dump-scope-list", SelectionList).focus()
+            self.query_one("#dump-scope-list", OptionList).focus()
             return
         self._cancel.set()
         self.workers.cancel_group(self, "dump")
@@ -2429,8 +2386,8 @@ class DumpLogScreen(ModalScreen[Any]):
         try:
             self.query_one("#dump-path-input", Input).disabled = True
             if self._has_scope_list:
-                self.query_one("#dump-scope-list", SelectionList).disabled = True
-            overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+                self.query_one("#dump-scope-list", OptionList).disabled = True
+            overwrite_list = self.query_one("#dump-overwrite-list", OptionList)
             if overwrite_list.display:
                 overwrite_list.disabled = True
         except Exception:
@@ -2478,8 +2435,8 @@ class DumpLogScreen(ModalScreen[Any]):
                     path_input = self.query_one("#dump-path-input", Input)
                     path_input.disabled = False
                     if self._has_scope_list:
-                        self.query_one("#dump-scope-list", SelectionList).disabled = False
-                    overwrite_list = self.query_one("#dump-overwrite-list", SelectionList)
+                        self.query_one("#dump-scope-list", OptionList).disabled = False
+                    overwrite_list = self.query_one("#dump-overwrite-list", OptionList)
                     if overwrite_list.display:
                         overwrite_list.disabled = False
                     path_input.focus()
