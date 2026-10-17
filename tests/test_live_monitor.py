@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import itertools
 import time
 from unittest import mock
 
@@ -211,6 +212,106 @@ def test_live_monitor_stops_promptly_when_its_operation_is_cancelled(monkeypatch
 
 
 # --------------------------------------------------------------------------
+# LiveMonitorSession telemetry history (per-host ring buffer)
+# --------------------------------------------------------------------------
+
+
+class _CountingSession(TelemetrySession):
+    """Telemetry session whose every snapshot is a distinct, ordered sample."""
+
+    def __init__(self):
+        self._n = itertools.count(1)
+
+    def snapshot(self):
+        return {"h1": HostTelemetry(host="h1", sample=MonitorSample(hostname="h1", gpu_util_pct=str(next(self._n))))}
+
+    def close(self):
+        pass
+
+
+def _open_history_session(monkeypatch, session=None, **kwargs):
+    """Open a history-recording session; the recorder thread is stubbed out so
+    the test drives ``_record_once()`` synchronously (no timing)."""
+    from sparkrun.api._telemetry import LiveMonitorSession
+
+    monkeypatch.setattr(
+        "sparkrun.orchestration.telemetry.get_telemetry_provider",
+        lambda scope, v=None: _FakeProvider(session if session is not None else _CountingSession()),
+    )
+    monkeypatch.setattr("sparkrun.api.status", lambda *a, **k: ClusterStatus(hosts=(HostOccupancy(host="h1"),), executor="docker"))
+    monkeypatch.setattr(LiveMonitorSession, "_record_loop", lambda self: None)
+    return api.open_live_monitor(["h1"], interval=1, status_interval=1, **kwargs)
+
+
+def test_live_monitor_history_records_per_host(monkeypatch):
+    session = _open_history_session(monkeypatch)
+    try:
+        for _ in range(3):
+            session._record_once()
+        points = session.history("h1")
+    finally:
+        session.close()
+
+    assert len(points) == 3
+    assert [sample.gpu_util_pct for _, sample in points] == ["1", "2", "3"]  # oldest first
+    times = [recorded_at for recorded_at, _ in points]
+    assert len(set(times)) == 3 and times == sorted(times)  # strictly increasing record times
+    with pytest.raises(KeyError):
+        session.history("nope")  # unknown host, not an empty list
+
+
+def test_live_monitor_history_evicts_beyond_window(monkeypatch):
+    session = _open_history_session(monkeypatch, history_points=3)
+    for _ in range(5):
+        session._record_once()
+    points = session.history("h1")
+    session.close()
+    assert len(points) == 3
+    assert [sample.gpu_util_pct for _, sample in points] == ["3", "4", "5"]  # ring kept the newest
+
+    floored = _open_history_session(monkeypatch, history_points=0)
+    for _ in range(3):
+        floored._record_once()
+    kept = floored.history("h1")
+    floored.close()
+    assert len(kept) == 1 and kept[0][1].gpu_util_pct == "3"  # floor to 1 slot, not disable
+
+
+def test_live_monitor_history_skips_missing_samples(monkeypatch):
+    tel = _FakeSession({"h1": HostTelemetry(host="h1", sample=None, error="ssh down")})
+    session = _open_history_session(monkeypatch, session=tel)
+    try:
+        session._record_once()
+        assert session.history("h1") == []  # a gap in the series, not a zero reading
+        tel._snap = {"h1": HostTelemetry(host="h1", sample=MonitorSample(hostname="h1", gpu_util_pct="9"))}
+        session._record_once()
+        assert [sample.gpu_util_pct for _, sample in session.history("h1")] == ["9"]
+    finally:
+        session.close()
+
+
+def test_live_monitor_history_frozen_after_close(monkeypatch):
+    session = _open_history_session(monkeypatch)
+    session._record_once()
+    session._record_once()
+    session.close()
+    assert len(session.history("h1")) == 2  # recorded data stays readable after close
+    session._record_once()  # close() set the stop flag; the recorder appends nothing more
+    assert len(session.history("h1")) == 2
+
+
+def test_live_monitor_history_empty_without_telemetry(monkeypatch):
+    monkeypatch.setattr("sparkrun.orchestration.telemetry.get_telemetry_provider", lambda scope, v=None: None)
+    monkeypatch.setattr("sparkrun.api.status", lambda *a, **k: ClusterStatus(hosts=(HostOccupancy(host="h1"),), executor="docker"))
+    session = api.open_live_monitor(["h1"], interval=1, status_interval=1)
+    try:
+        assert session.history("h1") == []  # no telemetry session: recorder never started
+        assert session.frame().for_host("h1") is not None  # occupancy-only frames unaffected
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------
 # TUI detail rendering — workloads sourced from occupancy (all executors)
 # --------------------------------------------------------------------------
 
@@ -263,6 +364,195 @@ def test_container_count_counts_across_workloads():
 
     assert _container_count(_activity_with_local_job()) == 1
     assert _container_count(HostActivity(host="h1")) == 0
+
+
+def _gb10_sample() -> MonitorSample:
+    """Shaped like the live GB10 probe: unified memory, so no GPU-mem fields."""
+    return MonitorSample(
+        hostname="spark-41e1",
+        cpu_name="X925 (10) + A725 (10)",
+        gpu_name="NVIDIA GB10",
+        gpu_count="1",
+        mem_used_mb="113431",
+        mem_total_mb="124610",
+        mem_used_pct="91.0",
+        gpu_util_pct="96",
+        gpu_temp_c="71",
+        gpu_power_w="45.68",
+        gpu_clock_mhz="2515",
+        cpu_usage_pct="18.1",
+        cpu_temp_c="82.4",
+        net_send_bytes_s="1537000000",
+        net_recv_bytes_s="1234500000",
+    )
+
+
+def test_sparkline_empty_flat_ramp_and_pinned_scale():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _series, _sparkline, _SPARK_GLYPHS
+
+    # No history yet → blank, so a cell's spark region is visibly empty.
+    assert _sparkline([]) == " " * 20
+
+    # A flat window has no span to scale against: one mid glyph per point.
+    assert _sparkline([5.0, 5.0, 5.0]) == " " * 17 + "▄▄▄"
+
+    # A full ramp covers every glyph, oldest left.
+    assert _sparkline([i / 7 for i in range(8)], width=8) == _SPARK_GLYPHS
+
+    # Percent metrics pin 0-100 so the glyph stays absolute (a 50% window still
+    # reads mid-scale), and short series are right-aligned.
+    assert _sparkline([0.0, 100.0], width=4, lo=0.0, hi=100.0) == "  ▁█"
+
+    # An over-long series keeps the NEWEST points (a rising trend must not read
+    # as flat history), and a non-finite remote value is dropped, not raised on.
+    assert _sparkline([0.0] * 25 + [7.0]) == "▁" * 19 + "█"
+    assert _series([(1.0, MonitorSample(gpu_temp_c="nan")), (2.0, MonitorSample(gpu_temp_c="inf"))], "gpu_temp_c") == []
+    assert _sparkline(_series([(1.0, MonitorSample(gpu_temp_c="nan"))], "gpu_temp_c")) == " " * 20
+
+
+def test_spark_palette_degrades_without_theme_variables():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _at, _spark_palette
+
+    # A theme missing the expected variables renders uncolored sparks, not a crash.
+    assert _spark_palette({}, dark=True) == ()
+    assert _spark_palette({}, dark=False) == ()
+    # A short/absent palette yields no color for any cell.
+    assert _at((), 0) is None
+    assert _at(("#123456",), 1) is None
+    assert _at(("#123456",), 0) == "#123456"
+
+
+def test_fmt_bitrate_units_adapt_to_magnitude():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _fmt_bitrate
+
+    assert _fmt_bitrate(0.0) == "0.0 b/s"
+    assert _fmt_bitrate(60.0) == "480.0 b/s"  # below 1 kb/s stays in bits
+    assert _fmt_bitrate(1000.0) == "8.0 kb/s"
+    assert _fmt_bitrate(1_000_000.0) == "8.0 Mb/s"
+    assert _fmt_bitrate(1_537_000_000.0) == "12.3 Gb/s"
+    assert _fmt_bitrate(125_000_000_000.0) == "1.0 Tb/s"
+    assert _fmt_bitrate(10**15) == "8000.0 Tb/s"  # clamps at the largest unit
+
+
+@pytest.mark.parametrize("theme", ["textual-dark", "textual-light"])
+def test_render_node_stats_every_sparkline_resolves_to_a_unique_color(tmp_path, theme):
+    """Each sparkline gets a distinct theme color — checked at the resolved-style
+    level, because a color name Rich accepts but Textual cannot resolve (e.g.
+    ``bright_red``) silently renders as the default foreground.
+
+    Both theme families are pinned: a light theme steps the palette the other way
+    (darken instead of lighten), where an aliased pair would otherwise go unseen.
+    """
+    pytest.importorskip("textual")
+    import asyncio
+    from textual.widgets import Static
+
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp, _SPARK_GLYPHS
+
+    # nv-shaped sample: all nine grid series plus the App/Cache row.
+    s = _gb10_sample()
+    s.mem_bufcache_mb = "45678"
+    act = HostActivity(host="h1", telemetry=s)
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(act,)))
+    session.set_history("h1", [(1.0, s), (2.0, s)])
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    app.theme = theme
+
+    async def _run():
+        async with app.run_test(size=(180, 40)) as pilot:
+            await pilot.pause(0.05)
+            assert app.current_theme.dark == theme.endswith("dark")  # the switch took effect
+            widget = app.query_one("#node-stats", Static)
+            runs = []
+            for y in range(widget.size.height):
+                for seg in widget.render_line(y):
+                    glyphs = seg.text.strip()
+                    if glyphs and set(glyphs) <= set(_SPARK_GLYPHS):
+                        runs.append(seg)
+            return [seg.style.color for seg in runs]
+
+    colors = asyncio.run(_run())
+    assert len(colors) == 11  # one colored sparkline per cell
+    assert len(set(colors)) == 11
+    assert None not in colors  # a fallback-to-default means the color never applied
+
+
+def test_render_node_stats_gb10_header_and_grid():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _render_node_stats, _SPARK_GLYPHS
+
+    s = _gb10_sample()
+    history = [(float(i), _gb10_sample()) for i in range(3)]
+    out = _render_node_stats("10.0.4.30", HostActivity(host="10.0.4.30", telemetry=s), history)
+
+    # Header: host │ hostname │ RAM used/total │ CPU │ GPU (count)
+    assert "10.0.4.30" in out
+    assert "spark-41e1" in out
+    assert "RAM 113431/124610 MB" in out
+    assert "X925 (10) + A725 (10)" in out
+    assert "NVIDIA GB10 (1)" in out
+
+    # 3x3 grid labels and formatted values.
+    for label in ("GPU %", "GPU Temp", "GPU Power", "CPU %", "CPU Temp", "GPU Clock", "RAM %", "Net Send", "Net Recv"):
+        assert label in out
+    assert "45.68 W" in out
+    assert "82.4 °C" in out
+    assert "12.3 Gb/s" in out  # 1537000000 B/s * 8 / 1e9
+    assert "9.9 Gb/s" in out  # 1234500000 B/s * 8 / 1e9
+
+    # History feeds the sparklines.
+    assert any(g in out for g in _SPARK_GLYPHS)
+
+    # The bash backend carries no bufcache, so no App/Cache row appears.
+    assert "App" not in out
+    assert "Cache" not in out
+
+
+def test_render_node_stats_sparse_sample_without_history():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _render_node_stats, _SPARK_GLYPHS
+
+    out = _render_node_stats("h1", HostActivity(host="h1", telemetry=MonitorSample(cpu_usage_pct="5")))
+
+    # Values render without history; empty fields degrade to '-', sparks stay blank.
+    assert "5.0 %" in out
+    assert " - " in out
+    assert not any(g in out for g in _SPARK_GLYPHS)
+
+    # Header omits every empty segment (no hostname/RAM/CPU/GPU in this sample).
+    assert out.splitlines()[0] == "  [bold]h1[/bold]"
+
+
+def test_render_node_stats_nv_monitor_app_cache_row():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _render_node_stats, _SPARK_GLYPHS
+
+    nv = MonitorSample(
+        hostname="nv1",
+        mem_bufcache_mb="45678",
+        mem_used_mb="113431",
+        mem_total_mb="124610",
+        mem_used_pct="91.0",
+    )
+    history = [
+        (1.0, MonitorSample(mem_used_pct="90.0", mem_bufcache_mb="40000")),
+        (2.0, MonitorSample(mem_used_pct="91.0", mem_bufcache_mb="45678")),
+    ]
+    out = _render_node_stats("nv1", HostActivity(host="nv1", telemetry=nv), history)
+
+    # Fourth row replaces the old "Memory breakdown" bars, keeping the math.
+    assert "App" in out
+    assert "Cache" in out
+    assert "113431 MB (91.0%)" in out
+    assert "45678 MB (36.7%)" in out
+    assert any(g in out for g in _SPARK_GLYPHS)
+
+    # Same sample without bufcache (bash backend): row is absent.
+    bash = MonitorSample(mem_used_mb="113431", mem_total_mb="124610", mem_used_pct="91.0")
+    assert "App" not in _render_node_stats("h", HostActivity(host="h", telemetry=bash), history)
 
 
 # --------------------------------------------------------------------------
@@ -321,6 +611,7 @@ def test_format_activity_table_jobs_from_occupancy():
 class _FakeLiveMonitorSession:
     def __init__(self, frame: MonitorFrame) -> None:
         self._frame = frame
+        self._history: dict[str, list[tuple[float, MonitorSample]]] = {}
         self.closed = False
 
     def frame(self) -> MonitorFrame:
@@ -328,6 +619,12 @@ class _FakeLiveMonitorSession:
 
     def set_frame(self, frame: MonitorFrame) -> None:
         self._frame = frame
+
+    def history(self, host: str) -> list[tuple[float, MonitorSample]]:
+        return list(self._history.get(host, []))
+
+    def set_history(self, host: str, points: list[tuple[float, MonitorSample]]) -> None:
+        self._history[host] = list(points)
 
     def close(self) -> None:
         self.closed = True
@@ -354,7 +651,7 @@ def test_cluster_monitor_app_detail_panel_and_node_selection(tmp_path):
     pytest.importorskip("textual")
     import asyncio
     from textual.widgets import DataTable, Static
-    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp, _SPARK_GLYPHS
     from sparkrun.cli._monitor_logs import WorkloadList
 
     w1 = RunningWorkload(
@@ -418,8 +715,20 @@ def test_cluster_monitor_app_detail_panel_and_node_selection(tmp_path):
             session.set_frame(MonitorFrame(hosts=(act1_updated, act2)))
             app._refresh()
             await pilot.pause(0.05)
-            assert "95.0%" in str(stats.content)
+            assert "95.0 %" in str(stats.content)
             assert wl.highlighted == 1
+
+            # 5b. No history yet: values render, sparklines stay blank.
+            assert not any(g in str(stats.content) for g in _SPARK_GLYPHS)
+
+            # 5c. History lands: the sparkline seam (session.history -> render) shows glyphs.
+            s95 = act1_updated.telemetry
+            assert s95 is not None
+            session.set_history("h1", [(1.0, s95), (2.0, s95), (3.0, s95)])
+            app._refresh()
+            await pilot.pause(0.05)
+            assert any(g in str(stats.content) for g in _SPARK_GLYPHS)
+            assert "95.0 %" in str(stats.content)
 
             # 6. Container disappears: highlight moves to nearest selectable row
             w1_disappeared = RunningWorkload(
@@ -493,7 +802,7 @@ def test_cluster_monitor_app_open_and_close_log_pane(tmp_path, monkeypatch):
             session.set_frame(MonitorFrame(hosts=(act1_updated,)))
             app._refresh()
             await pilot.pause(0.05)
-            assert "88.0%" in str(stats.content)
+            assert "88.0 %" in str(stats.content)
 
             # Escape in log pane closes pane and sets its cancel event
             await pilot.press("escape")

@@ -16,18 +16,22 @@ a k8s cluster and a host cluster feed a client the same shape.
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
     from sparkrun.core.context import SparkrunContext
-    from sparkrun.core.monitoring import MonitorFrame
+    from sparkrun.core.monitoring import MonitorFrame, MonitorSample
     from sparkrun.orchestration.telemetry import TelemetrySession
 
 logger = logging.getLogger(__name__)
+
+#: Default per-host history window (~4 minutes at the default 2 s cadence).
+HISTORY_POINTS: Final = 120
 
 
 def _resolve_ctx(hosts, cluster, ssh_kwargs, sctx):
@@ -80,6 +84,11 @@ class LiveMonitorSession:
     the latest cached occupancy (refreshed by a background thread every
     ``status_interval`` seconds), so a client (Textual TUI) can tick it freely.
     Use as a context manager, or ``close()`` when done.
+
+    The session also records every telemetry tick into a bounded per-host ring
+    buffer (window = ``history_points``, default :data:`HISTORY_POINTS`), readable
+    via :meth:`history`; it accrues from open regardless of ``frame()`` polling and
+    is not part of :class:`MonitorFrame`.
     """
 
     def __init__(
@@ -91,6 +100,8 @@ class LiveMonitorSession:
         ssh_kwargs,
         sctx,
         status_interval,
+        interval: int = 2,
+        history_points: int = HISTORY_POINTS,
     ) -> None:
         self._hosts = list(hosts)
         self._cluster_def = cluster_def
@@ -98,14 +109,24 @@ class LiveMonitorSession:
         self._ssh_kwargs = ssh_kwargs
         self._sctx = sctx
         self._status_interval = max(1, int(status_interval))
+        self._record_interval = max(1, int(interval))
+        self._history_points = max(1, int(history_points))
         self._status = None
         self._status_error = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # ponytail: no dedupe — at equal cadences a tick can capture the same host
+        # sample twice, stretching the window in time but never distorting values;
+        # dedupe on MonitorSample.timestamp if exact windows ever matter.
+        self._history: dict[str, deque[tuple[float, MonitorSample]]] = {host: deque(maxlen=self._history_points) for host in self._hosts}
         from contextvars import copy_context
 
         self._poller = threading.Thread(target=copy_context().run, args=(self._poll_loop,), daemon=True)
         self._poller.start()
+        self._recorder: threading.Thread | None = None
+        if telemetry_session is not None:
+            self._recorder = threading.Thread(target=copy_context().run, args=(self._record_loop,), daemon=True)
+            self._recorder.start()
 
     def _poll_once(self) -> None:
         import sparkrun.api as api
@@ -125,6 +146,38 @@ class LiveMonitorSession:
         self._poll_once()  # prime immediately so the first frame has occupancy
         while not self._stop.wait(self._status_interval):
             self._poll_once()
+
+    def _record_once(self) -> None:
+        """Capture one telemetry tick per host into the history ring buffer."""
+        if self._stop.is_set() or self._tel is None:
+            return
+        snap = self._tel.snapshot()
+        for host in self._hosts:
+            tel = snap.get(host)
+            if tel is None or tel.sample is None:
+                continue  # gap in the series, not a zero reading
+            with self._lock:
+                self._history[host].append((time.time(), tel.sample))
+
+    def _record_loop(self) -> None:
+        self._record_once()  # prime immediately so history exists right after open
+        while not self._stop.wait(self._record_interval):
+            self._record_once()
+
+    def history(self, host: str) -> "list[tuple[float, MonitorSample]]":
+        """Return *host*'s recorded telemetry points, oldest first, as a copy.
+
+        The copy is safe to iterate while collection continues.  The ``float`` is
+        wall-clock record time (``time.time()``) — the only uniform x-axis, because
+        the backends do not agree on ``MonitorSample.timestamp`` (bash emits an
+        ISO-8601 *host*-clock string, nv-monitor an epoch-seconds *controller*-clock
+        one, both at 1 s resolution).  The list
+        is empty until the first recorded sample, raises ``KeyError`` for a host
+        outside the session's host set, and is frozen once ``close()`` has stopped
+        the recorder (the recorded data stays readable).
+        """
+        with self._lock:
+            return list(self._history[host])
 
     def frame(self) -> "MonitorFrame":
         """Return the current combined :class:`MonitorFrame` (non-blocking)."""
@@ -175,17 +228,20 @@ def open_live_monitor(
     ssh_kwargs: dict | None = None,
     interval: int = 2,
     status_interval: int | None = None,
+    history_points: int = HISTORY_POINTS,
     backend: str | None = None,
     sctx: "SparkrunContext | None" = None,
 ) -> LiveMonitorSession:
     """Open a pollable :class:`LiveMonitorSession` (telemetry + occupancy).
 
-    *interval* is the telemetry cadence; *status_interval* the occupancy re-poll
-    cadence (defaults to ``max(interval*2, 5)`` to bound SSH cost).  The TUI
-    ticks ``frame()``; the ``live_monitor`` generator wraps this. SSH arguments
-    use the same per-key cluster-scoped overrides as :func:`open_telemetry`.
-    Frames retain partial workloads but report incomplete observations as errors
-    with zero confirmed free slots.
+    *interval* is the telemetry cadence **and** the history record cadence;
+    *status_interval* the occupancy re-poll cadence (defaults to
+    ``max(interval*2, 5)`` to bound SSH cost).  *history_points* caps each host's
+    telemetry ring buffer (values < 1 floor to 1).  The TUI ticks ``frame()``;
+    the ``live_monitor`` generator wraps this. SSH arguments use the same per-key
+    cluster-scoped overrides as :func:`open_telemetry`. Frames retain partial
+    workloads but report incomplete observations as errors with zero confirmed
+    free slots.
     """
     from sparkrun.orchestration.telemetry import get_telemetry_provider
 
@@ -202,6 +258,8 @@ def open_live_monitor(
         ssh_kwargs=ssh_kwargs,
         sctx=sctx,
         status_interval=status_interval if status_interval is not None else max(interval * 2, 5),
+        interval=interval,
+        history_points=history_points,
     )
 
 
@@ -212,6 +270,7 @@ def live_monitor(
     ssh_kwargs: dict | None = None,
     interval: int = 2,
     status_interval: int | None = None,
+    history_points: int = HISTORY_POINTS,
     backend: str | None = None,
     sctx: "SparkrunContext | None" = None,
 ):
@@ -235,6 +294,7 @@ def live_monitor(
         ssh_kwargs=ssh_kwargs,
         interval=interval,
         status_interval=status_interval,
+        history_points=history_points,
         backend=backend,
         sctx=sctx,
     )

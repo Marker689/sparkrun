@@ -922,7 +922,7 @@ class TestParseMonitorLine:
     """Tests for sparkrun.core.monitoring.parse_monitor_line."""
 
     def test_parse_valid_line(self):
-        """Valid CSV line with all 27 fields parses to MonitorSample."""
+        """Valid CSV line with all 31 fields parses to MonitorSample."""
         from sparkrun.core.monitoring import parse_monitor_line, MONITOR_COLUMNS
 
         fields = [
@@ -953,6 +953,10 @@ class TestParseMonitorLine:
             "5001",
             "3",
             "sparkrun_abc|sparkrun_def|sparkrun_ghi",
+            "X925 (10) + A725 (10)",
+            "1",
+            "1537000000",
+            "1234500000",
         ]
         assert len(fields) == len(MONITOR_COLUMNS)
         line = ",".join(fields)
@@ -970,6 +974,10 @@ class TestParseMonitorLine:
         assert sample.gpu_power_w == "180.5"
         assert sample.sparkrun_jobs == "3"
         assert sample.sparkrun_job_names == "sparkrun_abc|sparkrun_def|sparkrun_ghi"
+        assert sample.cpu_name == "X925 (10) + A725 (10)"
+        assert sample.gpu_count == "1"
+        assert sample.net_send_bytes_s == "1537000000"
+        assert sample.net_recv_bytes_s == "1234500000"
 
     def test_parse_missing_gpu_fields(self):
         """CSV line with empty GPU fields parses correctly."""
@@ -1003,6 +1011,10 @@ class TestParseMonitorLine:
             "",
             "0",
             "",
+            "",
+            "",
+            "",
+            "",
         ]
         assert len(fields) == len(MONITOR_COLUMNS)
         line = ",".join(fields)
@@ -1015,6 +1027,10 @@ class TestParseMonitorLine:
         assert sample.gpu_util_pct == ""
         assert sample.gpu_temp_c == ""
         assert sample.gpu_power_w == ""
+        assert sample.cpu_name == ""
+        assert sample.gpu_count == ""
+        assert sample.net_send_bytes_s == ""
+        assert sample.net_recv_bytes_s == ""
 
     def test_parse_malformed_too_few_fields(self):
         """CSV line with too few fields returns None."""
