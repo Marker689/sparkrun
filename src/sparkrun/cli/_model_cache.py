@@ -1,7 +1,7 @@
 """Operator-visible manifest and cache migration commands."""
 
 from dataclasses import asdict
-from functools import wraps
+from functools import partial, wraps
 import json
 from pathlib import Path
 import sys
@@ -337,8 +337,15 @@ def delete_cache(ctx, model, revision, dry_run, assume_yes, force, output_json, 
     try:
         request = ModelArtifactRequest(model, revision)
         host_list, cache_dir, banner = _resolve_targets(sctx, **targets)
-        common = dict(cache_dir=cache_dir, hosts=tuple(host_list), force=force, ssh_kwargs=build_ssh_kwargs(sctx.config))
-        reports = api.delete_model(request, dry_run=True, **common)
+        delete = partial(
+            api.delete_model,
+            request,
+            cache_dir=cache_dir,
+            hosts=tuple(host_list),
+            force=force,
+            ssh_kwargs=build_ssh_kwargs(sctx.config),
+        )
+        reports = delete(dry_run=True)
         doomed = sum(1 for r in reports for e in r.entries if e.action == "would_delete")
         proceed = not dry_run and doomed and all(r.target_met for r in reports)
         if not output_json:
@@ -356,7 +363,7 @@ def delete_cache(ctx, model, revision, dry_run, assume_yes, force, output_json, 
             )
         if proceed:
             confirmed = {e.revision for r in reports for e in r.entries if e.action == "would_delete"}
-            reports = api.delete_model(request, dry_run=False, allowed_revisions=confirmed, **common)
+            reports = delete(dry_run=False, allowed_revisions=confirmed)
             if not output_json:
                 click.echo()
                 click.echo(format_model_cache_reports(reports, action="delete"))

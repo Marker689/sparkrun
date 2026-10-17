@@ -12,6 +12,14 @@ first tagged release containing them, regardless of their original commit date.
 
 ### 0.4.0 application and API changes
 
+- Cache revision deletion and pruning share file-identity checks, preserving
+  weights referenced through cache aliases or unreadable sibling snapshots.
+  Unwritable shared-blob locks retain payloads without interrupting bookkeeping
+  or reporting their bytes reclaimed. Daemon `model_cache.delete` accepts
+  `allowed_revisions` from a confirmed preview, matching the Python API.
+- Monitor subscriptions reopen when a cluster's executor or transport changes,
+  while continuing to share sessions for overlapping host selections.
+
 - Proxy discovery reports successful imports with routing warnings separately from
   failed sweeps. With the coordinated SparkRoute gateway/plugin, public-name
   conflicts leave running deployments visible for correction in the admin console.

@@ -88,6 +88,54 @@ def test_revision_delete_keeps_blobs_other_revisions_use(tmp_path):
     assert not (repo / "refs" / "main").exists()  # it pointed at the deleted revision
 
 
+@pytest.mark.parametrize("reference", ["alias", "hardlink", "snapshot_symlink"])
+def test_revision_delete_protects_sibling_references_by_identity(tmp_path, reference):
+    repo = hf_repo(tmp_path, "org/model", REV_A, {"shared.bin": SHARED, "a.bin": ONLY_A})
+    hf_repo(tmp_path, "org/model", REV_B, {"shared.bin": SHARED})
+    sibling = repo / "snapshots" / REV_B
+    entry = sibling / "shared.bin"
+    blob = repo / "blobs" / hashlib.sha256(SHARED).hexdigest()
+    if reference == "snapshot_symlink":
+        moved = tmp_path / "moved-snapshot"
+        sibling.rename(moved)
+        (moved / "shared.bin").unlink()
+        (moved / "shared.bin").symlink_to(blob)
+        sibling.symlink_to(moved)
+    else:
+        entry.unlink()
+        if reference == "alias":
+            alias = tmp_path / "alias"
+            alias.symlink_to(tmp_path)
+            entry.symlink_to(alias / blob.relative_to(tmp_path))
+        else:
+            entry.hardlink_to(blob)
+    preview = delete(tmp_path, "org/model", REV_A)
+    report = delete(tmp_path, "org/model", REV_A, dry_run=False)
+    assert preview.target_met and report.target_met
+    assert not (repo / "snapshots" / REV_A).exists()
+    assert blob.exists()
+    assert entry.read_bytes() == SHARED
+
+
+def test_revision_delete_keeps_blobs_when_a_sibling_cannot_be_statted(tmp_path, monkeypatch):
+    from sparkrun.models import _cache_agent as agent
+
+    repo = hf_repo(tmp_path, "org/model", REV_A, {"shared.bin": SHARED})
+    hf_repo(tmp_path, "org/model", REV_B, {"shared.bin": SHARED})
+    entry = repo / "snapshots" / REV_B / "shared.bin"
+    original = Path.stat
+
+    def denied(path, *args, **kwargs):
+        if path == entry and kwargs.get("follow_symlinks", True):
+            raise PermissionError("cannot resolve sibling entry")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    report = agent.run(tmp_path, action="delete", repo="org/model", revision=REV_A, dry_run=False)
+    assert report["target_met"]
+    assert entry.read_bytes() == SHARED
+
+
 def test_revision_sharing_weights_reports_what_it_frees(tmp_path):
     from sparkrun.utils.cli_formatters import format_model_cache_reports
 
@@ -383,6 +431,14 @@ def test_shared_store_with_an_unknown_layout_is_not_touched(tmp_path):
     assert shared_blob(tmp_path, ONLY_A).exists()
 
 
+def test_whole_model_delete_tolerates_a_missing_shared_payload(tmp_path):
+    repo = hf_repo(tmp_path, "org/one", REV_A, {"mine.bin": ONLY_A}, shared=True)
+    shared_blob(tmp_path, ONLY_A).unlink()
+    report = delete(tmp_path, "org/one", dry_run=False)
+    assert report.target_met and report.reclaimed_bytes == 0
+    assert not repo.exists()
+
+
 def test_shared_blob_held_by_huggingface_hub_is_kept(tmp_path, monkeypatch):
     from sparkrun.models import _cache_agent
 
@@ -424,6 +480,30 @@ def test_revisions_added_after_confirmation_are_refused(tmp_path):
     assert not reports[0].target_met
     assert {e.reason_code for e in reports[0].entries} == {"selection_changed"}
     assert (repo / "snapshots" / REV_A).exists()
+
+
+def test_daemon_delete_preserves_confirmed_revisions(tmp_path):
+    from sparkrun import api
+    from sparkrun.core.daemon_registry import get_daemon_op
+    from sparkrun.daemon.ops import check_request, register_core_ops
+
+    repo = hf_repo(tmp_path, "org/model", REV_A, {"a.bin": ONLY_A})
+    hf_repo(tmp_path, "org/model", REV_B, {"b.bin": ONLY_B})
+    register_core_ops()
+    op = get_daemon_op("model_cache.delete")
+    arguments = {
+        "model": "org/model",
+        "cache_dir": str(tmp_path),
+        "dry_run": False,
+        "allowed_revisions": [REV_A],
+    }
+    result = op.handler_loader()(check_request(op, arguments), api.default_sctx())
+    assert not result[0]["target_met"]
+    assert {e["reason_code"] for e in result[0]["entries"]} == {"selection_changed"}
+    assert (repo / "snapshots" / REV_A).exists() and (repo / "snapshots" / REV_B).exists()
+    for invalid in (None, REV_A, [None], [1]):
+        with pytest.raises(ValueError):
+            check_request(op, {**arguments, "allowed_revisions": invalid})
 
 
 def test_fifo_ref_does_not_hang(tmp_path):

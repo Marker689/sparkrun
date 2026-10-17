@@ -456,7 +456,7 @@ def repo_references(root, slug, *, fresh=False):
                 for path in tree_entries(snapshot):
                     try:
                         info = path.stat()
-                    except OSError:
+                    except FileNotFoundError:
                         continue  # dangling: references nothing
                     if stat.S_ISREG(info.st_mode):
                         found.add((info.st_dev, info.st_ino))
@@ -467,27 +467,20 @@ def repo_references(root, slug, *, fresh=False):
     return references
 
 
-def exclusive_blobs(root, slug, revision, *, fresh=False):
-    """Blobs only this revision's snapshot uses: ``(per-repo paths, shared payloads, bytes)``.
+def exclusive_blob_paths(root, slug, revisions, *, fresh=False):
+    """Blobs used only by selected revisions, by file identity rather than link spelling.
 
-    Prune used to remove only the snapshot directory. For a revision in the
-    Hub's layout (entries are symlinks into ``blobs/``) that freed nothing and
-    left the blobs behind with nothing pointing at them. These are the blobs
-    evicting the snapshot takes along. Nothing is exclusive when any sibling
-    snapshot cannot be classified, or when ``blobs/`` is not ours to change (a
-    container's root-owned directory): bytes prune could not free must not be
-    credited to it. A blob whose inode the snapshot also holds as a hard link
-    is credited once, when every name of it goes.
+    Shared by prune and explicit revision deletion. An unreadable sibling or
+    an unwritable blob directory makes every blob ineligible for collection.
     """
-    hub = root / "hub"
-    repo_blobs = hub / slug / "blobs"
+    repo_blobs = root / "hub" / slug / "blobs"
     references = repo_references(root, slug, fresh=fresh)
-    if references is None or revision not in references or not repo_blobs.is_dir():
-        return [], {}, 0
+    if references is None or not repo_blobs.is_dir():
+        return []
     if repo_blobs.is_symlink() or not os.access(repo_blobs, os.W_OK | os.X_OK):
-        return [], {}, 0
-    mine = references[revision]
-    others = set().union(*(ids for name, ids in references.items() if name != revision))
+        return []
+    mine = set().union(*(ids for name, ids in references.items() if name in revisions))
+    others = set().union(*(ids for name, ids in references.items() if name not in revisions))
     paths = []
     for path in sorted(repo_blobs.iterdir()):
         if path.name.endswith(".incomplete"):
@@ -499,6 +492,16 @@ def exclusive_blobs(root, slug, revision, *, fresh=False):
         identity = (info.st_dev, info.st_ino)
         if identity in mine and identity not in others:
             paths.append(path)
+    return paths
+
+
+def exclusive_blobs(root, slug, revision, *, fresh=False):
+    """Blobs only this revision uses: ``(per-repo paths, shared payloads, bytes)``.
+
+    Credit hard-linked snapshot/blob names once, only when every name goes.
+    """
+    hub = root / "hub"
+    paths = exclusive_blob_paths(root, slug, {revision}, fresh=fresh)
     store = shared_store(hub)
     targets = {}
     if store is not None:
@@ -538,6 +541,7 @@ def remove_exclusive_blobs(root, slug, paths, targets):
     """
     hub = root / "hub"
     store = shared_store(hub)
+    shared_bytes = {target: shared_freed(target, set(paths), hub, store) for target in set(targets.values())}
     held, kept = [], []
     locks = hub / ".locks" / slug
     try:
@@ -572,28 +576,29 @@ def remove_exclusive_blobs(root, slug, paths, targets):
     finally:
         for _, fd in held:
             os.close(fd)
+    kept_targets = {targets[p.name] for p in kept if p.name in targets}
     for target in sorted({targets[p.name] for p in removed if p.name in targets}):
-        sweep_shared(target, hub, store)
-    if not kept:
-        return 0
-    kept_targets = {p.name: targets[p.name] for p in kept if p.name in targets}
+        if not sweep_shared(target, hub, store):
+            kept_targets.add(target)
+    retained = sum(shared_bytes[target] for target in kept_targets)
     try:
-        return sum(allocation(p.lstat()) for p in kept if os.path.lexists(p)) + sum(
-            shared_freed(t, set(kept), hub, store) for t in set(kept_targets.values())
-        )
+        return retained + sum(allocation(p.lstat()) for p in kept if os.path.lexists(p))
     except OSError:
-        return 0
+        return retained
 
 
 def sweep_shared(target, hub, store):
-    """Collect one payload under its huggingface_hub lock once nothing references it."""
+    """Collect one payload under its huggingface_hub lock; report whether it was removed."""
     lock = target.with_name(target.name + ".lock")
     if os.path.lexists(str(lock) + ".soft"):
-        return  # a filesystem without flock: huggingface_hub holds the soft lock
-    fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+        return False  # a filesystem without flock: huggingface_hub holds the soft lock
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o666)
+    except OSError:
+        return False  # shared store may be owned by another user
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return
+            return False
         deadline = time.monotonic() + SHARED_LOCK_TIMEOUT
         while True:
             try:
@@ -601,17 +606,22 @@ def sweep_shared(target, hub, store):
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    return  # busy: leak it rather than wait on a download
+                    return False  # busy: leak it rather than wait on a download
                 time.sleep(0.1)
         if manifest_references(target, hub, store) != set():
-            return
+            return False
         if stat.S_ISREG(target.lstat().st_mode):
             target.unlink()
-            target.with_name(target.name + ".refs").unlink()
+            try:
+                target.with_name(target.name + ".refs").unlink()
+            except OSError:
+                pass  # the payload was freed even if its stale manifest remains
+            return True
     except OSError:
-        return
+        return False
     finally:
         os.close(fd)
+    return False
 
 
 def hf_download_active(hub, slug):
@@ -846,10 +856,11 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
         revisions = present | recorded
         if whole:
             return sorted(revisions) or ([LEFTOVER] if repo_dir.is_dir() else [])
+        assert revision is not None
         if revision in revisions:
             return [revision]
         resolved = read_ref(repo_dir / "refs" / revision)
-        return [resolved] if resolved in revisions else []
+        return [resolved] if resolved is not None and resolved in revisions else []
 
     def describe(r):
         if r == LEFTOVER:
@@ -924,12 +935,9 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
         ]
         linked = [p for p in entries if p.is_symlink()]  # unlinked as links; never walked or credited
         snapshots = [p for p in entries if not p.is_symlink()]
-        kept = [p for p in snapshots_dir.iterdir() if p not in entries] if not whole and snapshots_dir.is_dir() else []
 
-        def references(paths):
-            blobs = {blob_link(path, repo_blobs) for top in paths for path in tree_entries(top)}
-            blobs.discard(None)
-            return blobs
+        def linked_blobs(paths):
+            return {name for top in paths for path in tree_entries(top) if (name := blob_link(path, repo_blobs)) is not None}
 
         per_row, row_refs = {}, {}
         for snap in snapshots:
@@ -942,12 +950,12 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
                     continue
                 logical += info.st_size if stat.S_ISREG(info.st_mode) else 0
             per_row[snap.name] = [logical, private]
-            row_refs[snap.name] = references([snap])
+            row_refs[snap.name] = linked_blobs([snap])
         if whole:
             dropped = {p.name for p in repo_blobs.iterdir()} if repo_blobs.is_dir() else set()
+            blob_paths = [repo_blobs / b for b in sorted(dropped) if (repo_blobs / b).exists() or (repo_blobs / b).is_symlink()]
         else:
-            dropped = references(snapshots) - references(kept)
-        blob_paths = [repo_blobs / b for b in sorted(dropped) if (repo_blobs / b).exists() or (repo_blobs / b).is_symlink()]
+            blob_paths = exclusive_blob_paths(root, slug, set(selected), fresh=True)
         # Shared payloads the removed per-repo links name; freed only when the
         # manifest shows every reference is among them (huggingface_hub's rule).
         targets = {}
@@ -961,6 +969,7 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
                     targets[path.name] = target
         blob_bytes = {p.name: allocation(p.lstat()) for p in blob_paths}
         shared_bytes = {t: shared_freed(t, set(blob_paths), hub, store) for t in set(targets.values())}
+        shared_credit = dict(shared_bytes)
         planned = sum(v[1] for v in per_row.values()) + sum(blob_bytes.values()) + sum(shared_bytes.values())
         # Credit each freed blob to the first selected revision using it, so a
         # revision whose weights other revisions share shows what it really frees.
@@ -998,6 +1007,14 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
             if names == info.st_nlink:
                 per_row.setdefault(owner or selected[0], [0, 0])[1] += info.st_blocks * 512
                 planned += info.st_blocks * 512
+        for target in shared_credit:
+            try:
+                info = target.lstat()
+            except OSError:
+                continue  # a dangling shared-store link frees no payload
+            inode = shared_inodes.get((info.st_dev, info.st_ino))
+            if inode is not None and inode[1] == info.st_nlink:
+                shared_credit[target] += info.st_blocks * 512
 
         for row in rows:
             logical, private = per_row.get(row["revision"], (0, 0))
@@ -1037,9 +1054,8 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
                 record = usage_dir / (r + ".json")
                 if record.is_file() and not record.is_symlink():
                     record.unlink()
-        for target in sorted(set(targets.values())):
-            sweep_shared(target, hub, store)
-        result["reclaimed_bytes"] = planned
+        retained = sum(shared_credit[target] for target in sorted(shared_credit) if not sweep_shared(target, hub, store))
+        result["reclaimed_bytes"] = max(planned - retained, 0)
         result["free_bytes_after"] = shutil.disk_usage(probe).free
         return result
     finally:

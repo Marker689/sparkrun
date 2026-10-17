@@ -181,7 +181,7 @@ def register_special_ops():
         ("model_cache.list", "read", "cache_dir hosts", "cache_dir"),
         ("model_cache.prune", "admin", "cache_dir hosts dry_run min_age_days max_bytes min_free_bytes", "cache_dir"),
         ("model_cache.pin", "operate", "cache_dir hosts model revision endpoint pinned", "cache_dir model revision"),
-        ("model_cache.delete", "admin", "cache_dir hosts model revision dry_run force", "cache_dir model"),
+        ("model_cache.delete", "admin", "cache_dir hosts model revision dry_run force allowed_revisions", "cache_dir model"),
         (
             "model_cache.adopt",
             "admin",

@@ -99,6 +99,30 @@ def test_a_payload_another_repository_references_is_kept(tmp_path):
     assert shared_blob(tmp_path, ONLY_A).exists()
 
 
+@pytest.mark.parametrize("action", ["prune", "delete"])
+def test_unwritable_shared_lock_keeps_payload_and_finishes_bookkeeping(tmp_path, monkeypatch, action):
+    repo = track(tmp_path, REV_A, {"w.safetensors": ONLY_A}, shared=True)
+    payload = shared_blob(tmp_path, ONLY_A)
+    lock = payload.with_name(payload.name + ".lock")
+    original = agent.os.open
+
+    def denied(path, *args, **kwargs):
+        if Path(path) == lock:
+            raise PermissionError("shared store is owned by another user")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(agent.os, "open", denied)
+    report = agent.run(tmp_path, action=action, repo="org/model", dry_run=False, min_age_seconds=0)
+    assert not (repo / "snapshots" / REV_A).exists()
+    assert payload.read_bytes() == ONLY_A
+    assert report["reclaimed_bytes"] == 0
+    record = Path(usage_path(tmp_path, "org/model", REV_A))
+    if action == "prune":
+        assert json.loads(record.read_text())["last_evicted"] > 0
+    else:
+        assert not record.exists()
+
+
 def test_prune_refuses_while_a_download_of_the_model_is_active(tmp_path):
     repo = track(tmp_path, REV_A, {"w.safetensors": ONLY_A})
     locks = tmp_path / "hub/.locks/models--org--model"

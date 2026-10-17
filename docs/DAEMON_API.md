@@ -227,7 +227,7 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
-| `model_cache.delete` | `/v1/model_cache/delete` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision: string`, `dry_run: boolean`, `force: boolean` |
+| `model_cache.delete` | `/v1/model_cache/delete` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision: string`, `dry_run: boolean`, `force: boolean`, `allowed_revisions: string[]` |
 | `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]` |

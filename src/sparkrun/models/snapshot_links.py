@@ -159,15 +159,19 @@ def link_script(
     outside the cache).
     """
     files = _reusable(manifest)
+    checksums_by_file = [f.checksum for f in files if f.checksum is not None]
     snapshot = PurePosixPath(manifest.relative_snapshot)
     siblings = siblings or {}
     arrays = {
         "names": [f.path for f in files],
         "sizes": [str(f.size) for f in files],
         "algorithms": [f.checksum_algorithm for f in files],
-        "sums": [f.checksum for f in files],
+        "sums": checksums_by_file,
         # The Hub's own entry form: up from the entry's directory to the repo.
-        "relblobs": ["../" * (1 + len(PurePosixPath(f.path).parts)) + "blobs/" + f.checksum for f in files],
+        "relblobs": [
+            "../" * (1 + len(PurePosixPath(f.path).parts)) + "blobs/" + checksum
+            for f, checksum in zip(files, checksums_by_file, strict=True)
+        ],
         # Candidates grouped per file; each file slices its own run of them.
         "cand_start": [str(sum(len(siblings.get(g.path, ())) for g in files[:i])) for i in range(len(files))],
         "cand_count": [str(len(siblings.get(f.path, ()))) for f in files],

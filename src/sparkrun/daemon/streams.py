@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import asdict
 import hashlib
 import json
 import queue
@@ -95,7 +96,12 @@ class MonitorHub:
 
         cluster = resolve_cluster(arguments.get("cluster"), arguments.get("hosts"), sctx=sctx)
         sctx = sctx.for_cluster(cluster)
-        revision = hashlib.sha256(json.dumps(sctx.config._data, sort_keys=True, default=str).encode()).hexdigest()
+        cluster_settings = asdict(cluster)
+        # Pool per host even when subscribers request different host subsets,
+        # but never reuse a session after its executor or transport changes.
+        cluster_settings.pop("hosts")
+        settings = {"config": sctx.config.effective_data, "cluster": cluster_settings}
+        revision = hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode()).hexdigest()
         keys = []
         try:
             for host in cluster.hosts:

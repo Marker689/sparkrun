@@ -165,6 +165,36 @@ def test_monitor_subscribers_share_one_session_and_release(monkeypatch):
     assert sessions[0].closed and not hub.entries
 
 
+@pytest.mark.parametrize(
+    "changed", [{"executor": "local"}, {"executor_config": {"docker_host": "tcp://other:2376"}}, {"transport": "fixture"}]
+)
+def test_monitor_subscription_reopens_when_cluster_destination_changes(monkeypatch, changed):
+    from unittest.mock import Mock
+
+    from sparkrun import api
+    from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.daemon.streams import MonitorHub
+
+    cluster = ClusterDefinition(name="fixture", hosts=["host-a", "host-b"])
+    monkeypatch.setattr("sparkrun.api._resolve.resolve_cluster", lambda *args, **kw: cluster)
+    opened = Mock(side_effect=lambda *args, **kwargs: Mock())
+    monkeypatch.setattr(api, "open_live_monitor", opened)
+    hub = MonitorHub(linger=0)
+    sctx = api.default_sctx()
+    try:
+        with hub.subscribe({}, sctx):
+            assert opened.call_count == 2
+            # A subscriber to a subset still reuses the host's session.
+            cluster = replace(cluster, hosts=["host-a"])
+            with hub.subscribe({}, sctx):
+                assert opened.call_count == 2
+            cluster = replace(cluster, **changed)
+            with hub.subscribe({}, sctx):
+                assert opened.call_count == 3
+    finally:
+        hub.prune(all_sessions=True)
+
+
 @pytest.mark.parametrize("allow_insecure", [False, True])
 def test_real_mixed_tls_unix_and_ephemeral_token_lifecycle(binding, monkeypatch, allow_insecure):
     import shutil

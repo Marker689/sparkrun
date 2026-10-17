@@ -317,6 +317,11 @@ sparkrun model-cache delete org/model --cluster lab --dry-run
 sparkrun model-cache delete org/model --revision FULL_COMMIT_OR_REF --cluster lab
 ```
 
+Python `api.model_cache.delete_model` and daemon `model_cache.delete` clients
+can pass `allowed_revisions` from their confirmed preview when applying with
+`dry_run=False`. An empty list permits no revisions; omitting the field authorizes
+the model/revision selection at execution time.
+
 - A revision with an outstanding workload claim blocks the delete on that host
   unless `--force`; its weights are probably in use by a running workload.
 - An active Hugging Face download (a held lock under `hub/.locks`) or a busy

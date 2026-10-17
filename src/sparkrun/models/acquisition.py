@@ -53,6 +53,8 @@ def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, canc
         return found
 
     def sample():
+        if progress is None:
+            return
         while not stopped.wait(2):
             directory = state["staging"]
             progress(state["done"] + (staged_bytes(directory) if directory else 0), total)

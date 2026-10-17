@@ -15,6 +15,7 @@ FIELD_SCHEMAS = {
     "alias": {"maxLength": 4096, "type": "string"},
     "aliases": {"type": "object"},
     "all_models": {"type": "boolean"},
+    "allowed_revisions": {"items": {"maxLength": 4096, "type": "string"}, "maxItems": 512, "type": "array"},
     "api_key_env": {"maxLength": 4096, "type": "string"},
     "ask_sudo": {"type": "boolean"},
     "auto_discover": {"type": "boolean"},

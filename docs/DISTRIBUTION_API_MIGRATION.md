@@ -13,15 +13,17 @@ shared unless noted below. The tables also cover pre-release plugin contracts.
 | Workload and benchmark callers | `sparkrun.api`: operation functions, options, results, decisions/events, operational errors, `resolve_sctx` / `default_sctx`, and the returned types listed under [stability tiers](#stability-tiers-and-returned-types). |
 | Catalog/front-end callers | `sparkrun.api`: catalog functions and `Catalog*` dictionary types; see the [headless catalog guide](CATALOG_API.md#browse-preview-and-retain). |
 | Setup callers | `sparkrun.api.setup`: SSH bootstrap/mesh, `rdma_test`, host-identity check/rotation, the `run_setup_steps` / `run_setup_undo` runners and their results, statuses, and `SetupFailed`. The planning internals it re-exports are **experimental** (see below). |
-| Benchmark integration authors | `sparkrun.core.benchmark_integrations`: registration, `BenchmarkIntegration`, `BenchmarkDefaults`, context and immutable measurement/state snapshots. |
-| Setup extension authors | `sparkrun.core.setup_steps`: step/constraint registration; `sparkrun.core.setup_plans.SetupPlan`: hardware-owned, opt-in executor plans; caller-facing types are also exported by `api.setup`. |
-| Other extension authors | Documented registries such as `core.cli_registry`, `core.run_handlers`, `core.hardware_probe_extensions`, and `core.features`; shared transactions and `PLUGIN_API_VERSION` in `core.registration`. |
-| Gateway plugin authors | `sparkrun.proxy.contracts`: shared `ProxyModel`, `GatewayOperationError`, `GatewayQueryError`, and optional console/credential protocols; `proxy.supervisor.GatewaySupervisor` for lifecycle and `proxy.gateway` for registration. |
+| Benchmark integration authors | `sparkrun.plugins`: registration, `BenchmarkIntegration`, `BenchmarkDefaults`, context and immutable measurement/state snapshots. |
+| Setup extension authors | `sparkrun.plugins`: `register_setup_step` and `register_setup_constraint`; experimental planning types such as `SetupPlan` are exported by `sparkrun.api.setup`. |
+| Other extension authors | `sparkrun.plugins`: CLI, run-handler, hardware-probe and other registration hooks, `FeatureFlag`, and `PluginConflictError`. See the [plugin import surface](PLUGINS.md#import-surface). |
+| Gateway plugin authors | `sparkrun.plugins`: `ProxyModel`, `GatewayOperationError`, `GatewayQueryError`, optional console/credential protocols, `GatewaySupervisor`, and `register_gateway`. |
 | Kubernetes callers | `sparkrun.plugins.k8s.api`, `plugins.k8s.config`, and `plugins.k8s.executor`. |
 
-Documented core extension modules remain supported imports. Private API/CLI
-modules are implementation details; installed plugins should not depend on the
-bundled Arena adapter's private command helpers.
+`sparkrun.plugins` is the supported registration and extension import surface.
+The defining core/proxy/orchestration modules remain importable but are internal
+and may move between releases. Operational calls use `sparkrun.api` or
+`sparkrun.application`; installed plugins should not depend on private API/CLI
+modules or the bundled Arena adapter's command helpers.
 
 ## Stability tiers and returned types
 
@@ -85,7 +87,7 @@ pin a sparkrun version if you depend on them:
 | `sparkrun.core.application_profile.child_environment` | `sparkrun.application.child_environment` (same function). |
 | Reimplementing pre-start eviction with `api.status` + `api.find_running_intent` + `api.stop` | `api.replace_intent_deployments(plan, *, strict=True, include_current=True, sctx=None) -> tuple[str, ...]` (**experimental**): the replacement `run` performs at its `before_start` barrier, for processes started outside `run`. Same intent only, deployments overlapping `plan.host_list`, each torn down on every `plan.candidate_hosts` host it occupies. `strict` raises `SparkrunError` on an incomplete status sweep or unconfirmed teardown. |
 | `generate_placement_token()` + `generate_cluster_id()` + `dataclasses.replace(plan, ...)` | `api.fresh_workload_id(plan) -> RunPlan` (**experimental**): a copy with a random `placement_token` and its canonical `workload_id`, whatever the scheduler would derive. A non-canonical `intent_id` raises `ValueError`. |
-| `api.discover_endpoints` in `api.__all__` | Removed from the public list (still importable for now). Use `api.discovery_snapshot`, or `sparkrun.proxy.discovery.discover_endpoints` from gateway code. |
+| `api.discover_endpoints` in `api.__all__` | Removed from the public list (still importable for now). Use `api.discovery_snapshot`, including from gateway plugins. |
 | `api.setup.build_authorized_key_script` / `build_collect_key_script` / `build_install_keys_script` | Removed from `api.setup`; they remain in `api.setup._ssh_access` / `api.setup._mesh` for tests. The SSH operations own script generation. |
 | `api._benchmark.__all__` listing `_ProgressEmitter`, `_execute_benchmark`, `_build_result` | Lists only `benchmark` and `resume_benchmark`. The private emitter is a CLI adapter; use `progress_callback` / `decision_callback`. |
 | `sparkrun.api._context.resolve_sctx` | `sparkrun.api.resolve_sctx`. |
@@ -145,7 +147,7 @@ operation to mutate `sctx.config.ssh_user`.
 | Kubernetes accessors on `SparkrunConfig` | `K8sSettings(config)` from `plugins.k8s.config`. |
 | Kubernetes fields on generic executor config | `K8sExecutorConfig`; normal executor resolution selects it. |
 | Run-handler callback with individual resolved arguments | `(options, sctx, *, plan: RunPlan, started_at: float) -> RunResult`. Inspect public `rc`; the private launch handle is optional. |
-| `core.installed_plugins.registration_transaction(v)` | `core.registration.registry_transaction(v)`. All loaders use one shared import/registration boundary. |
+| Loader-internal `core.installed_plugins.registration_transaction(v)` | Loader-internal `core.registration.registry_transaction(v)`. All loaders use one shared import/registration boundary; plugins use the registration hooks exported by `sparkrun.plugins`. |
 
 The `sparkarena` plugin registers its CLI and benchmark hooks; Sparkrun enables
 it by default. Kubernetes requires `sparkrun plugins enable k8s`. The former
@@ -333,9 +335,9 @@ See [benchmark API behavior and reserved state keys](BENCHMARK_API.md) and
 ## Setup recording and undo
 
 `api.setup` exports caller-facing types, statuses, probe/plan helpers,
-`run_setup_steps`, and `run_setup_undo`. Existing documented core imports remain
-valid. Built-in reversals live in core; new frontends should use the public runner
-rather than private CLI teardown helpers.
+`run_setup_steps`, and `run_setup_undo`. Use these exports for operational calls
+and `sparkrun.plugins` for step registration. Built-in reversals live in core;
+new frontends should use the public runner rather than private CLI teardown helpers.
 
 Use `ok`, `warn`, `fail`, and `skip` consistently. Per-host outcomes retain details;
 step summaries aggregate severity. Recording needs one consistent cluster name
@@ -672,10 +674,10 @@ policy to an existing snapshot.
 
 Gateway plugins implement `query_models() -> tuple[ProxyModel, ...]` and raise
 `GatewayQueryError` for unavailable observations. Import those from
-`sparkrun.proxy.contracts`; `api.proxy.ProxyModel` remains the same public class.
+`sparkrun.plugins`; `api.proxy.ProxyModel` remains the same public class.
 LiteLLM and SparkRoute implement this contract directly; legacy dictionary
 providers must migrate their decoding in the provider. SparkRoute changes belong
-in its upstream checkout and are imported as a committed vendor snapshot.
+in its upstream checkout; install and select a compatible external plugin release.
 
 Console and credential support are optional structural protocols in that module.
 See [the gateway contract](PROXY.md#gateway-plugin-contract). `ui(issue_token=True)`
@@ -684,9 +686,8 @@ only reads. Passing both `rotate=True` and `clear=True` raises `ValueError`.
 
 Gateway selection helpers now initialize the default context when `sctx` is
 omitted and honor the saved gateway pin, just like start. Plugins should import
-`GatewaySupervisor` from `sparkrun.proxy.supervisor` and operational errors from
-`sparkrun.proxy.contracts`. The older `_supervisor` imports preserve class identity
-for existing providers. Optional credential and console operations must raise
+`GatewaySupervisor` and operational errors from `sparkrun.plugins`.
+Optional credential and console operations must raise
 `GatewayOperationError` for expected failures; arbitrary `RuntimeError` is no
 longer treated as a routine management refusal.
 
