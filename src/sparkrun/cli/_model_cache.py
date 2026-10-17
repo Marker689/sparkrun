@@ -11,10 +11,10 @@ import click
 from sparkrun.api import model_cache as api
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest, ModelArtifactRequest
 from sparkrun.utils.cli_formatters import format_bytes, format_cache_validation_reports, format_model_cache_reports
-from ._common import HIDE_ADVANCED_OPTIONS, _get_cluster_manager, _get_context, host_options, json_option, resolve_host_context
+from ._common import _get_cluster_manager, _get_context, host_options, json_option, resolve_host_context
 
 
-@click.group("model-cache", hidden=HIDE_ADVANCED_OPTIONS)
+@click.group("model-cache")
 def model_cache():
     """Inspect, repair, retain and prune model caches on cluster hosts.
 

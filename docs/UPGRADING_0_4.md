@@ -87,7 +87,7 @@ for importing their inventories.
 Cleanup is disabled by default. `model-cache prune` previews changes unless
 `--apply` is given; optional automatic cleanup requires an explicit policy.
 Pins, active claims, unknown content, and shared Hugging Face blobs are protected.
-Set `SPARKRUN_ADVANCED=1` to expose the model-cache CLI. Declared compatibility,
+The `model-cache` CLI is listed in help and shell completion. Declared compatibility,
 verified files, and a live inference endpoint are separate checks; a failed or
 lost daemon job does not prove that its workload stopped.
 

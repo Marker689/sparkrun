@@ -132,7 +132,7 @@ it; enabling `gateway.litellm` selects LiteLLM. Both provider flags may stay on.
 Disabling shared `gateway` blocks new activity but does not stop a running proxy.
 Reset removes an override without activation hooks or changing saved selection.
 
-`SPARKRUN_ADVANCED=1` reveals advanced help (`model-cache`, `build`, etc.); it does
+`SPARKRUN_ADVANCED=1` reveals advanced help (`build`, etc.); it does
 not enable feature flags or install plugins.
 
 ## Models, transfers, and optional cleanup
