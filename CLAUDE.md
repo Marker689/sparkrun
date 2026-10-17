@@ -3002,10 +3002,20 @@ Before launching, sparkrun can pre-sync models and container images from the con
   `blobs/<etag>` was downloaded and copied again in full and filled the disks. Before the first observation,
   `prepare_model` now runs a bash pass on every host (under the publication lease) that makes each manifest
   entry a **hard link** to `blobs/<checksum>` (the etag *is* the manifest checksum) when it has the expected
-  size. Missing entries need no transfer, and a duplicate copy is replaced and its space reported. Five rules,
-  each silently wrong if broken: hard links, not symlinks or new blobs (a symlinked snapshot is invisible to
-  prune, and blobs are never pruned); **link before hashing** (an unlinkable blob, EPERM under
-  `fs.protected_hardlinks` or EXDEV, is reported once at INFO and never hashed); a copy we hold is replaced
+  size, or to the same file of **another revision sparkrun prepared on that host**: each one's saved manifest
+  (state directory, read in one round-trip) records path, size and checksum. That second source matters most,
+  because the first disappears when the HF revision is deleted to make room, and every later bump would be a full
+  download again. Missing entries need no transfer, and a duplicate copy is replaced and its space reported. Five
+  rules, each silently wrong if broken: hard links, not symlinks or new blobs (a symlinked snapshot is invisible to
+  prune, and blobs are never pruned). The one exception is a *missing* entry whose candidates all refuse a hard
+  link (EPERM under `fs.protected_hardlinks`, EXDEV): it becomes the Hub's own `../../blobs/<checksum>` symlink,
+  which `hf cache rm` and `delete()` both treat as a reference. It is never a symlink to another revision's
+  snapshot file, which that revision's delete would leave dangling, and never a replacement for a copy we hold.
+  **Link before hashing**, so an unlinkable candidate is never hashed. Only refusals the host explains qualify for the
+  fallback: another filesystem, another user's file (the only cause whose INFO line names `setup permissions`), or
+  a blob resolving outside the cache. Any other `ln` failure is a warning. A hard-link source must also resolve
+  inside `$root/hub`: any path component can be a symlink, and a writer to the cache (a root container) must not
+  get a host file hard-linked into the mount. A copy we hold is replaced
   only after `cmp` or the checksum policy proves the blob identical (name plus size suffices only for a
   *missing* entry, as with `hf_hub_download`); `_cache_agent.delete()` credits an inode once every name of it
   is removed, since `allocation()` credits no individual name of a shared inode; and a budget prune skips a
