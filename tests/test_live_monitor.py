@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import itertools
 import time
 from unittest import mock
 
@@ -208,6 +209,106 @@ def test_live_monitor_stops_promptly_when_its_operation_is_cancelled(monkeypatch
     frames = list(api.live_monitor(["h1"], interval=60, sctx=sctx))
     assert frames == []  # cancelled during the first wait
     assert time.monotonic() - started < 10  # not a 60s uninterruptible sleep
+
+
+# --------------------------------------------------------------------------
+# LiveMonitorSession telemetry history (per-host ring buffer)
+# --------------------------------------------------------------------------
+
+
+class _CountingSession(TelemetrySession):
+    """Telemetry session whose every snapshot is a distinct, ordered sample."""
+
+    def __init__(self):
+        self._n = itertools.count(1)
+
+    def snapshot(self):
+        return {"h1": HostTelemetry(host="h1", sample=MonitorSample(hostname="h1", gpu_util_pct=str(next(self._n))))}
+
+    def close(self):
+        pass
+
+
+def _open_history_session(monkeypatch, session=None, **kwargs):
+    """Open a history-recording session; the recorder thread is stubbed out so
+    the test drives ``_record_once()`` synchronously (no timing)."""
+    from sparkrun.api._telemetry import LiveMonitorSession
+
+    monkeypatch.setattr(
+        "sparkrun.orchestration.telemetry.get_telemetry_provider",
+        lambda scope, v=None: _FakeProvider(session if session is not None else _CountingSession()),
+    )
+    monkeypatch.setattr("sparkrun.api.status", lambda *a, **k: ClusterStatus(hosts=(HostOccupancy(host="h1"),), executor="docker"))
+    monkeypatch.setattr(LiveMonitorSession, "_record_loop", lambda self: None)
+    return api.open_live_monitor(["h1"], interval=1, status_interval=1, **kwargs)
+
+
+def test_live_monitor_history_records_per_host(monkeypatch):
+    session = _open_history_session(monkeypatch)
+    try:
+        for _ in range(3):
+            session._record_once()
+        points = session.history("h1")
+    finally:
+        session.close()
+
+    assert len(points) == 3
+    assert [sample.gpu_util_pct for _, sample in points] == ["1", "2", "3"]  # oldest first
+    times = [recorded_at for recorded_at, _ in points]
+    assert len(set(times)) == 3 and times == sorted(times)  # strictly increasing record times
+    with pytest.raises(KeyError):
+        session.history("nope")  # unknown host, not an empty list
+
+
+def test_live_monitor_history_evicts_beyond_window(monkeypatch):
+    session = _open_history_session(monkeypatch, history_points=3)
+    for _ in range(5):
+        session._record_once()
+    points = session.history("h1")
+    session.close()
+    assert len(points) == 3
+    assert [sample.gpu_util_pct for _, sample in points] == ["3", "4", "5"]  # ring kept the newest
+
+    floored = _open_history_session(monkeypatch, history_points=0)
+    for _ in range(3):
+        floored._record_once()
+    kept = floored.history("h1")
+    floored.close()
+    assert len(kept) == 1 and kept[0][1].gpu_util_pct == "3"  # floor to 1 slot, not disable
+
+
+def test_live_monitor_history_skips_missing_samples(monkeypatch):
+    tel = _FakeSession({"h1": HostTelemetry(host="h1", sample=None, error="ssh down")})
+    session = _open_history_session(monkeypatch, session=tel)
+    try:
+        session._record_once()
+        assert session.history("h1") == []  # a gap in the series, not a zero reading
+        tel._snap = {"h1": HostTelemetry(host="h1", sample=MonitorSample(hostname="h1", gpu_util_pct="9"))}
+        session._record_once()
+        assert [sample.gpu_util_pct for _, sample in session.history("h1")] == ["9"]
+    finally:
+        session.close()
+
+
+def test_live_monitor_history_frozen_after_close(monkeypatch):
+    session = _open_history_session(monkeypatch)
+    session._record_once()
+    session._record_once()
+    session.close()
+    assert len(session.history("h1")) == 2  # recorded data stays readable after close
+    session._record_once()  # close() set the stop flag; the recorder appends nothing more
+    assert len(session.history("h1")) == 2
+
+
+def test_live_monitor_history_empty_without_telemetry(monkeypatch):
+    monkeypatch.setattr("sparkrun.orchestration.telemetry.get_telemetry_provider", lambda scope, v=None: None)
+    monkeypatch.setattr("sparkrun.api.status", lambda *a, **k: ClusterStatus(hosts=(HostOccupancy(host="h1"),), executor="docker"))
+    session = api.open_live_monitor(["h1"], interval=1, status_interval=1)
+    try:
+        assert session.history("h1") == []  # no telemetry session: recorder never started
+        assert session.frame().for_host("h1") is not None  # occupancy-only frames unaffected
+    finally:
+        session.close()
 
 
 # --------------------------------------------------------------------------

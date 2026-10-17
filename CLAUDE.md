@@ -1816,7 +1816,11 @@ util/mem/temp) — abstracted the same way status is, by **substrate scope**:
   `MonitorFrame` snapshots (per-host `HostActivity` = telemetry + the workloads
   occupying the host). Substrate-agnostic: a host cluster combines
   `host_monitor.sh` + docker/local occupancy, a k8s cluster would combine k8s
-  metrics + k8s occupancy — clients see the same shape.
+  metrics + k8s occupancy — clients see the same shape. `LiveMonitorSession`
+  also retains a bounded per-host ring buffer of recent telemetry samples
+  (`history(host)`, wall-clock-stamped, oldest first, readable after close;
+  window via `history_points`, default 120) for sparklines/moving averages; it is
+  not part of `MonitorFrame` or the wire shape.
 
 The `cluster monitor` TUI drives a `LiveMonitorSession`, so its Jobs column and
 detail pane show **all** executors' workloads (docker + local + provider), not
