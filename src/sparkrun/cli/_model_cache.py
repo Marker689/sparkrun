@@ -4,12 +4,13 @@ from dataclasses import asdict
 from functools import wraps
 import json
 from pathlib import Path
+import sys
 
 import click
 
 from sparkrun.api import model_cache as api
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest, ModelArtifactRequest
-from sparkrun.utils.cli_formatters import format_cache_validation_reports, format_model_cache_reports
+from sparkrun.utils.cli_formatters import format_bytes, format_cache_validation_reports, format_model_cache_reports
 from ._common import HIDE_ADVANCED_OPTIONS, _get_cluster_manager, _get_context, host_options, json_option, resolve_host_context
 
 
@@ -261,3 +262,63 @@ def reconcile_cache(model, revision, claim, confirm_inactive, endpoint, **kwargs
     if not confirm_inactive:
         raise click.ClickException("Inspect every host in the claim, stop its workloads, then pass --confirm-inactive")
     return api.reconcile_claim(ModelArtifactRequest(model, revision, endpoint=endpoint), claim=claim, confirm_inactive=True, **kwargs)
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+@model_cache.command("delete")
+@click.argument("model")
+@click.option("--revision", default=None, help="Delete only this commit (or ref, e.g. main); default deletes every cached revision.")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted and stop.")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Delete without asking for confirmation.")
+@click.option("--force", is_flag=True, help="Also delete revisions with outstanding workload claims (likely in use).")
+@click.pass_context
+@_target_options
+@json_option("Print the per-host reports as JSON.")
+def delete_cache(ctx, model, revision, dry_run, assume_yes, force, output_json, **targets):
+    """Delete a model, or one revision of it, from the target hosts' caches.
+
+    Unlike prune, pins, retention age and untracked status do not protect a
+    revision. Outstanding workload claims do unless --force, and an active
+    download always does. If any host would refuse, nothing is deleted on any
+    host. Blobs are removed only when nothing else in the cache uses them.
+    Saved manifests are kept, so `model-cache repair` can restore the model.
+    """
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    sctx = _get_context(ctx)
+    try:
+        request = ModelArtifactRequest(model, revision)
+        host_list, cache_dir, banner = _resolve_targets(sctx, **targets)
+        common = dict(cache_dir=cache_dir, hosts=tuple(host_list), force=force, ssh_kwargs=build_ssh_kwargs(sctx.config))
+        reports = api.delete_model(request, dry_run=True, **common)
+        doomed = sum(1 for r in reports for e in r.entries if e.action == "would_delete")
+        proceed = not dry_run and doomed and all(r.target_met for r in reports)
+        if not output_json:
+            click.echo(banner)
+            click.echo(format_model_cache_reports(reports, action="delete"))
+        if proceed and not assume_yes:
+            if output_json or not _interactive():
+                raise click.ClickException("Refusing to delete without confirmation; pass --yes")
+            planned = sum(r.planned_bytes for r in reports)
+            click.confirm(
+                "\nDelete %d revision(s) of %s from %d host(s), freeing ~%s?" % (doomed, request.repo, len(reports), format_bytes(planned)),
+                abort=True,
+            )
+        if proceed:
+            confirmed = {e.revision for r in reports for e in r.entries if e.action == "would_delete"}
+            reports = api.delete_model(request, dry_run=False, allowed_revisions=confirmed, **common)
+            if not output_json:
+                click.echo()
+                click.echo(format_model_cache_reports(reports, action="delete"))
+    except (ModelArtifactError, ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if output_json:
+        click.echo(json.dumps([asdict(report) for report in reports], indent=2))
+    if not doomed and all(r.target_met for r in reports):
+        click.echo("%s%s is not cached on the target hosts." % (request.repo, "@" + revision if revision else ""), err=True)
+        ctx.exit(1)
+    if any(not r.target_met for r in reports):
+        ctx.exit(1)

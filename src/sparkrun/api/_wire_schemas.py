@@ -3269,7 +3269,7 @@ _CACHE_ENTRY = {
         "eligible": {"type": "boolean"},
         "reason": {"type": "string"},
         "reason_code": {"type": "string", "enum": list(CACHE_REASONS)},
-        "action": {"type": ["string", "null"], "enum": [None, "pin", "reconcile", "would_remove", "removed"]},
+        "action": {"type": ["string", "null"], "enum": [None, "pin", "reconcile", "would_remove", "removed", "would_delete", "deleted"]},
     },
     "required": [
         "repo",
@@ -3322,7 +3322,7 @@ _CACHE_REPORT = {
         "additionalProperties": False,
     },
 }
-for _action in ("list", "prune", "pin", "reconcile"):
+for _action in ("list", "prune", "pin", "reconcile", "delete"):
     RESULT_SCHEMAS["model_cache." + _action] = _CACHE_REPORT
 
 RESULT_SCHEMAS["diagnostics.collect"] = object_schema(

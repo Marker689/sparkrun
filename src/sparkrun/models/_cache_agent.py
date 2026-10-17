@@ -1,7 +1,9 @@
-"""Standard-library host helper for explicit inventory and conservative pruning.
+"""Standard-library host helper for explicit inventory, conservative pruning and deletion.
 
 Shipped over the existing host session; no Sparkrun or Hub install is required.
-Never delete blobs, lock files, unknown snapshots, or paths outside HF_HOME.
+Pruning never deletes blobs, lock files or unknown snapshots. Only an explicit
+delete removes blobs, and only those nothing else in the cache references.
+Nothing outside HF_HOME is ever removed.
 """
 
 import fcntl
@@ -153,6 +155,8 @@ def run(
     claim=None,
     confirm_inactive=False,
     endpoint=None,
+    force=False,
+    allowed=None,
     now=None,
 ):
     root = Path(root)
@@ -161,11 +165,13 @@ def run(
     for value in (min_age_seconds, max_bytes, min_free_bytes):
         if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
             raise ValueError("cache limits must be finite and nonnegative")
-    if action not in {"inventory", "prune", "pin", "reconcile"}:
+    if action not in {"inventory", "prune", "pin", "reconcile", "delete"}:
         raise ValueError("unknown cache action")
-    if type(dry_run) is not bool or type(pinned) is not bool or type(confirm_inactive) is not bool:
+    if any(type(flag) is not bool for flag in (dry_run, pinned, confirm_inactive, force)):
         raise ValueError("cache mutation flags must be boolean")
     now = time.time() if now is None else now
+    if action == "delete":
+        return delete(root, repo=repo, revision=revision, force=force, dry_run=dry_run, now=now, allowed=allowed)
     policy = dict(now=now, min_age_seconds=min_age_seconds, exclude_repos=exclude_repos)
     rows = inventory(root, **policy)
     probe = root
@@ -265,3 +271,409 @@ def run(
     result["target_met"] = satisfied()
     result["free_bytes_after"] = free
     return result
+
+
+REPO_PATTERN = r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)?"
+# Snapshot, ref and usage-record names: never ".", ".." or hidden entries.
+NAME_PATTERN = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
+
+
+def allocation(info):
+    """Bytes freed by unlinking a file: none while another hard link remains."""
+    return info.st_blocks * 512 if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 else 0
+
+
+def inside(path, parent):
+    try:
+        Path(path).relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def tree_entries(top):
+    """Every non-directory entry under *top*, never following symlinks."""
+    for directory, dirs, names in os.walk(top, followlinks=False, onerror=traversal_error):
+        for child in names + [d for d in dirs if (Path(directory) / d).is_symlink()]:
+            yield Path(directory) / child
+
+
+def read_ref(path):
+    """A ref file's commit, or None for anything but a small regular file (never block on a FIFO)."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+        return None
+    value = path.read_text().strip()
+    return value if re.fullmatch(NAME_PATTERN, value) else None
+
+
+def blob_link(path, repo_blobs):
+    """The per-model blob a snapshot entry links to (``../../blobs/<sha>``), or None."""
+    if not path.is_symlink():
+        return None
+    hop = Path(os.path.normpath(path.parent / os.readlink(path)))
+    return hop.name if hop.parent == repo_blobs else None
+
+
+# huggingface_hub's cache-wide shared blob store (utils/_shared_blobs.py), layout
+# version 1: per-repo blobs/<etag> symlinks into hub/blobs/<xx>/<hash>, a
+# <hash>.refs manifest listing those symlinks, and a <hash>.lock that publication,
+# linking and collection all take. Following the same protocol keeps sparkrun and
+# huggingface_hub from racing; an unknown layout is never touched.
+SHARED_MARKER = ".huggingface-shared-blobs"
+SHARED_LAYOUT = "1\n"
+SHARED_HASH = r"[0-9a-f]{64}"
+SHARED_REPO_DIR = r"(?:models|datasets|spaces)--.+"
+SHARED_LOCK_TIMEOUT = 10
+
+
+def shared_store(hub):
+    """hub/blobs when it is a shared store this helper understands, else None."""
+    store = hub / "blobs"
+    try:
+        if stat.S_ISDIR(store.lstat().st_mode) and stat.S_ISREG((store / SHARED_MARKER).lstat().st_mode):
+            return store if (store / SHARED_MARKER).read_text() == SHARED_LAYOUT else None
+    except OSError:
+        pass
+    return None
+
+
+def store_target(path, hub, store):
+    """The store payload a per-repo ``<repo>/blobs/<etag>`` symlink names, or None."""
+    try:
+        relative = Path(os.path.abspath(path)).relative_to(os.path.abspath(hub))
+    except ValueError:
+        return None
+    if len(relative.parts) != 3 or not re.fullmatch(SHARED_REPO_DIR, relative.parts[0]) or relative.parts[1] != "blobs":
+        return None
+    if not stat.S_ISLNK(path.lstat().st_mode):
+        return None
+    target = Path(os.path.abspath(path.parent / os.readlink(path)))
+    try:
+        inner = target.relative_to(os.path.abspath(store))
+    except ValueError:
+        return None
+    if len(inner.parts) != 2 or not re.fullmatch(SHARED_HASH, inner.parts[1]) or inner.parts[0] != inner.parts[1][:2]:
+        return None
+    return store / inner.parts[0] / inner.parts[1]
+
+
+def manifest_references(target, hub, store):
+    """Live symlinks a payload's manifest lists; None (keep the payload) when it cannot be read."""
+    manifest = target.with_name(target.name + ".refs")
+    try:
+        if not stat.S_ISREG(manifest.lstat().st_mode):
+            return None
+        lines = manifest.read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    references = set()
+    for line in lines:
+        relative = Path(line)
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        candidate = hub / relative
+        try:
+            if store_target(candidate, hub, store) == target:
+                references.add(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+    return references
+
+
+def shared_freed(target, deleting, hub, store):
+    """Bytes freed if every manifest reference to *target* is among *deleting*."""
+    references = manifest_references(target, hub, store)
+    if not references or not references <= deleting:
+        return 0
+    try:
+        info = target.lstat()
+    except OSError:
+        return 0
+    return allocation(info)
+
+
+def sweep_shared(target, hub, store):
+    """Collect one payload under its huggingface_hub lock once nothing references it."""
+    lock = target.with_name(target.name + ".lock")
+    if os.path.lexists(str(lock) + ".soft"):
+        return  # a filesystem without flock: huggingface_hub holds the soft lock
+    fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
+        deadline = time.monotonic() + SHARED_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    return  # busy: leak it rather than wait on a download
+                time.sleep(0.1)
+        if manifest_references(target, hub, store) != set():
+            return
+        if stat.S_ISREG(target.lstat().st_mode):
+            target.unlink()
+            target.with_name(target.name + ".refs").unlink()
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def hf_download_active(hub, slug):
+    """True when a huggingface_hub download holds one of this repository's file locks."""
+    locks = hub / ".locks" / slug
+    if locks.is_symlink() or not locks.is_dir():
+        return False
+    for path in locks.iterdir():
+        if path.suffix != ".lock" or path.is_symlink():
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+    return False
+
+
+def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
+    """Remove one revision, or every revision, of *repo* regardless of retention policy.
+
+    Pins, untracked snapshots and retention age do not protect against an
+    explicit delete. Outstanding workload claims do unless *force*; an active
+    download or a held publication lock always does, in a preview too, so a
+    preview that passes everywhere predicts the apply. *allowed* (the revisions
+    a caller confirmed) refuses anything that appeared since. A blocked request
+    deletes nothing on this host and reports ``target_met: false``.
+
+    Shared-store payloads are collected with huggingface_hub's own lock and
+    manifest, so a concurrent download linking the same content cannot race it.
+    """
+    if not isinstance(repo, str) or not re.fullmatch(REPO_PATTERN, repo):
+        raise ValueError("invalid repository")
+    if revision is not None and (not isinstance(revision, str) or not re.fullmatch(NAME_PATTERN, revision)):
+        raise ValueError("invalid revision")
+    if allowed is not None and (not isinstance(allowed, list) or not all(isinstance(a, str) for a in allowed)):
+        raise ValueError("allowed revisions must be a list of names")
+    safe_directory(root)
+    hub = root / "hub"
+    name = repo.replace("/", "--")
+    slug = "models--" + name
+    repo_dir = hub / slug
+    snapshots_dir = repo_dir / "snapshots"
+    repo_blobs = repo_dir / "blobs"
+    usage_dir = root / STATE / "usage" / name
+    for path in (hub, repo_dir, snapshots_dir, repo_blobs, repo_dir / "refs", usage_dir):
+        safe_directory(path)
+    whole = revision is None
+    probe = root
+    while not probe.exists():
+        probe = probe.parent
+    result = {
+        "cache_root": str(root),
+        "dry_run": dry_run,
+        "entries": [],
+        "free_bytes": shutil.disk_usage(probe).free,
+        "reclaimed_bytes": 0,
+        "planned_bytes": 0,
+        "target_met": True,
+        "budget_scope": "private_managed_snapshots",
+        "reclaimed_bytes_kind": "allocated_bytes_estimate",
+        "free_bytes_after_kind": "projected" if dry_run else "measured",
+    }
+    # A repository left with only blobs (an interrupted download) has no
+    # revision to name; a whole-model delete still removes it.
+    LEFTOVER = "-"
+
+    def select():
+        present = set()
+        if snapshots_dir.is_dir():
+            present = {p.name for p in snapshots_dir.iterdir() if re.fullmatch(NAME_PATTERN, p.name) and (p.is_dir() or p.is_symlink())}
+        recorded = set()
+        if usage_dir.is_dir():
+            recorded = {p.stem for p in usage_dir.glob("*.json") if re.fullmatch(NAME_PATTERN, p.stem)}
+        revisions = present | recorded
+        if whole:
+            return sorted(revisions) or ([LEFTOVER] if repo_dir.is_dir() else [])
+        if revision in revisions:
+            return [revision]
+        resolved = read_ref(repo_dir / "refs" / revision)
+        return [resolved] if resolved in revisions else []
+
+    def describe(r):
+        if r == LEFTOVER:
+            row = observe(root, slug, "0" * 40, **policy)
+            row.update(revision=LEFTOVER, snapshot=str(repo_dir), present=True)
+            return row
+        return observe(root, slug, r, **policy)
+
+    def refuse(rows, code, blocked=None):
+        for row in rows:
+            row_code = blocked if blocked and not row["claims"] else code
+            row.update(eligible=False, reason=CACHE_REASONS[row_code], reason_code=row_code)
+        result.update(entries=rows, target_met=False, free_bytes_after=result["free_bytes"])
+        return result
+
+    def check(selected, rows):
+        """The refusal (if any) for this selection; checked again under the lock."""
+        if allowed is not None and set(selected) - set(allowed):
+            return refuse(rows, "selection_changed")
+        if any(r["claims"] for r in rows) and not force:
+            return refuse(rows, "workload_claim", "delete_blocked")
+        if hf_download_active(hub, slug):
+            return refuse(rows, "download_in_progress")
+        return None
+
+    policy = dict(now=now, min_age_seconds=0, exclude_repos=())
+    selected = select()
+    if not selected:
+        result["free_bytes_after"] = result["free_bytes"]
+        return result
+    rows = [describe(r) for r in selected]
+    refusal = check(selected, rows)
+    if refusal:
+        return refusal
+
+    lock = root / STATE / (name + ".lock")
+    safe_directory(lock.parent)
+    if dry_run:
+        # Probe without writing: a missing lock cannot be held by anyone.
+        try:
+            fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            fd = None
+        except OSError:
+            return refuse(rows, "invalid_publication_lock")
+    else:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+        except OSError:
+            return refuse(rows, "invalid_publication_lock")
+    try:
+        if fd is not None:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return refuse(rows, "invalid_publication_lock")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return refuse(rows, "cache_busy")
+            # Re-read under the lock: a launch may have claimed, or a download
+            # added, a revision since.
+            selected = select()
+            rows = [describe(r) for r in selected]
+            refusal = check(selected, rows)
+            if refusal:
+                return refusal
+
+        store = shared_store(hub)
+        entries = [
+            snapshots_dir / r for r in selected if r != LEFTOVER and ((snapshots_dir / r).is_dir() or (snapshots_dir / r).is_symlink())
+        ]
+        linked = [p for p in entries if p.is_symlink()]  # unlinked as links; never walked or credited
+        snapshots = [p for p in entries if not p.is_symlink()]
+        kept = [p for p in snapshots_dir.iterdir() if p not in entries] if not whole and snapshots_dir.is_dir() else []
+
+        def references(paths):
+            blobs = {blob_link(path, repo_blobs) for top in paths for path in tree_entries(top)}
+            blobs.discard(None)
+            return blobs
+
+        per_row, row_refs = {}, {}
+        for snap in snapshots:
+            private = logical = 0
+            for path in tree_entries(snap):
+                private += allocation(path.lstat())
+                try:
+                    info = path.stat()
+                except OSError:
+                    continue
+                logical += info.st_size if stat.S_ISREG(info.st_mode) else 0
+            per_row[snap.name] = [logical, private]
+            row_refs[snap.name] = references([snap])
+        if whole:
+            dropped = {p.name for p in repo_blobs.iterdir()} if repo_blobs.is_dir() else set()
+        else:
+            dropped = references(snapshots) - references(kept)
+        blob_paths = [repo_blobs / b for b in sorted(dropped) if (repo_blobs / b).exists() or (repo_blobs / b).is_symlink()]
+        # Shared payloads the removed per-repo links name; freed only when the
+        # manifest shows every reference is among them (huggingface_hub's rule).
+        targets = {}
+        if store is not None:
+            for path in blob_paths:
+                try:
+                    target = store_target(path, hub, store)
+                except OSError:
+                    target = None
+                if target is not None:
+                    targets[path.name] = target
+        blob_bytes = {p.name: allocation(p.lstat()) for p in blob_paths}
+        shared_bytes = {t: shared_freed(t, set(blob_paths), hub, store) for t in set(targets.values())}
+        planned = sum(v[1] for v in per_row.values()) + sum(blob_bytes.values()) + sum(shared_bytes.values())
+        # Credit each freed blob to the first selected revision using it, so a
+        # revision whose weights other revisions share shows what it really frees.
+        for revision_name, blobs in row_refs.items():
+            per_row[revision_name][1] += sum(blob_bytes.pop(b, 0) for b in blobs)
+            per_row[revision_name][1] += sum(shared_bytes.pop(targets[b], 0) for b in blobs if b in targets)
+        # Blobs no selected snapshot uses (interrupted downloads) go to the first row.
+        orphans = sum(blob_bytes.values()) + sum(shared_bytes.values())
+        per_row.setdefault(selected[0], [0, 0])[1] += orphans
+
+        for row in rows:
+            logical, private = per_row.get(row["revision"], (0, 0))
+            row.update(
+                logical_bytes=logical,
+                reclaimable_bytes=private,
+                eligible=True,
+                reason=CACHE_REASONS["explicit_delete"],
+                reason_code="explicit_delete",
+                action="would_delete" if dry_run else "deleted",
+            )
+        result.update(entries=rows, planned_bytes=planned)
+        if dry_run:
+            result["free_bytes_after"] = result["free_bytes"] + planned
+            return result
+
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise ValueError("safe snapshot deletion is unavailable on this host")
+        if whole:
+            if repo_dir.is_dir():
+                shutil.rmtree(repo_dir)
+            if usage_dir.is_dir():
+                shutil.rmtree(usage_dir)
+        else:
+            for path in linked:
+                path.unlink()
+            for snap in snapshots:
+                shutil.rmtree(snap)
+            for path in blob_paths:
+                path.unlink()
+            refs = repo_dir / "refs"
+            if refs.is_dir():
+                for ref in tree_entries(refs):
+                    if read_ref(ref) in selected:
+                        ref.unlink()
+            for r in selected:
+                record = usage_dir / (r + ".json")
+                if record.is_file() and not record.is_symlink():
+                    record.unlink()
+        for target in sorted(set(targets.values())):
+            sweep_shared(target, hub, store)
+        result["reclaimed_bytes"] = planned
+        result["free_bytes_after"] = shutil.disk_usage(probe).free
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)

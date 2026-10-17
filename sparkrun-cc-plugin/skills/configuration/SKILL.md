@@ -143,6 +143,7 @@ sparkrun model-cache inspect org/model-name --hosts <host1>,<host2>
 sparkrun model-cache repair org/model-name --cluster <cluster_name> --dry-run
 sparkrun model-cache prune --cluster <cluster_name> --max-bytes 107374182400 --dry-run
 sparkrun model-cache pin org/model-name --revision <commit_id> --cluster <cluster_name>
+sparkrun model-cache delete org/model-name --cluster <cluster_name> --dry-run
 ```
 
 Targets resolve like other commands: `--cluster`/`--hosts`/`--hosts-file`, else the
@@ -150,7 +151,10 @@ default cluster, else localhost. Output is a per-host table; add `--json` to par
 Prune previews by default; `--apply` needs authorization for cleanup. It uses LRU
 among eligible managed revisions, respects pins/live claims, and leaves untracked
 snapshots/shared blobs alone. Usage records cover Sparkrun lifecycle activity,
-not every external read. Do not replace this with recursive cache deletion.
+not every external read. To remove a specific model regardless of pins, use
+`model-cache delete` (preview first; it needs explicit confirmation or `--yes`,
+and `--force` for revisions a workload claims). Do not replace either with
+recursive cache deletion.
 
 Transfer modes: `auto`, `local`, `push`, `delegated`, `pull` (per-node origin fetches).
 Delegated acquisition downloads on the chosen head and distributes to workers;

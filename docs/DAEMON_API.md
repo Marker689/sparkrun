@@ -136,7 +136,7 @@ SSE `error` record. Each request resolves its target anew; there is no target-ID
 registry or paging route. See [LOGGING_API.md](LOGGING_API.md) for matching,
 cancellation, ordering, and Python paging contracts.
 
-This snapshot contains **95 operations: 84 core, 8 K8s and 3 SparkRoute**.
+This snapshot contains **96 operations: 85 core, 8 K8s and 3 SparkRoute**.
 
 ## Domain vocabulary
 
@@ -227,6 +227,7 @@ own namespaces and routing-policy fields.
 
 | Operation | POST alias | Kind / permission | Reservation | Arguments (`!` required) |
 | --- | --- | --- | --- | --- |
+| `model_cache.delete` | `/v1/model_cache/delete` | job / admin | auto | `cache_dir!: string`, `hosts: string[]`, `model!: string`, `revision: string`, `dry_run: boolean`, `force: boolean` |
 | `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]` |

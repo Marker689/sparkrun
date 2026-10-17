@@ -41,6 +41,7 @@ FIELD_SCHEMAS = {
     "discover_removal_grace_sweeps": {"minimum": 1, "type": "integer"},
     "discovery_backend": {"enum": ["process", "daemon"], "type": "string"},
     "dry_run": {"type": "boolean"},
+    "force": {"type": "boolean"},
     "metadata_only": {"type": "boolean"},
     "duration": {"minimum": 1, "type": "integer"},
     "enable_ssh": {"type": "boolean"},

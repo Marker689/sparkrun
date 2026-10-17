@@ -219,3 +219,47 @@ def reconcile_claim(
         claim=claim,
         confirm_inactive=confirm_inactive,
     )
+
+
+def delete_model(
+    request,
+    *,
+    cache_dir,
+    hosts=("localhost",),
+    dry_run=True,
+    force=False,
+    allowed_revisions=None,
+    ssh_kwargs=None,
+    session=None,
+    sctx=None,
+) -> tuple[CacheReport, ...]:
+    """Delete one revision (``request.revision``), or every revision, of a model; preview by default.
+
+    Unlike prune this ignores pins, retention age and tracking: naming the model
+    is the authorization. Revisions with outstanding workload claims are refused
+    unless *force*, and an active download or busy publication lock always
+    refuses. Blobs are removed only when no other snapshot or repository in the
+    cache references them. Saved manifests are kept, so ``repair`` can restore it.
+
+    Applying previews every host first and deletes nothing anywhere if any host
+    would refuse (``target_met`` false on its report); those preview reports are
+    returned instead. Pass the revisions a user confirmed as *allowed_revisions*
+    so a revision that appeared after the confirmation is refused, not deleted.
+    """
+    from sparkrun.models.cache import cache_operation
+
+    options = dict(
+        cache_dir=cache_dir,
+        hosts=hosts,
+        ssh_kwargs=_ssh(ssh_kwargs, sctx),
+        session=session,
+        action="delete",
+        repo=request.repo,
+        revision=request.revision,
+        force=force,
+        allowed=None if allowed_revisions is None else sorted(allowed_revisions),
+    )
+    preview = cache_operation(dry_run=True, **options)
+    if dry_run or not all(report.target_met for report in preview):
+        return preview
+    return cache_operation(dry_run=False, **options)

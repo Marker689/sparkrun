@@ -195,7 +195,7 @@ removals and filesystem free space. Snapshot allocation counts exclude symbolic
 links and multiply linked files. They are estimates of disk reclamation, not a
 promise about filesystem compression, reflinks or concurrent disk activity;
 `free_bytes_after` is measured again when applying cleanup. Dry-run free-space
-projections use the allocation estimates. Shared HF blobs are **never deleted**.
+projections use the allocation estimates. Pruning **never deletes** shared HF blobs.
 Removing a symlink-based snapshot may therefore reclaim no weight bytes.
 
 Only tracked revisions with a known file inventory are eligible. Unknown
@@ -256,6 +256,44 @@ The daemon exposes `model_cache.list`, `model_cache.prune`, `model_cache.pin`
 and `model_cache.reconcile` (and matching `/v1/model_cache/...` routes).
 Prune and reconciliation require admin scope; prune defaults to dry-run over
 the API as well.
+
+## Explicit deletion
+
+`delete` removes a model, or one revision of it, from the target hosts' caches.
+Naming the model is the authorization, so pins, retention age and untracked
+status do not protect it. It previews what would be removed, then asks for
+confirmation (`--yes` skips the prompt; off a terminal it is required).
+
+```sh
+sparkrun model-cache delete org/model --cluster lab --dry-run
+sparkrun model-cache delete org/model --revision FULL_COMMIT_OR_REF --cluster lab
+```
+
+- A revision with an outstanding workload claim blocks the delete on that host
+  unless `--force`; its weights are probably in use by a running workload.
+- An active Hugging Face download (a held lock under `hub/.locks`) or a busy
+  publication lock always refuses, in the preview as well as when applying.
+- If any host would refuse, nothing is deleted on any host. Only the revisions
+  shown in the confirmed preview are deleted; one that appeared since refuses.
+- A revision delete removes its snapshot, refs pointing at it, its usage record,
+  and per-model blobs no other snapshot of that model references. A whole-model
+  delete removes the repository directory and its usage records.
+- Shared-store blobs (huggingface_hub's cache-wide `hub/blobs`) follow
+  huggingface_hub's own protocol: the per-blob `<hash>.lock` that downloads take
+  when they publish or link content, and the `<hash>.refs` manifest. A blob goes
+  only when its manifest shows no other live reference. A missing or unreadable
+  manifest, a lock held for more than ten seconds, or an unknown store layout
+  keeps it. Nothing outside the cache is removed, even through a symlink.
+- Revisions often share most of their files. Deleting one revision of a model
+  whose other cached revision uses the same weights frees only what differs;
+  the preview says how much stays and why.
+- Saved manifests are kept, so `model-cache repair` can restore the model.
+- Links into the cache from outside HF_HOME (for example old `local_dir`
+  checkouts that symlink cache blobs) are invisible to this, as they are to
+  `hf cache rm`.
+- Compared with `hf cache rm`, this also refuses while a download of the same
+  repository is running and honors sparkrun's claims and publication lock, and
+  it needs no `huggingface_hub` on the hosts.
 
 ## Parallel model copies
 

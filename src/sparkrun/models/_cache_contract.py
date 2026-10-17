@@ -21,6 +21,10 @@ CACHE_REASONS = {
     "invalid_publication_lock": "invalid publication lock",
     "cache_busy": "cache busy",
     "usage_changed_during_cleanup": "usage changed during cleanup",
+    "explicit_delete": "explicit delete",
+    "delete_blocked": "not deleted: another revision of this model has a workload claim",
+    "download_in_progress": "a Hugging Face download holds this repository's lock",
+    "selection_changed": "revisions appeared since the confirmed preview; preview again",
 }
 
 

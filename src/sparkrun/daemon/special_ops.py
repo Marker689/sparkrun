@@ -42,9 +42,12 @@ def execute(name, arguments, sctx, prompt=unavailable_prompt):
             "model_cache.prune": api.model_cache.prune_cache,
             "model_cache.pin": api.model_cache.pin_revision,
             "model_cache.reconcile": api.model_cache.reconcile_claim,
+            "model_cache.delete": api.model_cache.delete_model,
         }
         if name in management:
             data["ssh_kwargs"] = ssh
+            if name == "model_cache.delete":
+                return to_wire(management[name](ModelArtifactRequest(data.pop("model"), data.pop("revision", None)), **data))
             if name in {"model_cache.pin", "model_cache.reconcile"}:
                 request = ModelArtifactRequest(
                     data.pop("model"), data.pop("revision"), endpoint=data.pop("endpoint", "https://huggingface.co")
@@ -168,6 +171,7 @@ def register_special_ops():
         ("model_cache.list", "read", "cache_dir hosts", "cache_dir"),
         ("model_cache.prune", "admin", "cache_dir hosts dry_run min_age_days max_bytes min_free_bytes", "cache_dir"),
         ("model_cache.pin", "operate", "cache_dir hosts model revision endpoint pinned", "cache_dir model revision"),
+        ("model_cache.delete", "admin", "cache_dir hosts model revision dry_run force", "cache_dir model"),
         (
             "model_cache.reconcile",
             "admin",

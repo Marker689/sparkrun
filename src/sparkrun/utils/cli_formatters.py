@@ -1001,6 +1001,8 @@ _CACHE_ACTION_LABELS = {
     "removed": "removed",
     "pin": "updated",
     "reconcile": "claim released",
+    "would_delete": "would delete",
+    "deleted": "deleted",
 }
 
 
@@ -1009,9 +1011,12 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
     everything = sorted(report.entries, key=lambda e: (e.repo, e.last_used or 0, e.revision))
     # Untracked snapshots carry no usage data and are never pruned; on a cache
     # sparkrun has not prepared they can outnumber managed revisions 50:1.
-    entries = everything if show_untracked else [e for e in everything if e.tracked or e.action]
+    entries = everything if show_untracked or action == "delete" else [e for e in everything if e.tracked or e.action]
     hidden = len(everything) - len(entries)
     hidden_note = "  %d untracked snapshot(s) not shown (not managed by sparkrun; never pruned). Use --all to list them." % hidden
+    if not entries and action == "delete":
+        lines.append("  Not cached on this host.")
+        return lines
     if not entries:
         lines.append("  No managed revisions." if hidden else "  No cached revisions.")
         if hidden:
@@ -1022,14 +1027,15 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
     rows = []
     for e in entries:
         status = e.reason
+        measured = e.action in ("would_delete", "deleted")  # delete sizes every revision it removes
         if show_action and e.action:
             status = "%s (%s)" % (_CACHE_ACTION_LABELS.get(e.action, e.action), status)
         rows.append(
             (
                 e.repo,
                 e.revision,
-                format_bytes(e.logical_bytes) if e.tracked else "-",
-                format_bytes(e.reclaimable_bytes) if e.tracked else "-",
+                format_bytes(e.logical_bytes) if e.tracked or measured else "-",
+                format_bytes(e.reclaimable_bytes) if e.tracked or measured else "-",
                 format_age(e.last_used, now=now),
                 "yes" if e.pinned else "",
                 str(len(e.claims)) if e.claims else "",
@@ -1065,6 +1071,21 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
             lines.append("  Free space after: %s (%s)" % (format_bytes(report.free_bytes_after), report.free_bytes_after_kind))
         if not report.target_met:
             lines.append("  Space target not met: remaining revisions are protected or share blobs.")
+    elif action == "delete":
+        lines.append("")
+        if not report.target_met:
+            lines.append("  Nothing deleted on this host; see STATUS above.")
+        elif report.dry_run:
+            lines.append("  Would delete %d revision(s), freeing ~%s." % (len(entries), format_bytes(report.planned_bytes)))
+        else:
+            lines.append("  Deleted %d revision(s), freed ~%s." % (len(entries), format_bytes(report.reclaimed_bytes)))
+        # A revision whose weights another cached revision shares frees almost nothing.
+        kept = sum(max(0, e.logical_bytes - e.reclaimable_bytes) for e in entries if e.action)
+        if report.target_met and kept > 0.5 * sum(e.logical_bytes for e in entries):
+            lines.append(
+                "  ~%s stays: those files are shared with other cached revisions of the model (or hard-linked"
+                " elsewhere). Deleting the model without --revision removes them." % format_bytes(kept)
+            )
     elif action == "inventory":
         tracked = [e for e in everything if e.tracked]
         eligible = [e for e in tracked if e.eligible]
