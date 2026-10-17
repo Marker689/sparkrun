@@ -4,6 +4,8 @@ from _runtime_fixtures import StubRuntime
 
 from unittest import mock
 
+import pytest
+
 from sparkrun.builders.base import _flatten_dict
 from sparkrun.builders.eugr import EugrBuilder
 from sparkrun.core.recipe import Recipe
@@ -671,3 +673,36 @@ def test_version_commands_survive_the_collector_shell_wrapping():
         # -n parses without executing: no docker, no GPU, no network.
         proc = subprocess.run([bash, "-n"], input=script, capture_output=True, text=True)
         assert proc.returncode == 0, "%s: %s" % (runtime_cls.__name__, proc.stderr)
+
+
+def test_version_probe_ignores_import_time_stdout_banners(tmp_path, monkeypatch):
+    """An image whose Python prints a banner on startup must not displace the version.
+
+    Runs the generated probe under real bash with a ``python3`` that prints a
+    banner line before doing its work, as an import-time engine patch does.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    if not shutil.which("bash") or not shutil.which("awk"):
+        pytest.skip("bash/awk unavailable")
+    fake = tmp_path / "python3"
+    fake.write_text('#!/bin/sh\necho "[replicated_split] armed for [\'wqkv_a\']"\nexec %s "$@"\n' % sys.executable)
+    fake.chmod(0o755)
+
+    runtime = VllmRayRuntime()
+    executor = mock.Mock()
+    executor.exec_cmd.side_effect = lambda container_name, command, detach: command
+    monkeypatch.setattr(runtime, "_resolve_executor", lambda *a, **k: executor)
+
+    def run_locally(host, script, **kwargs):
+        env = {"PATH": "%s:/usr/bin:/bin" % tmp_path}
+        done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+        return RemoteResult(host=host, stdout=done.stdout, stderr=done.stderr, returncode=done.returncode)
+
+    with mock.patch("sparkrun.orchestration.primitives.run_script_on_host", side_effect=run_locally):
+        info = runtime._collect_runtime_info("host1", "container1", {}, dry_run=False)
+
+    assert info["python"] == "%d.%d.%d" % sys.version_info[:3]
+    assert not any("replicated_split" in value for value in info.values())

@@ -2152,10 +2152,14 @@ class RuntimePlugin(Plugin, ABC):
             return {}
 
         # Build an inner script that runs inside the container.
-        # Each command outputs a SPARKRUN_VER_KEY=<value> line.
+        # Each command outputs a SPARKRUN_VER_KEY=<value> line.  Only the last
+        # non-empty line of a command's output is kept: images that patch the
+        # engine at import time print banners to stdout before the version
+        # (observed: "[replicated_split] armed for ..."), and the parser below
+        # reads one line per key.
         inner_lines = ["#!/bin/bash"]
         for key, cmd in sorted(cmds.items()):
-            inner_lines.append('echo "SPARKRUN_VER_%s=$(%s)"' % (key.upper(), cmd))
+            inner_lines.append("echo \"SPARKRUN_VER_%s=$( { %s; } | awk 'NF {last=$0} END {print last}')\"" % (key.upper(), cmd))
 
         # Builder commands use delimited blocks for multi-line output.
         for label, cmd in sorted(builder_cmds.items()):
