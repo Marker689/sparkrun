@@ -9,8 +9,9 @@ not just the docker containers the old telemetry-embedded ``docker ps`` saw.
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING, Any
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -37,22 +38,128 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_BAR_WIDTH = 30
+# Sparklines are rendered as inline block glyphs inside the existing
+# Static(markup=True) detail panel — textual.widgets.Sparkline would force the
+# panel into a widget grid for no gain.
+_SPARK_GLYPHS = "▁▂▃▄▅▆▇█"
+_SPARKLINE_WIDTH = 20  # ~40 s of trend at the default 2 s record cadence
+_CELL_LABEL_WIDTH = 9  # longest label ("GPU Power") keeps the grid columns lined up
+_CELL_VALUE_WIDTH = 10  # "999.9 kb/s"-class values; longer ones just overflow
+
+# Sparkline colors come from the active theme's palette, stepped away from the
+# background — lighten on dark themes, darken on light ones — so they stay
+# visible either way.  Five hues x three luminance steps; the grid places
+# same-hue entries far apart.  (Named ANSI colors cannot be used: Textual
+# resolves only what its color table knows, so "bright_red" silently falls back
+# to the default foreground — the whole reason these are theme variables.)
+# Minimal ANSI themes (ansi-dark/ansi-light) collapse every shade onto its base,
+# so they yield 4-5 distinct colors instead of 11; that is inherent to those
+# palettes, not a bug here — the full sets come from textual-dark/light and the
+# third-party themes.
+_SPARK_FAMILIES = ("primary", "secondary", "accent", "success", "error")
+_SPARK_STEPS_DARK = ("-lighten-1", "-lighten-2", "-lighten-3")
+_SPARK_STEPS_LIGHT = ("-darken-1", "-darken-2", "-darken-3")
+# (family index, step index) in cell order: GPU %, GPU Temp, GPU Power, CPU %,
+# CPU Temp, GPU Clock, RAM %, Net Send, Net Recv, App, Cache
+_SPARK_GRID = ((0, 0), (4, 0), (2, 0), (3, 0), (1, 0), (0, 1), (3, 1), (2, 1), (4, 1), (0, 2), (1, 1))
 
 
-def _bar(value: float, width: int = _BAR_WIDTH) -> str:
-    """Render a Unicode bar: ████████░░░░░░░░░░░░."""
-    pct = max(0.0, min(value / 100.0, 1.0))
-    filled = int(pct * width)
-    return "█" * filled + "░" * (width - filled)
-
-
-def _pct(raw: str) -> float:
-    """Parse a percentage string to float, defaulting to 0."""
+def _spark_palette(css: Mapping[str, object], dark: bool) -> tuple[str, ...]:
+    """Eleven distinct sparkline colors, in cell order, from *css* theme variables."""
+    steps = _SPARK_STEPS_DARK if dark else _SPARK_STEPS_LIGHT
     try:
-        return float(raw)
-    except (ValueError, TypeError):
-        return 0.0
+        return tuple(str(css[_SPARK_FAMILIES[family] + steps[step]]) for family, step in _SPARK_GRID)
+    except KeyError:  # unexpected theme shape: render uncolored rather than blow up
+        return ()
+
+
+def _at(palette: Sequence[str], index: int) -> str | None:
+    """Palette entry *index*, or None when the palette is unset/short."""
+    return palette[index] if index < len(palette) else None
+
+
+def _series(history: list[tuple[float, MonitorSample]] | None, field: str) -> list[float]:
+    """Parsable finite float values of *field* across *history* points (skips empty/garbage)."""
+    out: list[float] = []
+    for _ts, sample in history or ():
+        try:
+            value = float(getattr(sample, field, ""))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):  # a remote "nan"/"inf" must not break the tick
+            out.append(value)
+    return out
+
+
+def _sparkline(
+    values: list[float],
+    width: int = _SPARKLINE_WIDTH,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> str:
+    """One block-glyph sparkline, newest right-aligned; blank (spaces) when empty.
+
+    ``lo``/``hi`` pin the scale — percent metrics pass 0/100 so hosts stay
+    comparable — and whichever end is not given uses the window min/max.  A flat
+    window renders '▄' per point.
+    """
+    pts = list(values)[-width:]
+    if not pts:
+        return " " * width
+    lo_eff = min(min(pts), lo) if lo is not None else min(pts)
+    hi_eff = max(max(pts), hi) if hi is not None else max(pts)
+    span = hi_eff - lo_eff
+    if span <= 0:
+        glyphs = "▄" * len(pts)
+    else:
+        glyphs = "".join(_SPARK_GLYPHS[min(7, max(0, round((v - lo_eff) / span * 7)))] for v in pts)
+    return glyphs.rjust(width)
+
+
+_RATE_UNITS = ("b/s", "kb/s", "Mb/s", "Gb/s", "Tb/s")
+
+
+def _fmt_bitrate(bytes_per_s: float) -> str:
+    """Network bytes/s → bits/s with an adaptive magnitude prefix (decimal steps).
+
+    Rises and falls with the value: 60 B/s reads '480.0 b/s', 1 MB/s '8.0 Mb/s'.
+    Clamps at Tb/s and reads '0.0 b/s' on an idle link.
+    """
+    bits = bytes_per_s * 8
+    idx = 0
+    while idx + 1 < len(_RATE_UNITS) and bits >= 1000.0:
+        bits /= 1000.0
+        idx += 1
+    return f"{bits:.1f} {_RATE_UNITS[idx]}"
+
+
+def _cell(
+    label: str,
+    sample: MonitorSample | None,
+    history: list[tuple[float, MonitorSample]] | None,
+    field: str,
+    fmt: Callable[[float], str],
+    *,
+    lo: float | None = None,
+    hi: float | None = None,
+    color: str | None = None,
+    series_field: str | None = None,
+) -> str:
+    """``'{label} {sparkline} {value}'`` for one grid cell.
+
+    The value parses from the fresh frame sample (``-`` when empty/unparsable)
+    because ``history()`` lags the frame by up to one record interval; the
+    sparkline comes from the history series.  ``series_field`` overrides which
+    column feeds the sparkline when value and trend come from different ones.
+    """
+    try:
+        value = fmt(float(getattr(sample, field, "")))
+    except (TypeError, ValueError):
+        value = "-"
+    spark = _sparkline(_series(history, series_field or field), lo=lo, hi=hi)
+    if color:
+        spark = f"[{color}]{spark}[/{color}]"
+    return f"{label:<{_CELL_LABEL_WIDTH}} {spark} {value:<{_CELL_VALUE_WIDTH}}"
 
 
 def _container_count(activity: HostActivity | None) -> int:
@@ -66,79 +173,91 @@ def _render_workloads(activity: Any, cache_dir: str | None = None) -> list[str]:
     return [r.text for r in workload_rows(activity, cache_dir=cache_dir)]
 
 
-def _render_node_stats(host: str, activity: HostActivity | None) -> str:
-    """Build the Rich-markup string for the node stats in the detail panel."""
+def _render_node_stats(
+    host: str,
+    activity: HostActivity | None,
+    history: list[tuple[float, MonitorSample]] | None = None,
+    palette: Sequence[str] = (),
+) -> str:
+    """Build the Rich-markup string for the node stats in the detail panel.
+
+    One header line (host │ hostname │ RAM used/total │ CPU │ GPU (count)) then
+    a 3x3 sparkline grid; an nv-monitor-only fourth row adds the App/Cache
+    memory breakdown.  ``history`` is the host's ``LiveMonitorSession.history()``
+    points (oldest first) — absent, every sparkline renders blank.  ``palette``
+    holds the per-cell sparkline colors (see :func:`_spark_palette`); empty
+    renders them uncolored.
+    """
     if activity is None:
         return f"[dim]{host}: connecting…[/dim]"
 
     s: MonitorSample | None = activity.telemetry
 
-    lines: list[str] = [f"[bold]{host}[/bold]"]
+    errors: list[str] = []
     if activity.telemetry_error:
-        lines.append(f"  [yellow]telemetry: {activity.telemetry_error}[/yellow]")
+        errors.append(f"  [yellow]telemetry: {activity.telemetry_error}[/yellow]")
     if activity.status_error:
-        lines.append(f"  [yellow]status: {activity.status_error}[/yellow]")
+        errors.append(f"  [yellow]status: {activity.status_error}[/yellow]")
 
     if s is None:
-        lines.append("  [dim]telemetry unavailable[/dim]")
-        return "\n".join(lines)
+        return "\n".join([f"[bold]{host}[/bold]", *errors, "  [dim]telemetry unavailable[/dim]"])
 
-    cpu = _pct(s.cpu_usage_pct)
-    ram = _pct(s.mem_used_pct)
-    gpu = _pct(s.gpu_util_pct)
-    lines.extend(
-        [
-            "",
-            f"  CPU  [cyan]{_bar(cpu)}[/cyan] {cpu:5.1f}%",
-            f"  RAM  [green]{_bar(ram)}[/green] {ram:5.1f}%",
-            f"  GPU  [yellow]{_bar(gpu)}[/yellow] {gpu:5.1f}%",
-            "",
-        ]
-    )
-
-    # Hardware details
-    extras: list[str] = []
-    if s.gpu_name:
-        extras.append(f"GPU: {s.gpu_name}")
-    if s.cpu_temp_c:
-        extras.append(f"CPU temp: {s.cpu_temp_c} °C")
-    if s.gpu_temp_c:
-        extras.append(f"GPU temp: {s.gpu_temp_c} °C")
-    if s.gpu_power_w:
-        power_str = f"{s.gpu_power_w} W"
-        if s.gpu_power_limit_w:
-            power_str += f" / {s.gpu_power_limit_w} W"
-        extras.append(f"GPU power: {power_str}")
+    # Header line: only non-empty segments, in a fixed order.
+    header: list[str] = [f"[bold]{host}[/bold]"]
+    if s.hostname:
+        header.append(s.hostname)
     if s.mem_used_mb and s.mem_total_mb:
-        extras.append(f"RAM: {s.mem_used_mb} / {s.mem_total_mb} MB")
-    if s.gpu_mem_used_mb and s.gpu_mem_total_mb:
-        extras.append(f"GPU mem: {s.gpu_mem_used_mb} / {s.gpu_mem_total_mb} MB")
-    if s.gpu_encoder_pct:
-        extras.append(f"Encoder: {s.gpu_encoder_pct}%")
-    if s.gpu_decoder_pct:
-        extras.append(f"Decoder: {s.gpu_decoder_pct}%")
-    if s.gpu_fan_pct:
-        extras.append(f"Fan: {s.gpu_fan_pct}%")
-    if extras:
-        lines.append("  " + "  │  ".join(extras))
-        lines.append("")
+        header.append(f"RAM {s.mem_used_mb}/{s.mem_total_mb} MB")
+    if s.cpu_name:
+        header.append(s.cpu_name)
+    if s.gpu_name:
+        header.append(f"{s.gpu_name} ({s.gpu_count})" if s.gpu_count else s.gpu_name)
 
-    # Memory breakdown (when nv-monitor provides bufcache data)
+    lines: list[str] = ["  " + " │ ".join(header), *errors, ""]
+
+    grid = (
+        (
+            _cell("GPU %", s, history, "gpu_util_pct", lambda v: f"{v:.1f} %", lo=0.0, hi=100.0, color=_at(palette, 0)),
+            _cell("GPU Temp", s, history, "gpu_temp_c", lambda v: f"{v:.1f} °C", color=_at(palette, 1)),
+            _cell("GPU Power", s, history, "gpu_power_w", lambda v: f"{v:.2f} W", color=_at(palette, 2)),
+        ),
+        (
+            _cell("CPU %", s, history, "cpu_usage_pct", lambda v: f"{v:.1f} %", lo=0.0, hi=100.0, color=_at(palette, 3)),
+            _cell("CPU Temp", s, history, "cpu_temp_c", lambda v: f"{v:.1f} °C", color=_at(palette, 4)),
+            _cell("GPU Clock", s, history, "gpu_clock_mhz", lambda v: f"{v:.0f} MHz", color=_at(palette, 5)),
+        ),
+        (
+            _cell("RAM %", s, history, "mem_used_pct", lambda v: f"{v:.1f} %", lo=0.0, hi=100.0, color=_at(palette, 6)),
+            _cell("Net Send", s, history, "net_send_bytes_s", _fmt_bitrate, color=_at(palette, 7)),
+            _cell("Net Recv", s, history, "net_recv_bytes_s", _fmt_bitrate, color=_at(palette, 8)),
+        ),
+    )
+    lines.extend("  " + "   ".join(row) for row in grid)
+
+    # Memory breakdown row (nv-monitor backend only — the bash CSV has no bufcache).
     if s.mem_bufcache_mb and s.mem_used_mb and s.mem_total_mb:
         try:
             total = float(s.mem_total_mb)
-            used = float(s.mem_used_mb)
-            bufcache = float(s.mem_bufcache_mb)
-            if total > 0:
-                used_pct = used / total * 100
-                buf_pct = bufcache / total * 100
-                lines.append("  Memory breakdown:")
-                lines.append(f"    App:    [green]{_bar(used_pct)}[/green] {used:.0f} MB ({used_pct:.1f}%)")
-                lines.append(f"    Cache:  [cyan]{_bar(buf_pct)}[/cyan] {bufcache:.0f} MB ({buf_pct:.1f}%)")
-                lines.append("")
         except (ValueError, TypeError):
-            pass
+            total = 0.0
+        if total > 0:
 
+            def _mem_fmt(v: float) -> str:
+                return f"{v:.0f} MB ({v / total * 100:.1f}%)"
+
+            lines.append(
+                "  "
+                + "   ".join(
+                    (
+                        _cell(
+                            "App", s, history, "mem_used_mb", _mem_fmt, series_field="mem_used_pct", lo=0.0, hi=100.0, color=_at(palette, 9)
+                        ),
+                        _cell("Cache", s, history, "mem_bufcache_mb", _mem_fmt, color=_at(palette, 10)),
+                    )
+                )
+            )
+
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -453,7 +572,27 @@ class ClusterMonitorApp(App):
             return
         frame = getattr(self, "_frame", None)
         activity = frame.for_host(host) if frame is not None else None
-        stats.update(_render_node_stats(host, activity))
+
+        # history() is optional so duck-typed session stand-ins keep working; a
+        # host outside the session's set (cannot happen in production — the same
+        # host list feeds session and app) degrades to blank sparklines.
+        history: list[tuple[float, MonitorSample]] = []
+        history_fn = getattr(self._session, "history", None)
+        if history_fn is not None:
+            try:
+                history = history_fn(host)
+            except KeyError:
+                history = []
+
+        # Sparkline colors follow the active theme; a theme that lacks the
+        # variables yields an empty palette (sparks uncolored), not a crash.
+        palette: tuple[str, ...] = ()
+        try:
+            palette = _spark_palette(self.get_css_variables(), dark=self.current_theme.dark)
+        except Exception:  # noqa: BLE001 - cosmetic only; never break the tick
+            palette = ()
+
+        stats.update(_render_node_stats(host, activity, history, palette))
 
         try:
             wl = self.query_one("#workload-list", WorkloadList)

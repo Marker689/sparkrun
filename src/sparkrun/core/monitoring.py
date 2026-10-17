@@ -48,6 +48,10 @@ MONITOR_COLUMNS = (
     "gpu_mem_clock_mhz",
     "sparkrun_jobs",
     "sparkrun_job_names",
+    "cpu_name",
+    "gpu_count",
+    "net_send_bytes_s",
+    "net_recv_bytes_s",
 )
 
 
@@ -82,6 +86,10 @@ class MonitorSample:
     gpu_mem_clock_mhz: str = ""
     sparkrun_jobs: str = ""
     sparkrun_job_names: str = ""
+    cpu_name: str = ""
+    gpu_count: str = ""
+    net_send_bytes_s: str = ""
+    net_recv_bytes_s: str = ""
 
     # Extended fields (populated by nv-monitor backend)
     gpu_encoder_pct: str = ""

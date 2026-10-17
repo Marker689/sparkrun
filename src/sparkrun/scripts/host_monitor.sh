@@ -37,6 +37,10 @@
 #   gpu_mem_clock_mhz   GPU memory clock speed in MHz
 #   sparkrun_jobs       Number of running sparkrun_ containers
 #   sparkrun_job_names  Pipe-delimited names of running sparkrun_ containers
+#   cpu_name            CPU model (x86 "model name"; arm64 MIDR parts decoded)
+#   gpu_count           Number of GPUs visible to nvidia-smi (empty when none)
+#   net_send_bytes_s    Outbound network rate, bytes/s (non-loopback, delta)
+#   net_recv_bytes_s    Inbound network rate, bytes/s (non-loopback, delta)
 
 set -uo pipefail
 
@@ -125,6 +129,38 @@ read_cpu_temp() {
     fi
 }
 
+# CPU model name.  x86 exposes "model name" in /proc/cpuinfo; arm64 (GB10)
+# exposes only MIDR "CPU part" hex, decoded here from the values in Linux
+# arch/arm64/include/asm/cputype.h (0xd85 = Cortex-X925, 0xd87 = Cortex-A725);
+# unknown parts render as raw hex.  Commas become ";" and part groups are
+# joined with " + " because a literal comma would shift every later CSV column
+# (parse_monitor_line splits on bare commas).
+read_cpu_name() {
+    local name
+    name=$(awk -F': +' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null | sed 's/,/;/g')
+    if [ -n "$name" ]; then
+        echo "$name"
+        return
+    fi
+    awk '/^CPU part/ {print $NF}' /proc/cpuinfo 2>/dev/null \
+        | sort | uniq -c \
+        | awk '{name = $2; if (name == "0xd85") name = "X925"; else if (name == "0xd87") name = "A725"; printf "%s (%d) + ", name, $1} END {print ""}' \
+        | sed 's/ + $//'
+}
+
+# Network byte counters summed over non-loopback interfaces.
+# Outputs: rx_bytes tx_bytes
+read_net() {
+    awk 'NR > 2 {sub(/:$/, "", $1); if ($1 != "lo") {rx += $2; tx += $10}} END {printf "%.0f %.0f\n", rx, tx}' /proc/net/dev
+}
+
+# Bytes/second from two byte-counter readings and the elapsed seconds.
+# A rate needs the true elapsed window (unlike calc_cpu_pct, which is
+# window-independent); a shrinking counter (reset) yields 0.
+net_rate() {
+    awk -v b="$1" -v a="$2" -v i="$3" 'BEGIN {d = a - b; if (d < 0) d = 0; if (i <= 0) i = 1; printf "%.0f", d / i}'
+}
+
 # Memory stats from /proc/meminfo (MB).
 # Outputs: total_mb used_mb avail_mb pct swap_total_mb swap_used_mb
 read_mem() {
@@ -158,6 +194,17 @@ read_gpu() {
     | sed 's/, /|/g'
 }
 
+# Number of GPUs visible to nvidia-smi (empty string when none/absent).
+read_gpu_count() {
+    local n
+    n=$(nvidia-smi --list-gpus 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+        echo "$n"
+    else
+        echo ""
+    fi
+}
+
 # Trim whitespace and normalize [N/A] to empty string.
 clean() {
     echo "$1" | sed 's/^ *//;s/ *$//;s/\[N\/A\]//'
@@ -179,11 +226,27 @@ list_sparkrun_job_names() {
 
 # Take an initial CPU stat snapshot for the first interval.
 prev_cpu=$(read_cpu_stat)
+# Static host facts (read once, not per sample).
+cpu_name=$(read_cpu_name)
+gpu_count=$(read_gpu_count)
+# Network counters before the warm-up window; the first row's rates are the
+# delta over that window, scaled to bytes/s.  Each read is stamped because the
+# window between reads is sleep plus loop-body time, not the nominal interval.
+read -r net_rx_prev net_tx_prev <<< "$(read_net)"
+net_t0=$(date +%s.%N)
 # Brief sleep so the first sample has a meaningful CPU delta.
 sleep 0.2
 cur_cpu=$(read_cpu_stat)
 cpu_pct=$(calc_cpu_pct "$prev_cpu" "$cur_cpu")
 prev_cpu=$cur_cpu
+read -r net_rx_cur net_tx_cur <<< "$(read_net)"
+net_t1=$(date +%s.%N)
+net_elapsed=$(awk -v a="$net_t0" -v b="$net_t1" 'BEGIN {printf "%.3f", b - a}')
+net_recv=$(net_rate "$net_rx_prev" "$net_rx_cur" "$net_elapsed")
+net_send=$(net_rate "$net_tx_prev" "$net_tx_cur" "$net_elapsed")
+net_rx_prev=$net_rx_cur
+net_tx_prev=$net_tx_cur
+net_t0=$net_t1
 
 while true; do
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -237,7 +300,7 @@ while true; do
     sparkrun_job_names=$(list_sparkrun_job_names)
 
     # Emit CSV row
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$ts" "$hn" "$uptime_sec" \
         "$load1" "$load5" "$load15" \
         "$cpu_pct" "$cpu_freq" "$cpu_temp" \
@@ -245,12 +308,23 @@ while true; do
         "$swap_total" "$swap_used" \
         "$gpu_name" "$gpu_util" "$gpu_mem_used" "$gpu_mem_total" "$gpu_mem_pct" \
         "$gpu_temp" "$gpu_power" "$gpu_power_limit" "$gpu_clock" "$gpu_mem_clock" \
-        "$sparkrun_jobs" "$sparkrun_job_names"
+        "$sparkrun_jobs" "$sparkrun_job_names" \
+        "$cpu_name" "$gpu_count" "$net_send" "$net_recv"
 
-    # Sleep, then sample CPU counters for the next iteration's cpu_usage_pct
+    # Sleep, then sample CPU counters and network byte counters for the next
+    # iteration's cpu_usage_pct / net rates.
     sleep "$INTERVAL"
 
     cur_cpu=$(read_cpu_stat)
     cpu_pct=$(calc_cpu_pct "$prev_cpu" "$cur_cpu")
     prev_cpu=$cur_cpu
+
+    read -r net_rx_cur net_tx_cur <<< "$(read_net)"
+    net_t1=$(date +%s.%N)
+    net_elapsed=$(awk -v a="$net_t0" -v b="$net_t1" 'BEGIN {printf "%.3f", b - a}')
+    net_recv=$(net_rate "$net_rx_prev" "$net_rx_cur" "$net_elapsed")
+    net_send=$(net_rate "$net_tx_prev" "$net_tx_cur" "$net_elapsed")
+    net_rx_prev=$net_rx_cur
+    net_tx_prev=$net_tx_cur
+    net_t0=$net_t1
 done
