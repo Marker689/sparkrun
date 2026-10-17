@@ -21,6 +21,8 @@ Merge rules (:func:`merge_recipe_data`):
   mapping rather than blending two speculators into one config
 * ``overrides:`` appends (base entries first, then the includer's), so an
   included recipe's conditional tuning survives and the includer's wins ties
+* ``metadata`` follows the same mapping rules even when ``model`` changes;
+  the includer must override or clear model-specific assumptions as needed
 
 Resolution is strict. A bare reference is a file **in the same directory**:
 no path separators, so an include cannot walk the filesystem, and no bare
@@ -106,15 +108,13 @@ class IncludeSource:
 def merge_recipe_data(base: dict[str, Any], outer: dict[str, Any]) -> dict[str, Any]:
     """Merge *outer* over *base* by the include rules; neither input is mutated.
 
-    ``metadata`` describes the *model* (parameter count, dtype, architecture
-    fields the memory estimate and placement read). When the outer recipe
-    serves a different model the base's metadata is not inherited: stale
-    architecture numbers would size the wrong model.
+    ``metadata`` includes declared runtime estimates as well as model facts.
+    Changing ``model`` does not implicitly discard those declarations. The
+    includer can override individual fields, delete them with null, or clear
+    the entire block with ``metadata: null`` when the assumptions differ.
     """
     merged = deepcopy(base)
     merged.pop("include", None)
-    if "model" in outer and outer["model"] != base.get("model"):
-        merged.pop("metadata", None)
     for key, value in outer.items():
         if key == "include":
             continue

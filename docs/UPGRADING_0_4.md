@@ -75,6 +75,16 @@ independent identity, config paths, defaults, and plugin composition.
 Plugin daemon operations use loader-owned namespaces; workload orchestration
 belongs to core. A daemon job ID identifies an API execution, not a workload.
 
+## Recipe metadata inheritance
+
+Recipes using `include:` now inherit `metadata` even when the child changes
+`model:`. Earlier 0.4.0 previews discarded the entire block, losing declared
+weight and KV-cache dtypes for model variants. Metadata follows the normal
+key-by-key merge rules: child values override inherited ones, and `null` removes
+them. Review inherited model-specific estimates when switching models; use
+`metadata: null` to clear all inherited metadata and let model detection refill
+the available fields. See [recipe inheritance](../RECIPES.md#including-another-recipe-include).
+
 ## Model caches, readiness, and feedback
 
 Manifest preparation verifies selected model files. Delegated acquisition can

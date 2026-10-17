@@ -395,13 +395,83 @@ def test_sibling_symlink_within_the_directory_is_fine(tmp_path):
     assert Recipe.load(_write(tmp_path, "variant", {"include": "base"})).model == _BASE["model"]
 
 
-def test_changing_the_model_drops_inherited_metadata(tmp_path):
-    """Architecture numbers describe the base's model and would size the wrong one."""
+def test_changing_the_model_keeps_declared_metadata(tmp_path):
+    """A model variant inherits declared estimates until it overrides or clears them."""
     _write(tmp_path, "base", _BASE)
     same = Recipe.load(_write(tmp_path, "same", {"include": "base"}))
     other = Recipe.load(_write(tmp_path, "other", {"include": "base", "model": "Qwen/Qwen3-8B"}))
-    assert same.metadata.get("model_params") == "1.7B"
-    assert "model_params" not in other.metadata
+    assert same.metadata == other.metadata == _BASE["metadata"]
+    assert other.model == "Qwen/Qwen3-8B"
+
+
+def test_model_variant_can_override_or_clear_inherited_metadata(tmp_path):
+    _write(tmp_path, "base", {**_BASE, "metadata": {**_BASE["metadata"], "kv_dtype": "fp8", "model_dtype": "mxfp4"}})
+    variant = Recipe.load(
+        _write(
+            tmp_path,
+            "variant",
+            {
+                "include": "base",
+                "model": "org/variant",
+                "metadata": {"model_params": "8B", "model_dtype": None, "kv_dtype": "bfloat16"},
+            },
+        )
+    )
+    assert variant.metadata == {"description": "base", "model_params": "8B", "kv_dtype": "bfloat16"}
+    cleared = Recipe.load(_write(tmp_path, "cleared", {"include": "base", "model": "org/other", "metadata": None}))
+    assert cleared.metadata == {}
+    # Neither variant can mutate its base's declared metadata.
+    assert Recipe.load(tmp_path / "base.yaml").metadata["model_dtype"] == "mxfp4"
+
+
+def test_nested_model_variants_preserve_metadata_overrides_and_deletions(tmp_path):
+    _write(tmp_path, "base", {**_BASE, "metadata": {**_BASE["metadata"], "kv_dtype": "fp8"}})
+    _write(tmp_path, "middle", {"include": "base", "model": "org/middle", "metadata": {"model_params": None, "kv_dtype": "fp8_e5m2"}})
+    leaf = Recipe.load(_write(tmp_path, "leaf", {"include": "middle", "model": "org/leaf", "metadata": {"description": "leaf"}}))
+    assert leaf.metadata == {"description": "leaf", "kv_dtype": "fp8_e5m2"}
+    restored = Recipe.from_dict(yaml.safe_load(leaf.export()))
+    assert restored.metadata == leaf.metadata and restored.model == "org/leaf"
+
+
+@pytest.mark.parametrize("command", [["show"], ["recipe", "show"]])
+def test_show_model_variant_preserves_weight_and_kv_estimates(tmp_path, monkeypatch, command):
+    """Changing the model alone must not replace explicit MXFP4/FP8 estimates with HF defaults."""
+    from click.testing import CliRunner
+    from sparkrun.cli import main
+
+    base = _write(
+        tmp_path,
+        "base",
+        {
+            "model": "org/base",
+            "model_revision": "a" * 40,
+            "runtime": "sglang",
+            "container": "example/sglang:latest",
+            "defaults": {"max_model_len": 4096, "tensor_parallel": 4},
+            "metadata": {"model_params": "8B", "model_dtype": "mxfp4", "kv_dtype": "fp8"},
+        },
+    )
+    variant = _write(tmp_path, "variant", {"include": "base", "model": "org/variant", "model_revision": "b" * 40})
+    fetches = []
+
+    def config(model, *, revision=None, **kwargs):
+        fetches.append((model, revision))
+        return {"torch_dtype": "bfloat16", "num_hidden_layers": 32, "num_key_value_heads": 8, "head_dim": 128}
+
+    monkeypatch.setattr("sparkrun.models.vram.fetch_model_config", config)
+    monkeypatch.setattr("sparkrun.models.quantization.fetch_hf_quant_config", lambda *a, **kw: None)
+    monkeypatch.setattr("sparkrun.models.vram.fetch_safetensors_size", lambda *a, **kw: 16 * 1024**3)
+    monkeypatch.setattr("sparkrun.models.vram.fetch_safetensors_params", lambda *a, **kw: None)
+
+    runner = CliRunner()
+    base_result = runner.invoke(main, [*command, str(base)])
+    child_result = runner.invoke(main, [*command, str(variant)])
+    assert base_result.exit_code == child_result.exit_code == 0, base_result.output + child_result.output
+    assert ("org/variant", "b" * 40) in fetches
+    assert "Model:        org/variant" in child_result.output
+    assert "Model dtype:      mxfp4" in child_result.output
+    assert "KV cache dtype:   fp8" in child_result.output
+    assert child_result.output.split("VRAM Estimation:", 1)[1] == base_result.output.split("VRAM Estimation:", 1)[1]
 
 
 def test_compose_style_include_list_is_not_a_recipe(tmp_path):

@@ -523,8 +523,10 @@ Merge rules, outer over base:
 - **Trust** is the least-trusted recipe in the chain. A local recipe including a third-party registry recipe gets that
   registry's trust, so its hooks still prompt.
 - **Mods inherited from a registry base** resolve in that registry (they are rewritten to `@registry/<mod>`).
-- **Changing `model:`** drops the base's `metadata`. It describes the base's model (parameter count, architecture) and
-  would size the wrong one.
+- **Changing `model:`** preserves the base's `metadata` under the same key-by-key merge rules. This keeps declared
+  weight and KV-cache dtypes for model variants using the same runtime setup. Review inherited parameter counts,
+  architecture fields, model URLs and other model-specific estimates when switching models: override changed values,
+  set individual fields to `null` to remove them, or use `metadata: null` to clear the whole block and allow detection.
 - **Names are strict.** Sibling and registry names start alphanumeric and contain no `..` or absolute parts, and the
   resolved file (after symlinks) must stay in its directory or registry.
 - **URL-fetched recipes** may only include `@registry/…` recipes.
