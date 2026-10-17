@@ -35,8 +35,8 @@ revision is deleted. An HF-style symlink entry that resolves is left alone.
 When no candidate can be hard-linked (a blob owned by another user under
 ``fs.protected_hardlinks``, or on another filesystem), a *missing* entry falls
 back to the relative ``../../blobs/<checksum>`` symlink the Hub itself writes.
-That costs prune accounting (sparkrun cannot free bytes the blob store owns),
-not safety: ``hf cache rm`` and the cache agent's delete both keep a blob any
+Prune frees such a blob only once no other revision links it (the bytes are
+the blob store's while one does), so it is a weaker form of reuse, not an unsafe one: ``hf cache rm`` and the cache agent's delete both keep a blob any
 snapshot links to. The fallback never targets another revision's snapshot
 file (deleting that revision would leave the entry dangling) and never
 replaces a copy we already hold.
@@ -375,7 +375,7 @@ def link_existing_blobs(io, host: str | None, cache_root: str, manifest: ModelAr
         # filesystem), not a fault: it recurs every launch, so INFO, once.
         logger.info(
             "Model cache on %s: cached files could not be hard-linked (%s); %d file(s) linked to the blob store instead,"
-            " %d transferred. Bytes linked this way stay owned by the blob store, which sparkrun prune does not free%s",
+            " %d transferred. Bytes linked this way are freed only when no other revision uses them%s",
             label,
             links.reason or "unknown reason",
             links.symlinked,

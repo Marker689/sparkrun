@@ -3006,8 +3006,10 @@ Before launching, sparkrun can pre-sync models and container images from the con
   (state directory, read in one round-trip) records path, size and checksum. That second source matters most,
   because the first disappears when the HF revision is deleted to make room, and every later bump would be a full
   download again. Missing entries need no transfer, and a duplicate copy is replaced and its space reported. Five
-  rules, each silently wrong if broken: hard links, not symlinks or new blobs (a symlinked snapshot is invisible to
-  prune, and blobs are never pruned). The one exception is a *missing* entry whose candidates all refuse a hard
+  rules, each silently wrong if broken: hard links, not symlinks or new blobs (a snapshot's bytes stay its own, so
+  prune budgets and frees them like any sparkrun snapshot; prune does evict a Hub-layout snapshot's
+  exclusive blobs with it, `_cache_agent.exclusive_blobs`, but a new blob shared by several revisions would
+  be freed by none of their prunes). The one exception is a *missing* entry whose candidates all refuse a hard
   link (EPERM under `fs.protected_hardlinks`, EXDEV): it becomes the Hub's own `../../blobs/<checksum>` symlink,
   which `hf cache rm` and `delete()` both treat as a reference. It is never a symlink to another revision's
   snapshot file, which that revision's delete would leave dangling, and never a replacement for a copy we hold.

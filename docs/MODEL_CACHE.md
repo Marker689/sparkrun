@@ -193,8 +193,8 @@ sparkrun model-cache pin org/model --revision FULL_COMMIT \
 
 `prune` defaults to a dry run and a seven-day minimum age. Without a byte
 target it selects all eligible revisions older than that age. `--max-bytes`
-budgets private allocations in tracked snapshots, excluding canonical/shared
-HF blobs and untracked data. `--min-free-bytes` instead targets actual free
+budgets private allocations in tracked snapshots, including blobs only that
+snapshot links to, and excluding blobs other revisions share and untracked data. `--min-free-bytes` instead targets actual free
 space on the cache filesystem. With both targets, cleanup continues until
 both are met or no eligible revision remains. The CLI exits nonzero if a
 target cannot be met; it never overrides protections to reach a target.
@@ -204,8 +204,12 @@ removals and filesystem free space. Snapshot allocation counts exclude symbolic
 links and multiply linked files. They are estimates of disk reclamation, not a
 promise about filesystem compression, reflinks or concurrent disk activity;
 `free_bytes_after` is measured again when applying cleanup. Dry-run free-space
-projections use the allocation estimates. Pruning **never deletes** shared HF blobs.
-Removing a symlink-based snapshot may therefore reclaim no weight bytes.
+projections use the allocation estimates. Evicting a snapshot in the Hub's layout (entries are symlinks into `blobs/`)
+also removes the blobs **only that snapshot** links to, so its space is actually
+freed; a blob any other revision of the model still links to is kept, and
+prune refuses the revision while a Hugging Face download of the model is active.
+Shared-store payloads go through huggingface_hub's own lock and `.refs` protocol,
+as with `delete`.
 
 Only tracked revisions with a known file inventory are eligible. Unknown
 snapshots, unexpected files, pinned revisions, busy publication locks, invalid

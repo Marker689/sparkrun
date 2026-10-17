@@ -153,8 +153,8 @@ def prune_cache(
 ) -> tuple[CacheReport, ...]:
     """Evict eligible revisions in LRU order; preview by default.
 
-    max_bytes budgets private managed snapshot allocations, excluding shared
-    blobs and untracked data. min_free_bytes measures actual filesystem space.
+    max_bytes budgets private managed snapshot allocations, including blobs only
+    that snapshot links to (evicted with it), excluding shared blobs and untracked data. min_free_bytes measures actual filesystem space.
     Without a space target, remove every eligible revision older than min_age_days.
     """
     from sparkrun.models.cache import cache_operation, age_seconds

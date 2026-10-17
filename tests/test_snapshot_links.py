@@ -376,12 +376,14 @@ def test_whole_model_delete_credits_inodes_shared_by_its_snapshots(tmp_path):
 
 
 def test_budget_prune_skips_a_snapshot_that_frees_nothing(tmp_path):
-    """The least recently used snapshot is fully linked; evicting it would free nothing."""
+    """The least recently used snapshot is fully linked to blobs an HF revision still uses: evicting it frees nothing."""
     from sparkrun.api import model_cache
+    from test_model_cache_delete import hf_repo
     from test_model_cache_retention import tracked
 
     _, linked, _ = tracked(tmp_path, last_used=1)
     _blobs(tmp_path)
+    hf_repo(tmp_path, "org/model", "c" * 40, DATA)  # the untracked HF revision those blobs belong to
     assert _run(artifact(), tmp_path).deduplicated == len(DATA)
     _, private, _ = tracked(tmp_path, revision="b" * 40, last_used=2)
 

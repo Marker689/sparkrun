@@ -1,8 +1,9 @@
 """Standard-library host helper for explicit inventory, conservative pruning and deletion.
 
 Shipped over the existing host session; no Sparkrun or Hub install is required.
-Pruning never deletes blobs, lock files or unknown snapshots. Only an explicit
-delete removes blobs, and only those nothing else in the cache references.
+Pruning never deletes lock files or unknown snapshots; with an evicted
+snapshot it removes the blobs only that snapshot linked to. An explicit delete
+removes blobs, likewise only those nothing else in the cache references.
 Nothing outside HF_HOME is ever removed.
 """
 
@@ -89,11 +90,12 @@ def observe(root, slug, revision, *, now, min_age_seconds, exclude_repos):
                         if info.st_nlink == 1:
                             row["reclaimable_bytes"] += info.st_blocks * 512
                     elif stat.S_ISLNK(info.st_mode):
-                        # Canonical/shared blobs belong to HF, never this sweep.
                         try:
                             row["logical_bytes"] += item.stat().st_size
                         except OSError:
                             pass
+            # Blobs nothing else links to leave with the snapshot (see exclusive_blobs).
+            row["reclaimable_bytes"] += exclusive_blobs(root, slug, revision)[2]
         reason_code = (
             "absent"
             if not row["present"]
@@ -170,6 +172,7 @@ def run(
     if any(type(flag) is not bool for flag in (dry_run, pinned, confirm_inactive, force)):
         raise ValueError("cache mutation flags must be boolean")
     now = time.time() if now is None else now
+    _REFERENCES.clear()
     if action == "delete":
         return delete(root, repo=repo, revision=revision, force=force, dry_run=dry_run, now=now, allowed=allowed)
     policy = dict(now=now, min_age_seconds=min_age_seconds, exclude_repos=exclude_repos)
@@ -252,6 +255,10 @@ def run(
             if row["last_used"] != observed_last_used:
                 row.update(eligible=False, reason=CACHE_REASONS["usage_changed_during_cleanup"], reason_code="usage_changed_during_cleanup")
                 continue
+            if hf_download_active(root / "hub", slug):
+                # A download may be about to link one of the blobs this would take.
+                row.update(eligible=False, reason=CACHE_REASONS["download_in_progress"], reason_code="download_in_progress")
+                continue
             amount = row["reclaimable_bytes"]
             if amount == 0 and (max_bytes is not None or min_free_bytes is not None):
                 # Every byte is shared with another revision (hard-linked reuse):
@@ -263,11 +270,23 @@ def run(
                 # shutil.rmtree uses fd-based symlink-safe traversal on Linux.
                 if not shutil.rmtree.avoids_symlink_attacks:
                     raise ValueError("safe snapshot deletion is unavailable on this host")
+                try:
+                    blobs, targets, _ = exclusive_blobs(root, slug, row["revision"], fresh=True)
+                except OSError:
+                    blobs, targets = [], {}  # evict the snapshot alone rather than abort
                 shutil.rmtree(row["snapshot"])
+                kept = remove_exclusive_blobs(root, slug, blobs, targets) if blobs else 0
                 record = fresh["usage"]
                 record["last_evicted"] = now
                 write_record(path, record)
-                result["reclaimed_bytes"] += amount
+                result["reclaimed_bytes"] += max(amount - kept, 0)
+                if max_bytes is not None:
+                    # Evicting one revision can make another's blobs its own:
+                    # recount rather than subtract a figure taken before.
+                    _REFERENCES.clear()
+                    total = sum(r["reclaimable_bytes"] for r in inventory(root, **policy))
+                    free = shutil.disk_usage(root).free
+                    continue
             total -= amount
             free = free + amount if dry_run else shutil.disk_usage(root).free
         finally:
@@ -400,6 +419,163 @@ def shared_freed(target, deleting, hub, store):
     except OSError:
         return 0
     return allocation(info)
+
+
+#: Per agent run: (root, slug) -> {revision: identities its entries resolve to}.
+#: run() and delete() clear it, so one invocation never reuses another's view.
+_REFERENCES = {}
+
+
+def repo_references(root, slug, *, fresh=False):
+    """Per revision, the ``(device, inode)`` of every file its snapshot entries resolve to.
+
+    Identity, not spelling: a sibling may link a blob relatively, absolutely,
+    through a symlinked cache path, or hold it as a hard link, and every one
+    of those must protect the blob. None when a snapshot is not a plain
+    directory (it could reference anything) or cannot be read.
+    """
+    key = (str(root), slug)
+    if not fresh and key in _REFERENCES:
+        return _REFERENCES[key]
+    snapshots_dir = root / "hub" / slug / "snapshots"
+    references = {}
+    try:
+        if snapshots_dir.is_dir():
+            for snapshot in snapshots_dir.iterdir():
+                if snapshot.is_symlink() or not snapshot.is_dir():
+                    references = None
+                    break
+                found = set()
+                for path in tree_entries(snapshot):
+                    try:
+                        info = path.stat()
+                    except OSError:
+                        continue  # dangling: references nothing
+                    if stat.S_ISREG(info.st_mode):
+                        found.add((info.st_dev, info.st_ino))
+                references[snapshot.name] = found
+    except OSError:
+        references = None
+    _REFERENCES[key] = references
+    return references
+
+
+def exclusive_blobs(root, slug, revision, *, fresh=False):
+    """Blobs only this revision's snapshot uses: ``(per-repo paths, shared payloads, bytes)``.
+
+    Prune used to remove only the snapshot directory. For a revision in the
+    Hub's layout (entries are symlinks into ``blobs/``) that freed nothing and
+    left the blobs behind with nothing pointing at them. These are the blobs
+    evicting the snapshot takes along. Nothing is exclusive when any sibling
+    snapshot cannot be classified, or when ``blobs/`` is not ours to change (a
+    container's root-owned directory): bytes prune could not free must not be
+    credited to it. A blob whose inode the snapshot also holds as a hard link
+    is credited once, when every name of it goes.
+    """
+    hub = root / "hub"
+    repo_blobs = hub / slug / "blobs"
+    references = repo_references(root, slug, fresh=fresh)
+    if references is None or revision not in references or not repo_blobs.is_dir():
+        return [], {}, 0
+    if repo_blobs.is_symlink() or not os.access(repo_blobs, os.W_OK | os.X_OK):
+        return [], {}, 0
+    mine = references[revision]
+    others = set().union(*(ids for name, ids in references.items() if name != revision))
+    paths = []
+    for path in sorted(repo_blobs.iterdir()):
+        if path.name.endswith(".incomplete"):
+            continue
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        identity = (info.st_dev, info.st_ino)
+        if identity in mine and identity not in others:
+            paths.append(path)
+    store = shared_store(hub)
+    targets = {}
+    if store is not None:
+        for path in paths:
+            try:
+                target = store_target(path, hub, store)
+            except OSError:
+                target = None
+            if target is not None:
+                targets[path.name] = target
+    return paths, targets, _freed(root / "hub" / slug / "snapshots" / revision, paths, targets, hub, store)
+
+
+def _freed(snapshot, paths, targets, hub, store):
+    """Bytes removing *paths* (and sweeping *targets*) frees beyond what *snapshot*'s own entries do."""
+    freed = sum(allocation(path.lstat()) for path in paths)
+    freed += sum(shared_freed(target, set(paths), hub, store) for target in set(targets.values()))
+    # An inode the snapshot holds by hard link as well as by blob name: neither
+    # name alone frees it (allocation() credits only a last link), both do.
+    names = {}
+    for path in [*paths, *(tree_entries(snapshot) if snapshot.is_dir() else ())]:
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+            names.setdefault((info.st_dev, info.st_ino), [info, 0])[1] += 1
+    freed += sum(info.st_blocks * 512 for info, count in names.values() if count == info.st_nlink)
+    return freed
+
+
+def remove_exclusive_blobs(root, slug, paths, targets):
+    """Unlink blobs a just-evicted snapshot used alone; returns the bytes not freed.
+
+    Each blob is held under huggingface_hub's own per-blob lock while sibling
+    references are re-read, so a download linking it into another revision
+    meanwhile is either seen or waited out (a busy lock skips the blob).
+    Failures skip the blob rather than abort the prune: the snapshot is
+    already gone, and its bookkeeping must still be written.
+    """
+    hub = root / "hub"
+    store = shared_store(hub)
+    held, kept = [], []
+    locks = hub / ".locks" / slug
+    try:
+        for path in paths:
+            try:
+                locks.mkdir(parents=True, exist_ok=True)
+                fd = os.open(locks / (path.name + ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+            except OSError:
+                kept.append(path)
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                kept.append(path)
+                continue
+            held.append((path, fd))
+        references = repo_references(root, slug, fresh=True)
+        # {} (no snapshots left) means nothing references anything; None means unknown.
+        used = None if references is None else set().union(*references.values())
+        removed = []
+        for path, _ in held:
+            try:
+                info = path.stat()
+                if used is None or (info.st_dev, info.st_ino) in used:
+                    kept.append(path)
+                    continue
+                path.unlink(missing_ok=True)
+                removed.append(path)
+            except OSError:
+                kept.append(path)
+    finally:
+        for _, fd in held:
+            os.close(fd)
+    for target in sorted({targets[p.name] for p in removed if p.name in targets}):
+        sweep_shared(target, hub, store)
+    if not kept:
+        return 0
+    kept_targets = {p.name: targets[p.name] for p in kept if p.name in targets}
+    try:
+        return sum(allocation(p.lstat()) for p in kept if os.path.lexists(p)) + sum(
+            shared_freed(t, set(kept), hub, store) for t in set(kept_targets.values())
+        )
+    except OSError:
+        return 0
 
 
 def sweep_shared(target, hub, store):
@@ -576,6 +752,7 @@ def delete(root, *, repo, revision, force, dry_run, now, allowed=None):
                 return refuse(rows, "cache_busy")
             # Re-read under the lock: a launch may have claimed, or a download
             # added, a revision since.
+            _REFERENCES.clear()
             selected = select()
             rows = [describe(r) for r in selected]
             refusal = check(selected, rows)

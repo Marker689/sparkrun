@@ -221,7 +221,11 @@ def list_cache(**kwargs):
     show_default=True,
     help="Minimum time since preparation, distribution or release.",
 )
-@click.option("--max-bytes", type=click.IntRange(min=0), help="Target budget for private managed snapshot bytes; excludes shared blobs.")
+@click.option(
+    "--max-bytes",
+    type=click.IntRange(min=0),
+    help="Target budget for private managed snapshot bytes, including blobs only that snapshot uses.",
+)
 @click.option("--min-free-bytes", type=click.IntRange(min=0), help="Target free space on the cache filesystem in bytes.")
 @cache_options("prune")
 def prune_cache(**kwargs):
@@ -229,7 +233,7 @@ def prune_cache(**kwargs):
 
     Defaults to a read-only preview. With no space target, selects all eligible
     revisions older than --min-age-days. Pins, workload claims, busy caches and
-    unknown content are protected. Shared HF blobs are never deleted.
+    unknown content are protected. Blobs another revision still uses are kept.
     """
     return api.prune_cache(**kwargs)
 
