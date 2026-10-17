@@ -12,9 +12,16 @@ never start/evict workloads and do not change api.materialize's contract.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 
-from sparkrun.models.artifacts import CacheValidationReport, ModelArtifactManifest, ModelArtifactRequest
+from sparkrun.models.artifacts import (
+    CacheValidationReport,
+    ModelArtifactError,
+    ModelArtifactManifest,
+    ModelArtifactRequest,
+    ModelInventoryUnavailable,
+)
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.cache_reports import CacheReport
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
@@ -89,6 +96,59 @@ def import_manifest(
             reports.append(io.observe(host, manifest, root, checksums=checksums))
             io.publish(host, root, request.repo, str(manifest_path(root, request)), manifest.to_json())
     return tuple(reports)
+
+
+def import_model(
+    request: ModelArtifactRequest,
+    manifest: ModelArtifactManifest | None = None,
+    *,
+    cache_dir: str,
+    hosts=("localhost",),
+    checksums=False,
+    fetch_manifest=False,
+    offline=False,
+    token: str | None = None,
+    confirm_manifest: Callable[[ModelArtifactManifest], bool] | None = None,
+    ssh_kwargs=None,
+    session=None,
+    sctx=None,
+) -> tuple[CacheValidationReport, ...]:
+    """Import supplied metadata, or explicitly resolve it once from the origin.
+
+    Without a manifest, ``fetch_manifest=True`` permits origin resolution;
+    ``offline=True`` always requires a supplied manifest. Origin credentials
+    default to the local HF configuration. No model weights are downloaded.
+
+    When provided, ``confirm_manifest`` reviews the resolved manifest before
+    opening any target cache. Returning False cancels the import. Supplied
+    manifests bypass resolution and confirmation, even with fetch enabled.
+    """
+    if manifest is None:
+        if offline:
+            raise ModelArtifactError("Offline import requires a manifest; provide --manifest or resolve one on an online machine")
+        if not fetch_manifest:
+            raise ModelArtifactError("Import requires a manifest or explicit origin consent with fetch_manifest=True")
+        from sparkrun.core.config import resolve_hf_token
+
+        try:
+            manifest = resolve_manifest(request, token=token if token is not None else resolve_hf_token())
+        except ModelInventoryUnavailable as error:
+            raise ModelInventoryUnavailable(
+                "%s; supply --manifest, or check origin access and HF credentials before retrying" % error
+            ) from error
+        check_request(manifest, request)
+        if confirm_manifest is not None and not confirm_manifest(manifest):
+            raise ModelArtifactError("Manifest import cancelled")
+    return import_manifest(
+        request,
+        manifest,
+        cache_dir=cache_dir,
+        hosts=hosts,
+        checksums=checksums,
+        ssh_kwargs=ssh_kwargs,
+        session=session,
+        sctx=sctx,
+    )
 
 
 def repair_model(

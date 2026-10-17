@@ -11,6 +11,8 @@ API_OPERATIONS["validate_recipe"] = "recipes.validate"
 API_OPERATIONS["configure_registry"] = " / ".join("catalog.registries." + action for action in REGISTRY_ACTIONS)
 API_OPERATIONS.update(
     {
+        # The offline primitive is the supplied-manifest branch of import_model.
+        "model_cache.import_manifest": "model_cache.import",
         "collect_diagnostics": "diagnostics.collect",
         "wait_ready": "workloads.run",
         "post_launch": "workloads.run",

@@ -115,8 +115,17 @@ sparkrun model-cache inspect org/model --revision COMMIT --cache-dir /models/hf
 # Resolve authoritative inventory online (plus an index, at most 128 MiB).
 sparkrun model-cache resolve org/model --revision COMMIT --output manifest.json
 
-# Import trusted inventory for an existing/offline cache. Import is not repair.
+# Import reviewed inventory for an existing/offline cache. Import is not repair.
 sparkrun model-cache import org/model --revision COMMIT --manifest manifest.json
+
+# Without a manifest, resolve origin metadata and confirm before saving it.
+sparkrun model-cache import org/model --revision COMMIT
+
+# Explicit consent for unattended origin resolution; stdout stays JSON.
+sparkrun model-cache import org/model --revision COMMIT --yes --json
+
+# Require a supplied manifest and prohibit origin resolution.
+sparkrun model-cache import org/model --revision COMMIT --manifest manifest.json --offline
 
 # Repair exactly the missing/wrong-size files and revalidate each target.
 sparkrun model-cache repair org/model --revision COMMIT --hosts node1,node2
@@ -125,6 +134,32 @@ sparkrun model-cache repair org/model --revision COMMIT --hosts node1,node2
 sparkrun model-cache inspect org/model --revision COMMIT --checksum
 sparkrun model-cache repair org/model --revision COMMIT --checksum
 ```
+
+`import --manifest` is preferred for reviewed, reproducible inventories and
+always works without contacting the model origin. When `--manifest` is omitted,
+`import` resolves metadata once on the control machine and uses the same
+immutable commit and selected inventory on every target host. Resolution may
+download a weight index (at most 128 MiB), but never model weights. Before saving,
+the interactive command displays the origin URL, repository, full commit SHA,
+file count and target hosts, then asks for confirmation. Declining leaves target
+manifests unchanged. `--yes` permits the import without prompting; unattended and
+`--json` imports require it when no manifest is supplied. The resolved identity
+is printed to stderr so stdout remains machine-readable with `--json`.
+
+`--offline` requires `--manifest`, even with `--yes`. An invalid supplied manifest
+fails without falling back to the origin. Unavailable metadata or authentication
+failures also stop the import; local directory listings never substitute for an
+expected inventory. Import saves a valid manifest even when the cache is
+incomplete, reports the missing or invalid files, and exits nonzero. Use `repair`
+to acquire missing files, or `--checksum` to hash existing files during import.
+Import does not refresh usage or enroll snapshots in retention; use `adopt` to
+start tracking an existing download.
+
+Specify `--revision` when importing an existing download. If it is omitted, the
+origin resolves its current default revision, which may differ from an older
+cached snapshot. Origin-resolved manifests use the same validation and provenance
+as `resolve`; confirmation accepts that source and revision, rather than marking
+the cache valid or granting permission to execute model code.
 
 Pass the same `--file-selection` and GGUF `--projector` used for preparation when
 inspecting or importing. `repair` accepts `--transfer-mode`, `--local-cache-dir`,
@@ -137,8 +172,15 @@ for mutable refs is online even when the payload is already cached. A pinned
 commit with saved inventory needs no origin request.
 
 The Python surface is `sparkrun.api.model_cache`: `resolve_manifest`,
-`inspect_model`, `import_manifest`, and `repair_model`, with typed requests,
-manifests, reports and prepared bindings. `api.materialize()` remains read-only.
+`inspect_model`, `import_manifest`, `import_model`, and `repair_model`, with typed
+requests, manifests, reports and prepared bindings. `import_manifest` remains an
+offline operation requiring a manifest. `import_model` accepts a supplied
+manifest or requires explicit `fetch_manifest=True` for origin resolution;
+`offline=True` still requires a supplied manifest. Its optional
+`confirm_manifest(manifest) -> bool` callback can review the resolved inventory
+before any target cache is opened; returning false cancels the import. Explicit
+`token` credentials override local HF configuration. `api.materialize()` remains
+read-only.
 
 For a pre-placed directory, put the trusted manifest at
 `<directory>/.sparkrun-model-manifest.json`, with inventory paths relative to that

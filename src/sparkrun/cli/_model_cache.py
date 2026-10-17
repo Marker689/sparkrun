@@ -142,11 +142,44 @@ def resolve(model, revision, file_selection, projector, endpoint, cache_dir, out
 
 
 @model_cache.command("import")
-@click.option("--manifest", "manifest_file", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--manifest",
+    "manifest_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Import this inventory offline; otherwise resolve metadata from the model origin.",
+)
+@click.option("--offline", is_flag=True, help="Require --manifest; do not contact the model origin.")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Allow origin-resolved metadata without asking for confirmation.")
 @options
-def import_cache(request, *, manifest_file, config, **kwargs):
-    """Import trusted expected metadata and report current completeness."""
-    return api.import_manifest(request, ModelArtifactManifest.from_json(manifest_file.read_text()), **kwargs)
+@click.pass_context
+def import_cache(ctx, request, *, manifest_file, offline, assume_yes, config, **kwargs):
+    """Import expected metadata and report current cache completeness.
+
+    Prefer a reviewed --manifest for reproducible, offline imports. Otherwise,
+    resolve metadata from the origin and confirm the immutable revision before
+    saving it. Unattended and --json imports require --yes for origin resolution.
+    No model weights are downloaded; missing files remain incomplete.
+    """
+    manifest = ModelArtifactManifest.from_json(manifest_file.read_text()) if manifest_file is not None else None
+    if manifest is None and not offline and not assume_yes and (ctx.params["output_json"] or not _interactive()):
+        raise click.ClickException("Origin resolution requires confirmation; pass --yes or supply --manifest")
+
+    def confirm_manifest(resolved):
+        click.echo(
+            "Resolved %s from %s\nRevision: %s\nSelected files: %d\nTargets: %s (HF_HOME: %s)"
+            % (resolved.repo, resolved.endpoint, resolved.revision, len(resolved.files), ", ".join(kwargs["hosts"]), kwargs["cache_dir"]),
+            err=True,
+        )
+        return assume_yes or click.confirm("Save this manifest and validate the target caches?", default=False, err=True)
+
+    return api.import_model(
+        request,
+        manifest,
+        fetch_manifest=manifest is None,
+        offline=offline,
+        confirm_manifest=confirm_manifest,
+        **kwargs,
+    )
 
 
 @model_cache.command("repair")

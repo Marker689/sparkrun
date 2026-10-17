@@ -69,6 +69,11 @@ def test_new_target_parameter_requires_review_without_becoming_a_wire_input():
         ("repair", {"cache_dir": "/cache", "model": "org/model", "dry_run": False, "offline": True}, {"dry_run": False, "offline": True}),
         ("resolve", {"model": "org/model", "file_selection": "all"}, {}),
         ("import", {"cache_dir": "/cache", "model": "org/model", "manifest": json.loads(artifact().to_json())}, {}),
+        (
+            "import",
+            {"cache_dir": "/cache", "model": "org/model", "fetch_manifest": True, "offline": False},
+            {"fetch_manifest": True, "offline": False},
+        ),
     ],
 )
 def test_registered_handler_preserves_arguments_and_server_injection(monkeypatch, operation, arguments, expected):
@@ -102,7 +107,7 @@ def test_registered_handler_preserves_arguments_and_server_injection(monkeypatch
     if operation == "resolve":
         assert kwargs["request"].file_selection == "all"
     if operation == "import":
-        assert kwargs["manifest"] == artifact()
+        assert kwargs["manifest"] == (artifact() if "manifest" in arguments else None)
 
 
 @pytest.mark.parametrize("operation", ["delete", "prune", "adopt"])
@@ -144,6 +149,13 @@ def test_reconcile_retains_explicit_true_constraint():
             get_daemon_op("model_cache.reconcile"),
             {"cache_dir": "/cache", "model": "org/model", "revision": SHA, "claim": "workload", "confirm_inactive": False},
         )
+
+
+@pytest.mark.parametrize("key,value", [("fetch_manifest", "yes"), ("manifest", None), ("token", "secret"), ("confirm_manifest", True)])
+def test_import_rejects_invalid_consent_and_local_only_arguments(key, value):
+    register_core_ops()
+    with pytest.raises(ValueError):
+        check_request(get_daemon_op("model_cache.import"), {"cache_dir": "/cache", "model": "org/model", key: value})
 
 
 def test_direct_adapter_does_not_silently_drop_unknown_arguments():

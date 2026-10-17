@@ -229,7 +229,7 @@ own namespaces and routing-policy fields.
 | --- | --- | --- | --- | --- |
 | `model_cache.adopt` | `/v1/model_cache/adopt` | job / admin | auto | `model: string`, `revision: string`, `endpoint: string`, `cache_dir!: string`, `hosts: string[]`, `all_models: boolean`, `dry_run: boolean`, `offline: boolean`, `last_used: string`, `pinned: boolean` |
 | `model_cache.delete` | `/v1/model_cache/delete` | job / admin | auto | `model!: string`, `revision: string`, `cache_dir!: string`, `hosts: string[]`, `dry_run: boolean`, `force: boolean`, `allowed_revisions: string[]` |
-| `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `manifest!: object`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
+| `model_cache.import` | `/v1/model_cache/import` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `manifest: object`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean`, `fetch_manifest: boolean`, `offline: boolean` |
 | `model_cache.inspect` | `/v1/model_cache/inspect` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `checksums: boolean` |
 | `model_cache.list` | `/v1/model_cache/list` | job / read | auto | `cache_dir!: string`, `hosts: string[]` |
 | `model_cache.pin` | `/v1/model_cache/pin` | job / operate | auto | `model!: string`, `revision!: string`, `endpoint: string`, `cache_dir!: string`, `hosts: string[]`, `pinned: boolean` |
@@ -237,6 +237,17 @@ own namespaces and routing-policy fields.
 | `model_cache.reconcile` | `/v1/model_cache/reconcile` | job / admin | auto | `model!: string`, `revision!: string`, `endpoint: string`, `cache_dir!: string`, `hosts: string[]`, `claim!: string`, `confirm_inactive!: boolean` |
 | `model_cache.repair` | `/v1/model_cache/repair` | job / operate | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir!: string`, `hosts: string[]`, `local_cache_dir: string`, `transfer_mode: string`, `checksums: boolean`, `offline: boolean`, `dry_run: boolean` |
 | `model_cache.resolve` | `/v1/model_cache/resolve` | job / read | auto | `model!: string`, `revision: string`, `endpoint: string`, `projector: string`, `file_selection: string`, `cache_dir: string` |
+
+`model_cache.import` accepts a supplied `manifest` without origin access. Omitting
+it requires explicit `fetch_manifest: true`; the daemon resolves metadata once
+using server-side HF credentials, then imports the same immutable inventory on
+all targets without a prompt. `offline: true` always requires a supplied
+manifest. No model weights are downloaded, and origin failures never fall back
+to inferred local inventories. Specify `revision` to check an existing cached
+commit; omission resolves the origin's current default revision. Call
+`model_cache.resolve` first and submit its returned manifest to review the
+inventory before importing. Incomplete imports return validation reports with
+an incomplete status, even though the manifest has been saved for later repair.
 
 ### proxy
 

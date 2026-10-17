@@ -35,7 +35,7 @@ def imported_manifest(values):
     from sparkrun.models.artifacts import ModelArtifactManifest
 
     values = dict(values)
-    manifest = ModelArtifactManifest.from_json(json.dumps(values.pop("manifest")))
+    manifest = ModelArtifactManifest.from_json(json.dumps(values.pop("manifest"))) if "manifest" in values else None
     return {**artifact_request(values), "manifest": manifest}
 
 
@@ -172,13 +172,18 @@ BINDINGS = (
     ),
     ModelCacheBinding(
         "model_cache.import",
-        "model_cache.import_manifest",
+        "model_cache.import_model",
         "operate",
-        "cache_dir hosts checksums",
-        "model manifest cache_dir",
+        "cache_dir hosts checksums fetch_manifest offline",
+        "model cache_dir",
         request_fields="model revision endpoint projector file_selection manifest",
         adapter=imported_manifest,
         adapted_parameters=("request", "manifest"),
+        excluded={
+            **LOCAL_CONTEXT,
+            **ORIGIN_TOKEN,
+            "confirm_manifest": "Daemon callers consent with fetch_manifest; Python confirmation callbacks are local-only.",
+        },
     ),
     ModelCacheBinding(
         "model_cache.resolve",
