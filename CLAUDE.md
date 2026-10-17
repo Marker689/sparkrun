@@ -1819,8 +1819,18 @@ util/mem/temp) — abstracted the same way status is, by **substrate scope**:
   metrics + k8s occupancy — clients see the same shape. `LiveMonitorSession`
   also retains a bounded per-host ring buffer of recent telemetry samples
   (`history(host)`, wall-clock-stamped, oldest first, readable after close;
-  window via `history_points`, default 120) for sparklines/moving averages; it is
-  not part of `MonitorFrame` or the wire shape.
+  window via `history_points`, else `monitor.history_points` in `config.yaml`,
+  default 120) for sparklines/moving averages. It is not part of `MonitorFrame`.
+  A reading is recorded **once**, deduped by sample *object identity*: a session
+  returns the same object until a new reading parses, and a stalled stream keeps
+  its last one for up to `interval*5` before the watchdog clears it, so
+  re-recording would draw an outage as a flat live line. On the daemon,
+  `/v1/streams/monitor` sends one `{"type": "history", "series": [HostHistory…]}`
+  backfill before its first frame (the hub's shared sessions have often been
+  recording for an earlier subscriber). It uses `series`, not `hosts`, because
+  the desktop client parses every event's `hosts` as frame rows. The wire codec
+  is an allowlist (`api/_wire_fields.py`), so a new `MonitorSample` field must be
+  added there too or the daemon drops it; a test guards the two staying equal.
 
 The `cluster monitor` TUI drives a `LiveMonitorSession`, so its Jobs column and
 detail pane show **all** executors' workloads (docker + local + provider), not
@@ -3242,6 +3252,9 @@ Readiness budgets live under `readiness:` in `config.yaml`
 (`port_timeout_s` / `health_timeout_s`, `0` = unbounded) — raise
 `port_timeout_s` for engines with long graph-capture phases; see Launch
 Timing above.
+
+The live-monitor history window is `monitor.history_points` (default 120
+samples per host; a non-positive value falls back to the default).
 
 HuggingFace Hub budgets live under `hub:` (`timeout_s` per request,
 `metadata_budget_s` for the whole advisory phase, `0` = unbounded — see Hub

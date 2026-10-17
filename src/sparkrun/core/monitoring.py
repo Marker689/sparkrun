@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 # reconnect costs another handshake.
 FIRST_SAMPLE_TIMEOUT = 30.0
 
+# Default per-host telemetry history window for ``LiveMonitorSession`` (~4
+# minutes at the default 2 s cadence).  Overridden by ``monitor.history_points``.
+DEFAULT_HISTORY_POINTS = 120
+
 # Column names matching host_monitor.sh CSV field order (single source of truth).
 MONITOR_COLUMNS = (
     "timestamp",
@@ -168,6 +172,27 @@ class MonitorFrame:
             if entry.host == host:
                 return entry
         return None
+
+
+@dataclass(frozen=True)
+class HistoryPoint:
+    """One recorded telemetry reading in a :class:`HostHistory` series.
+
+    ``recorded_at`` is the controller's wall clock (``time.time()``) when the
+    session recorded the reading — the uniform x-axis, since
+    ``MonitorSample.timestamp`` differs per backend and per clock.
+    """
+
+    recorded_at: float
+    sample: MonitorSample
+
+
+@dataclass(frozen=True)
+class HostHistory:
+    """A host's recent telemetry readings, oldest first (``LiveMonitorSession.history_snapshot``)."""
+
+    host: str
+    points: tuple[HistoryPoint, ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------------------

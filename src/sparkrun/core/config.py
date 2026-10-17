@@ -703,6 +703,27 @@ class SparkrunConfig:
         return self.effective_data.get("monitor_backend")
 
     @property
+    def monitor_history_points(self) -> int:
+        """Per-host telemetry samples a live monitor session retains.
+
+        Set via ``monitor.history_points`` in ``config.yaml`` (default
+        :data:`~sparkrun.core.monitoring.DEFAULT_HISTORY_POINTS`).  The window
+        in time is this times the monitor interval.  A missing, unparseable or
+        non-positive value falls back to the default.
+        """
+        from sparkrun.core.monitoring import DEFAULT_HISTORY_POINTS
+
+        section = self.effective_data.get("monitor", {})
+        raw = section.get("history_points") if isinstance(section, dict) else None
+        if raw is None or isinstance(raw, bool):
+            return DEFAULT_HISTORY_POINTS
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_HISTORY_POINTS
+        return val if val > 0 else DEFAULT_HISTORY_POINTS
+
+    @property
     def vllm_tune_repo(self) -> str:
         """Git URL for the vllm-tune backing engine used by ``sparkrun tune vllm``."""
         tuning = self.effective_data.get("tuning", {})

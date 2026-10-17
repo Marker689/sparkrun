@@ -660,10 +660,12 @@ def create_app(binding=None, *, worker_supervisor="process", start_workers=True,
                                 await asyncio.sleep(1)
                     else:
                         resource = hub.subscribe(arguments, sctx)
-                        frame = await run_sync(resource.__enter__, limiter=query_limit)
+                        subscription = await run_sync(resource.__enter__, limiter=query_limit)
+                        if not stop.is_set() and not await request.is_disconnected():
+                            yield sse(subscription.history())
                         while not stop.is_set() and not await request.is_disconnected():
                             principal(request)
-                            yield sse(frame())
+                            yield sse(subscription.frame())
                             await asyncio.sleep(arguments.get("interval", 2))
                 finally:
                     if resource is not None:

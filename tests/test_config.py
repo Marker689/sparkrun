@@ -547,3 +547,22 @@ def test_config_requires_a_top_level_mapping(tmp_path, value):
     path.write_text(value)
     with pytest.raises(ValueError, match="must contain a mapping"):
         SparkrunConfig(config_path=path)
+
+
+@pytest.mark.parametrize(
+    "section, expected",
+    [
+        (None, 120),
+        ({"history_points": 300}, 300),
+        ({"history_points": "45"}, 45),
+        ({"history_points": 0}, 120),
+        ({"history_points": -5}, 120),
+        ({"history_points": "lots"}, 120),
+        ({"history_points": True}, 120),
+        ("not-a-mapping", 120),
+    ],
+)
+def test_monitor_history_points(tmp_path, section, expected):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump({"monitor": section} if section is not None else {}))
+    assert SparkrunConfig(config_path=config_file).monitor_history_points == expected

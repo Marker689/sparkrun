@@ -243,6 +243,8 @@ reservations remain until explicit reconciliation.
 - `GET /v1/streams/logs`: cancellable log tail; bounded buffering with gap events.
 - `GET /v1/streams/monitor`: reference-counted monitor sessions, latest frame,
   five-second teardown linger. Disconnect/cancellation closes quiet reads too.
+  The first event is a `history` backfill (`series`: per-host recent samples from
+  the shared session, `monitor.history_points` deep); `frame` events follow.
 
 Jobs, events, prompt metadata, and idempotency records live in
 `<config-root>/daemon/<binding>/jobs.sqlite3` (WAL). Local discovery and any Unix

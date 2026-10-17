@@ -914,3 +914,59 @@ def test_cluster_monitor_app_dump_modal(tmp_path, monkeypatch):
             assert not isinstance(app.screen, DumpLogScreen)
 
     asyncio.run(_run())
+
+
+def test_live_monitor_history_records_each_reading_once(monkeypatch):
+    """A session returns the same sample object until a new reading parses —
+    on a stalled stream for up to interval*5 — so re-recording it would draw an
+    outage as a flat live line."""
+    stale = MonitorSample(hostname="h1", gpu_util_pct="5")
+    tel = _FakeSession({"h1": HostTelemetry(host="h1", sample=stale)})
+    session = _open_history_session(monkeypatch, session=tel)
+    try:
+        for _ in range(4):
+            session._record_once()
+        assert [sample.gpu_util_pct for _, sample in session.history("h1")] == ["5"]
+        tel._snap = {"h1": HostTelemetry(host="h1", sample=MonitorSample(hostname="h1", gpu_util_pct="5"))}
+        session._record_once()  # an equal but new reading is a new point
+        assert len(session.history("h1")) == 2
+    finally:
+        session.close()
+
+
+def test_live_monitor_history_points_from_config(monkeypatch):
+    from sparkrun.core.config import SparkrunConfig
+
+    monkeypatch.setattr(SparkrunConfig, "monitor_history_points", property(lambda self: 7))
+    session = _open_history_session(monkeypatch)
+    explicit = _open_history_session(monkeypatch, history_points=3)
+    try:
+        assert session.history_points == 7  # unset → monitor.history_points
+        assert explicit.history_points == 3  # an explicit argument wins
+    finally:
+        session.close()
+        explicit.close()
+
+
+def test_live_monitor_history_snapshot_is_wire_encodable(monkeypatch):
+    from sparkrun.api._wire import to_wire
+
+    session = _open_history_session(monkeypatch)
+    try:
+        session._record_once()
+        (series,) = to_wire(session.history_snapshot())
+    finally:
+        session.close()
+    assert series["host"] == "h1"
+    assert series["points"][0]["sample"]["gpu_util_pct"] == "1"
+    assert isinstance(series["points"][0]["recorded_at"], float)
+
+
+def test_monitor_sample_wire_allowlist_covers_every_field():
+    """The wire codec is an allowlist, so a field added to MonitorSample but not
+    to DTO_FIELDS is silently dropped from the daemon monitor stream."""
+    import dataclasses
+
+    from sparkrun.api._wire_fields import DTO_FIELDS
+
+    assert DTO_FIELDS["sparkrun.core.monitoring.MonitorSample"] == [f.name for f in dataclasses.fields(MonitorSample)]

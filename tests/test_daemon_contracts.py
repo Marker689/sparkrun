@@ -117,7 +117,7 @@ def test_monitor_subscribers_share_one_session_and_release(monkeypatch):
     from sparkrun.core.context import SparkrunContext
     from sparkrun.core.config import SparkrunConfig
     from sparkrun import api
-    from sparkrun.core.monitoring import MonitorFrame
+    from sparkrun.core.monitoring import HistoryPoint, HostHistory, MonitorFrame, MonitorSample
     import sparkrun.api._resolve
 
     cluster = ClusterDefinition(name="fixture", hosts=["host-a"])
@@ -129,6 +129,13 @@ def test_monitor_subscribers_share_one_session_and_release(monkeypatch):
 
         def frame(self):
             return MonitorFrame(hosts=(), queried_at=time.time())
+
+        def history_snapshot(self):
+            return [
+                HostHistory(
+                    host="host-a", points=(HistoryPoint(recorded_at=1.0, sample=MonitorSample(gpu_util_pct="7", net_recv_bytes_s="9")),)
+                )
+            ]
 
         def close(self):
             self.closed = True
@@ -144,7 +151,14 @@ def test_monitor_subscribers_share_one_session_and_release(monkeypatch):
     with hub.subscribe({}, sctx) as first:
         with hub.subscribe({}, sctx) as second:
             assert len(sessions) == 1
-            assert first()["hosts"] == second()["hosts"] == []
+            assert first.frame()["hosts"] == second.frame()["hosts"] == []
+            backfill = first.history()
+            assert backfill["type"] == "history" and "hosts" not in backfill  # frame-row readers ignore it
+            (series,) = backfill["series"]
+            assert series["host"] == "host-a"
+            assert series["points"][0]["recorded_at"] == 1.0
+            assert series["points"][0]["sample"]["gpu_util_pct"] == "7"
+            assert series["points"][0]["sample"]["net_recv_bytes_s"] == "9"  # new sample fields reach the wire
         hub.prune()
         assert not sessions[0].closed
     hub.prune()

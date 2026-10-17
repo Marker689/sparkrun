@@ -54,6 +54,34 @@ class LogStream:
         self.thread.join(timeout=15)
 
 
+class MonitorSubscription:
+    """One subscriber's view over its shared per-host monitor sessions.
+
+    ``frame()`` is the live event.  ``history()`` is the backfill sent once at
+    subscribe time: the shared session has been recording since it was opened
+    (possibly for an earlier subscriber), so a late client can draw sparklines
+    at once.  Its series sit under ``series``, not ``hosts``, so a client that
+    reads every event's ``hosts`` as frame rows ignores it.
+    """
+
+    def __init__(self, sessions):
+        self._sessions = sessions
+
+    def frame(self):
+        return {
+            "type": "frame",
+            "queried_at": time.time(),
+            "hosts": [host for session in self._sessions for host in to_wire(session.frame())["hosts"]],
+        }
+
+    def history(self):
+        return {
+            "type": "history",
+            "queried_at": time.time(),
+            "series": [series for session in self._sessions for series in to_wire(session.history_snapshot())],
+        }
+
+
 class MonitorHub:
     def __init__(self, *, max_sessions=128, linger=5):
         self.lock = threading.RLock()
@@ -88,11 +116,7 @@ class MonitorHub:
                     entry["refs"] += 1
                     entry["released"] = None
                     keys.append(key)
-            yield lambda: {
-                "type": "frame",
-                "queried_at": time.time(),
-                "hosts": [host for key in keys for host in to_wire(self.entries[key]["session"].frame())["hosts"]],
-            }
+            yield MonitorSubscription([self.entries[key]["session"] for key in keys])
         finally:
             with self.lock:
                 for key in keys:
