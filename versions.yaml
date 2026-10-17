@@ -64,13 +64,16 @@ ci:
     # Makes a re-run of a release idempotent rather than a 400 from PyPI.
     skip_if_published: true
   npm:
-    # engines.node is >=22.
-    node_version: "22"
+    # Node 24 bundles npm >=11.5.1, required for trusted publishing via OIDC.
+    node_version: "24"
+    # npm trusted publisher: spark-arena/sparkrun, publish-npm.yml, environment
+    # npm, with direct npm publish allowed. No NPM_TOKEN is required.
+    use_oidc: true
     # No `typescript` in devDependencies, so `npx --no-install tsc` has nothing
     # to run; the package ships its TypeScript source directly (main: index.ts).
     lint: none
-    # Load-bearing: publish-npm.yml passed --provenance, which needs an OIDC
-    # token, which needs id-token: write on the publish job.
+    # OIDC authentication and provenance both require id-token: write on the
+    # publish job. Configure the trusted publisher in the npm package settings.
     use_provenance: true
     # The reason this repo could not adopt the generated publish workflow
     # before. sparkrun-openclaw-plugin is versioned independently (0.0.1) of
