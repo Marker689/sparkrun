@@ -389,7 +389,8 @@ def _gb10_sample() -> MonitorSample:
 
 def test_sparkline_empty_flat_ramp_and_pinned_scale():
     pytest.importorskip("textual")
-    from sparkrun.cli._monitor_tui import _series, _sparkline, _SPARK_GLYPHS
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS, _sparkline
+    from sparkrun.cli._monitor_tui import _series
 
     # No history yet → blank, so a cell's spark region is visibly empty.
     assert _sparkline([]) == " " * 20
@@ -413,7 +414,7 @@ def test_sparkline_empty_flat_ramp_and_pinned_scale():
 
 def test_spark_palette_degrades_without_theme_variables():
     pytest.importorskip("textual")
-    from sparkrun.cli._monitor_tui import _at, _spark_palette
+    from sparkrun.cli._monitor_metrics import _at, _spark_palette
 
     # A theme missing the expected variables renders uncolored sparks, not a crash.
     assert _spark_palette({}, dark=True) == ()
@@ -450,7 +451,8 @@ def test_render_node_stats_every_sparkline_resolves_to_a_unique_color(tmp_path, 
     import asyncio
     from textual.widgets import Static
 
-    from sparkrun.cli._monitor_tui import ClusterMonitorApp, _SPARK_GLYPHS
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
 
     # nv-shaped sample: all nine grid series plus the App/Cache row.
     s = _gb10_sample()
@@ -482,7 +484,8 @@ def test_render_node_stats_every_sparkline_resolves_to_a_unique_color(tmp_path, 
 
 def test_render_node_stats_gb10_header_and_grid():
     pytest.importorskip("textual")
-    from sparkrun.cli._monitor_tui import _render_node_stats, _SPARK_GLYPHS
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import _render_node_stats
 
     s = _gb10_sample()
     history = [(float(i), _gb10_sample()) for i in range(3)]
@@ -513,7 +516,8 @@ def test_render_node_stats_gb10_header_and_grid():
 
 def test_render_node_stats_sparse_sample_without_history():
     pytest.importorskip("textual")
-    from sparkrun.cli._monitor_tui import _render_node_stats, _SPARK_GLYPHS
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import _render_node_stats
 
     out = _render_node_stats("h1", HostActivity(host="h1", telemetry=MonitorSample(cpu_usage_pct="5")))
 
@@ -528,7 +532,8 @@ def test_render_node_stats_sparse_sample_without_history():
 
 def test_render_node_stats_nv_monitor_app_cache_row():
     pytest.importorskip("textual")
-    from sparkrun.cli._monitor_tui import _render_node_stats, _SPARK_GLYPHS
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import _render_node_stats
 
     nv = MonitorSample(
         hostname="nv1",
@@ -553,6 +558,204 @@ def test_render_node_stats_nv_monitor_app_cache_row():
     # Same sample without bufcache (bash backend): row is absent.
     bash = MonitorSample(mem_used_mb="113431", mem_total_mb="124610", mem_used_pct="91.0")
     assert "App" not in _render_node_stats("h", HostActivity(host="h", telemetry=bash), history)
+
+
+# --------------------------------------------------------------------------
+# Detail-panel responsive layout (columns / sparkline width ladder)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("width", "expected"),
+    [
+        (131, (3, 20)),
+        (200, (3, 20)),
+        (120, (3, 12)),
+        (100, (3, 8)),
+        (90, (3, 4)),
+        (80, (2, 12)),
+        (60, (2, 4)),
+        (40, (1, 12)),
+        (30, (1, 4)),
+        (22, (1, 0)),
+        (0, (3, 20)),
+        (None, (3, 20)),
+    ],
+)
+def test_stats_layout_ladder(width, expected):
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _stats_layout
+
+    assert _stats_layout(width) == expected
+
+
+def _narrow_sample() -> MonitorSample:
+    """Short header segments so the grid rows, not the header, drive the width."""
+    return MonitorSample(
+        gpu_util_pct="50",
+        gpu_temp_c="61",
+        gpu_power_w="23.5",
+        cpu_usage_pct="12",
+        cpu_temp_c="48",
+        gpu_clock_mhz="1500",
+        mem_used_pct="33",
+        net_send_bytes_s="125000",
+        net_recv_bytes_s="250000",
+    )
+
+
+def _narrow_activity() -> HostActivity:
+    return HostActivity(host="h1", telemetry=_narrow_sample())
+
+
+def _narrow_history() -> list[tuple[float, MonitorSample]]:
+    points: list[tuple[float, MonitorSample]] = []
+    for i in range(1, 21):  # 20 points fill a 20-wide sparkline (shorter ones rjust)
+        points.append(
+            (
+                float(i),
+                MonitorSample(
+                    gpu_util_pct=str(40 + i),
+                    gpu_temp_c=str(58 + i),
+                    gpu_power_w=str(20 + i),
+                    cpu_usage_pct=str(10 + i),
+                    cpu_temp_c=str(45 + i),
+                    gpu_clock_mhz=str(1400 + i * 100),
+                    mem_used_pct=str(30 + i),
+                    net_send_bytes_s=str(100000 * i),
+                    net_recv_bytes_s=str(200000 * i),
+                ),
+            )
+        )
+    return points
+
+
+@pytest.mark.parametrize("width", [131, 80, 60, 40, 30])
+def test_render_node_stats_fits_the_given_width(width):
+    pytest.importorskip("textual")
+    from rich.text import Text
+
+    from sparkrun.cli._monitor_tui import _render_node_stats
+
+    out = _render_node_stats("h1", _narrow_activity(), _narrow_history(), width=width)
+    plain_lines = [Text.from_markup(line).plain for line in out.splitlines()]
+
+    for line in plain_lines:
+        assert len(line) <= width, (width, line)
+    # No metric value is lost at any width.
+    assert "50.0 %" in out
+    assert "23.50 W" in out
+    assert "1500 MHz" in out
+    assert "Net Send" in out
+
+
+def test_render_node_stats_wide_layout_keeps_three_columns_and_long_sparks():
+    pytest.importorskip("textual")
+    from rich.text import Text
+
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import _render_node_stats
+
+    out = _render_node_stats("h1", _narrow_activity(), _narrow_history(), width=131)
+    lines = [Text.from_markup(line).plain for line in out.splitlines()]
+    grid_lines = [line for line in lines if "GPU %" in line or "CPU %" in line or "RAM %" in line]
+    assert len(grid_lines) == 3
+    for line in grid_lines:
+        assert line.count("   ") >= 2  # three cells side by side
+        assert sum(1 for ch in line if ch in _SPARK_GLYPHS) == 60  # 3 cells x 20 glyphs
+
+
+def test_render_node_stats_single_column_puts_each_metric_on_its_own_line():
+    pytest.importorskip("textual")
+    from rich.text import Text
+
+    from sparkrun.cli._monitor_tui import _render_node_stats
+
+    out = _render_node_stats("h1", _narrow_activity(), _narrow_history(), width=40)
+    lines = [Text.from_markup(line).plain for line in out.splitlines()]
+    gpu_pct = [line for line in lines if "GPU %" in line]
+    assert len(gpu_pct) == 1
+    assert "GPU Temp" not in gpu_pct[0]
+    assert "GPU Power" not in gpu_pct[0]
+    assert any("GPU Power" in line for line in lines)
+    assert any("Net Recv" in line for line in lines)
+
+
+def test_render_node_stats_drops_the_sparkline_below_the_floor():
+    pytest.importorskip("textual")
+    from rich.text import Text
+
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import _render_node_stats
+
+    # width 22 falls past (1, 4): the spark column goes, the values stay.
+    out = _render_node_stats("h1", _narrow_activity(), _narrow_history(), width=22)
+    lines = [Text.from_markup(line).plain for line in out.splitlines()]
+    for line in lines:
+        assert not any(g in line for g in _SPARK_GLYPHS), line
+    assert "50.0 %" in out
+    assert "23.50 W" in out
+    assert "Net Recv" in out
+
+
+def test_render_node_stats_default_width_is_the_three_by_three_layout():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import _render_node_stats
+
+    host, act, history, palette = "h1", _narrow_activity(), _narrow_history(), ()
+    assert _render_node_stats(host, act, history, palette, width=None) == _render_node_stats(host, act, history, palette)
+    assert _render_node_stats(host, act, history, palette) == _render_node_stats(host, act, history, palette, width=131)
+
+
+@pytest.mark.parametrize("width", [131, 100, 90, 80, 60, 40, 30, 22])
+def test_render_node_stats_memory_row_fits_the_given_width(width):
+    """The App/Cache percentage suffix is over the value budget: keep it only when it fits."""
+    pytest.importorskip("textual")
+    import dataclasses
+
+    from rich.text import Text
+
+    from sparkrun.cli._monitor_tui import _render_node_stats
+
+    sample = dataclasses.replace(_narrow_sample(), mem_used_mb="16384", mem_total_mb="131072", mem_bufcache_mb="4096")
+    out = _render_node_stats("h1", HostActivity(host="h1", telemetry=sample), _narrow_history(), width=width)
+    memory = [Text.from_markup(line).plain for line in out.splitlines() if "App" in line or "Cache" in line]
+
+    assert memory
+    for line in memory:
+        assert len(line) <= width, (width, line)
+    if width >= 90:  # the wide layouts have room for "(12.5%)"
+        assert any("(12.5%)" in line for line in memory), memory
+    else:
+        assert not any("%)" in line for line in memory), memory
+
+
+def test_cluster_monitor_app_narrow_window_detail_stays_within_pane_width(tmp_path):
+    pytest.importorskip("textual")
+    import asyncio
+    from rich.text import Text
+    from textual.widgets import Static
+
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    host = HostActivity(host="h1", telemetry=_narrow_sample())
+    app = ClusterMonitorApp(_FakeLiveMonitorSession(MonitorFrame(hosts=(host,))), ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(60, 24)) as pilot:
+            await pilot.pause(0.1)
+            app._refresh_detail()
+            await pilot.pause(0.05)
+            stats = app.query_one("#node-stats", Static)
+            raw = stats.content.plain if hasattr(stats.content, "plain") else str(stats.content)
+            text = Text.from_markup(raw).plain  # the stored content still carries color tags
+            assert "GPU %" in text
+            lines = text.splitlines()
+            assert len(lines) > 3
+            for line in lines:
+                assert len(line) <= stats.size.width, (stats.size.width, line)
+
+    asyncio.run(_run())
 
 
 # --------------------------------------------------------------------------
@@ -651,7 +854,8 @@ def test_cluster_monitor_app_detail_panel_and_node_selection(tmp_path):
     pytest.importorskip("textual")
     import asyncio
     from textual.widgets import DataTable, Static
-    from sparkrun.cli._monitor_tui import ClusterMonitorApp, _SPARK_GLYPHS
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
     from sparkrun.cli._monitor_logs import WorkloadList
 
     w1 = RunningWorkload(
@@ -912,6 +1116,395 @@ def test_cluster_monitor_app_dump_modal(tmp_path, monkeypatch):
             await pilot.press("escape")
             await pilot.pause(0.05)
             assert not isinstance(app.screen, DumpLogScreen)
+
+    asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------
+# ClusterMonitorApp Background Log-Metrics Tracking
+# --------------------------------------------------------------------------
+
+# One vLLM v1 engine stat line as the container emits it (vllm/v1/metrics/loggers.py).
+_VLLM_STAT_LINE = (
+    "INFO 10-17 08:12:34 [loggers.py:331] Engine 000: Avg prompt throughput: 123.4 tokens/s, "
+    "Avg generation throughput: 45.6 tokens/s, Running: 3 reqs, Waiting: 1 reqs, "
+    "GPU KV cache usage: 12.3%, Prefix cache hit rate: 45.6%"
+)
+
+
+class _MetricsLogTarget:
+    """Log target double for the app-level tracker: one page per source, no processes."""
+
+    def __init__(self, lines: list[LogLine], error_on_page: Exception | None = None, sources: list[LogSource] | None = None) -> None:
+        self.sources = tuple(sources or [LogSource(host="h1", container="c1", role="head", rank=0)])
+        self.runtime = "vllm-ray"
+        self._lines = list(lines)
+        self.error_on_page = error_on_page
+        self.page_calls: list[dict] = []
+
+    def page(self, source, *, skip, count=500, cancel=None, timeout=30.0):
+        self.page_calls.append({"source": source, "skip": skip, "count": count})
+        if self.error_on_page:
+            raise self.error_on_page
+        return list(self._lines[-count:])
+
+    def follow(self, tail=200, cancel=None):
+        return iter(())
+
+
+def _tracker_frame(workload: RunningWorkload | None) -> MonitorFrame:
+    workloads = (workload,) if workload is not None else ()
+    return MonitorFrame(hosts=(HostActivity(host="h1", workloads=workloads),))
+
+
+def _tracker_workload() -> RunningWorkload:
+    return RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+
+
+async def _run_metrics_tick(app) -> None:
+    """Drive one tracker tick to completion (never wait on the 30 s timer)."""
+    worker = app._metrics_tick()
+    await worker.wait()
+
+
+def test_monitor_metrics_interval_is_30_seconds():
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    assert ClusterMonitorApp.METRICS_TRACK_INTERVAL_S == 30.0
+
+
+def test_metrics_tail_read_fits_the_scraper_alignment_window():
+    """A tail page longer than the alignment window would re-ingest seen lines.
+
+    ``observe_page`` remembers only ``_PAGE_TAIL`` line hashes of the previous
+    page, so a tracker read wider than that caps the overlap and folds already
+    seen samples into every window mean — a silent bias, not a crash.
+    """
+    pytest.importorskip("textual")
+    from sparkrun.cli._monitor_metrics import _PAGE_TAIL
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    assert ClusterMonitorApp.METRICS_TAIL_LINES <= _PAGE_TAIL
+
+
+@pytest.fixture(autouse=True)
+def _no_live_metrics_tracking(monkeypatch):
+    """The app primes a metrics tick at mount; keep every pilot test off real hosts.
+
+    Tracker tests patch this same seam with their own target, which wins because a
+    test's monkeypatch runs after this fixture.
+    """
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda *a, **kw: _MetricsLogTarget([]))
+
+
+async def _wait_for_scraper(app, cluster_id: str, timeout: float = 3.0):
+    """Wait for the app to hold a scraper for *cluster_id* (the mount-time prime)."""
+    import asyncio
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        scraper = app.metrics_scraper_for(cluster_id)
+        if scraper is not None:
+            return scraper
+        await asyncio.sleep(0.02)
+    return None
+
+
+def test_monitor_primes_metrics_without_waiting_an_interval(tmp_path, monkeypatch):
+    """A monitor opened on a running workload shows its metrics at once, not 30 s later."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    target = _MetricsLogTarget([LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)])
+    calls: list[dict] = []
+
+    def _open(*a, **kw):
+        calls.append({"workload_id": a[0] if a else None, **kw})
+        return target
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", _open)
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None  # primed at mount, not one interval in
+            assert scraper.latest("gen") == 45.6
+            assert scraper.history("gen") == [45.6]
+            # Naming comes from the job's recorded topology: passing the monitored
+            # hosts would resolve the solo container name and read nothing.
+            assert calls[0]["workload_id"] == "cid1"
+            assert "hosts" not in calls[0]
+            assert target.page_calls[0]["skip"] == 0
+            assert target.page_calls[0]["count"] == ClusterMonitorApp.METRICS_PRIME_LINES
+
+    asyncio.run(_run())
+
+
+def test_monitor_initial_read_scans_back_for_measured_values(tmp_path, monkeypatch):
+    """The first read reaches past an idle streak of probes, so the footer opens measured."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    tail = ClusterMonitorApp.METRICS_TAIL_LINES
+    assert ClusterMonitorApp.METRICS_PRIME_LINES > tail
+    probes = [
+        LogLine(host="h1", container="c1", text='INFO:     127.0.0.1:60082 - "GET /health HTTP/1.1" 200 OK') for _ in range(tail + 100)
+    ]
+    # The last stat line sits well outside a plain tail page: exactly the idle
+    # engine case where a shallow read reports nothing but zeros.
+    target = _MetricsLogTarget([LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE), *probes])
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda *a, **kw: target)
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None
+            assert scraper.latest("gen") == 45.6  # measured from the deeper first read
+            assert target.page_calls[0]["count"] == ClusterMonitorApp.METRICS_PRIME_LINES
+
+            # Steady state reads the shallow tail; the last measured value holds.
+            await _run_metrics_tick(app)
+            assert target.page_calls[1]["count"] == ClusterMonitorApp.METRICS_TAIL_LINES
+            assert scraper.latest("gen") == 45.6
+
+    asyncio.run(_run())
+
+
+def test_monitor_metrics_reach_an_open_pane_footer_without_a_tick(tmp_path, monkeypatch):
+    """Opening a pane renders the already-tracked sample immediately."""
+    pytest.importorskip("textual")
+    import asyncio
+    from textual.widgets import Static
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import LogPane
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+    monkeypatch.setattr(
+        "sparkrun.cli._monitor_tui.open_log_target",
+        lambda *a, **kw: _MetricsLogTarget([LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)]),
+    )
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            assert await _wait_for_scraper(app, "cid1") is not None
+
+            await pilot.press("enter")  # pin h1
+            await pilot.pause(0.05)
+            await pilot.press("enter")  # open c1 log pane
+            await pilot.pause(0.15)
+
+            footer = app.query_one("#log-pane", LogPane).query_one("#log-metrics", Static)
+            assert footer.display is True
+            assert "tg" in str(footer.content)  # 5-column label field
+            assert "45.6" in str(footer.content)
+
+    asyncio.run(_run())
+
+
+def test_monitor_tracker_drops_vanished_workloads(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    monkeypatch.setattr(
+        "sparkrun.cli._monitor_tui.open_log_target",
+        lambda *a, **kw: _MetricsLogTarget([LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)]),
+    )
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            assert await _wait_for_scraper(app, "cid1") is not None
+
+            session.set_frame(_tracker_frame(None))
+            app._refresh()
+            await _run_metrics_tick(app)
+            assert app.metrics_scraper_for("cid1") is None
+
+    asyncio.run(_run())
+
+
+def test_monitor_tracker_reopens_target_after_read_failure(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    target = _MetricsLogTarget([], error_on_page=RuntimeError("ssh dropped"))
+    opens: list[str] = []
+
+    def _open(*a, **kw):
+        opens.append(a[0] if a else "")
+        return target
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", _open)
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            await asyncio.sleep(0.1)  # let the mount-time prime settle
+            baseline = len(opens)
+
+            await _run_metrics_tick(app)  # fails again: the cached target is dropped
+            assert len(opens) == baseline + 1
+            assert app.metrics_scraper_for("cid1") is None  # no sample from a failed read
+
+            target.error_on_page = None
+            target._lines = [LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)]
+            await _run_metrics_tick(app)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None and scraper.latest("gen") == 45.6
+
+    asyncio.run(_run())
+
+
+def test_monitor_tracker_forgets_a_restarted_ranks_old_source(tmp_path, monkeypatch):
+    """A re-resolved target names the restarted container: the dead rank stops counting."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    before = _MetricsLogTarget(
+        [LogLine(host="h1", container="c1", text="Avg generation throughput: 100.0 tokens/s")],
+        sources=[LogSource(host="h1", container="c1", role="head", rank=0)],
+    )
+    after = _MetricsLogTarget(
+        [LogLine(host="h1", container="c2", text="Avg generation throughput: 40.0 tokens/s")],
+        sources=[LogSource(host="h1", container="c2", role="head", rank=0)],
+    )
+    targets = iter([before, after])
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda *a, **kw: next(targets))
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None and scraper.latest("gen") == 100.0
+
+            # The container instance changes: the next read fails against the old
+            # target, which drops it so the following tick resolves the new one.
+            before.error_on_page = RuntimeError("container instance changed")
+            await _run_metrics_tick(app)
+            await _run_metrics_tick(app)
+
+            assert scraper.latest("gen") == 40.0  # 140.0 would mean the dead rank still counts
+
+    asyncio.run(_run())
+
+
+def test_monitor_metrics_window_mean_from_one_poll(tmp_path, monkeypatch):
+    """A steady poll's several engine prints land as one point: the window mean."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    target = _MetricsLogTarget(
+        [
+            LogLine(host="h1", container="c1", text="Avg generation throughput: 10.0 tokens/s, GPU KV cache usage: 10.0%"),
+            LogLine(host="h1", container="c1", text="Avg generation throughput: 40.0 tokens/s, GPU KV cache usage: 30.0%"),
+        ]
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda *a, **kw: target)
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None
+            # The prime read is a deep page: its last sample seeds, never its mean.
+            assert scraper.history("gen") == [40.0]
+
+            target._lines.extend(
+                [
+                    LogLine(host="h1", container="c1", text="Avg generation throughput: 50.0 tokens/s, GPU KV cache usage: 60.0%"),
+                    LogLine(host="h1", container="c1", text="Avg generation throughput: 60.0 tokens/s, GPU KV cache usage: 80.0%"),
+                ]
+            )
+            await _run_metrics_tick(app)
+
+            # Only the two appended prints are new to this poll: one point, their mean.
+            assert scraper.history("gen") == [40.0, 55.0]
+            assert scraper.latest("kv") == 70.0  # window mean; max applies across sources, not within one
+
+    asyncio.run(_run())
+
+
+def test_monitor_metrics_second_tick_only_samples_new_lines(tmp_path, monkeypatch):
+    """A later poll re-reads the overlapping tail; only the appended line counts."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    target = _MetricsLogTarget([LogLine(host="h1", container="c1", text="Avg generation throughput: 40.0 tokens/s")])
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda *a, **kw: target)
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None
+            assert scraper.history("gen") == [40.0]
+
+            target._lines.append(LogLine(host="h1", container="c1", text="Avg generation throughput: 50.0 tokens/s"))
+            await _run_metrics_tick(app)
+
+            assert scraper.history("gen") == [40.0, 50.0]  # the re-read line adds nothing
+
+    asyncio.run(_run())
+
+
+def test_monitor_metrics_idle_page_adds_no_point(tmp_path, monkeypatch):
+    """An unchanged tail page has no new samples, so it adds no flat point."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(_tracker_frame(_tracker_workload()))
+    target = _MetricsLogTarget([LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)])
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda *a, **kw: target)
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            scraper = await _wait_for_scraper(app, "cid1")
+            assert scraper is not None
+            assert len(scraper.history("gen")) == 1
+
+            await _run_metrics_tick(app)
+            await _run_metrics_tick(app)
+            assert scraper.history("gen") == [45.6]
 
     asyncio.run(_run())
 

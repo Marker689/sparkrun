@@ -43,6 +43,7 @@ from sparkrun.cli._monitor_logs import (
     workload_scope_summary,
     _trim_page_drift,
 )
+from sparkrun.cli._monitor_metrics import RuntimeMetricsScraper
 from sparkrun.core.cluster_status import ContainerDetail, RunningWorkload
 from sparkrun.core.monitoring import HostActivity, MonitorFrame
 from sparkrun.orchestration.logs import LogLine, LogSource
@@ -337,8 +338,8 @@ def test_render_text_colorizes_tensorfold_lines():
         # (message after the prefix, spans that must be present, styles that must not appear)
         (
             "serving nemotron at http://127.0.0.1:8080/v1 (sampling: greedy; drafts: on; context: 262144; loaded in 1.2s)",
-            [("http://127.0.0.1:8080/v1", "underline blue"), ("1.2s", "yellow")],
-            ("red", "green"),
+            [("http://127.0.0.1:8080/v1", "underline blue"), ("1.2s", "yellow"), ("serving", "green")],
+            ("red",),
         ),
         ("done req-8f3a2c1e prompt=100 tokens=200 tok/s=100.0 ttft=0.10s", [("done", "green"), ("req-8f3a2c1e", "magenta")], ("red",)),
         ("warning: non-loopback server has no API key; requests are open", [("warning:", "yellow")], ("red", "green")),
@@ -1597,6 +1598,11 @@ class _LogPaneTestApp(App):
         self.pane = pane
         self.closed = False
         self.dump_request = None
+        # Stands in for the app-level background tracker the pane reads from.
+        self.metrics_scraper = RuntimeMetricsScraper()
+
+    def metrics_scraper_for(self, cluster_id: str) -> RuntimeMetricsScraper:
+        return self.metrics_scraper
 
     def compose(self) -> ComposeResult:
         yield self.pane
@@ -1731,7 +1737,7 @@ def test_log_pane_follow_and_controls(monkeypatch):
             assert "1 container c1" in status
             assert "color on" in status
             assert "highlight on" in status
-            assert "wrap off" in status
+            assert "wrap on" in status  # the pane opens wrapped
 
             # Color toggle 'c'
             await pilot.press("c")
@@ -1747,9 +1753,9 @@ def test_log_pane_follow_and_controls(monkeypatch):
 
             # Wrap toggle 'l'
             await pilot.press("l")
-            assert pane.log_view.wrap is True
+            assert pane.log_view.wrap is False
             status = str(pane.query_one("#log-status", Static).content)
-            assert "wrap on" in status
+            assert "wrap off" in status
 
             # Search with '/'
             await pilot.press("slash")
@@ -2166,9 +2172,7 @@ def test_log_pane_wrapped_search_navigation_and_input(monkeypatch):
         app = _LogPaneTestApp(pane)
         async with app.run_test(size=(80, 20)) as pilot:
             await pilot.pause(0.1)
-            # Toggle wrap on
-            await pilot.press("l")
-            assert pane.log_view.wrap is True
+            assert pane.log_view.wrap is True  # wrapped by default; search runs in wrap mode
 
             # Open search input and type pattern
             await pilot.press("slash")
@@ -2373,6 +2377,78 @@ def test_log_pane_wrapped_page_anchoring(monkeypatch):
             anchor_entry = pane.log_view.virtual_row_to_entry(int(pane.log_view.scroll_y))
             assert anchor_entry == 83
             assert pane.buffer[anchor_entry].text == "tail 2"
+
+    asyncio.run(_run())
+
+
+def test_log_pane_opens_with_wrapping_enabled(monkeypatch):
+    """A fresh pane wraps without any keypress: long engine lines stay readable."""
+    import asyncio
+
+    long_line = "INFO 10-17 08:12:34 [loggers.py:331] Engine 000: Avg prompt throughput: 123.4 tokens/s" + (" tail-marker" * 12)
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text=long_line)])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.15)
+            view = pane.log_view
+            assert view.wrap is True  # default, no 'l' pressed
+            assert "wrap on" in str(pane.query_one("#log-status", Static).content)
+
+            # One long line occupies several virtual rows, and the overflow is
+            # rendered rather than clipped off the right edge.
+            assert view.virtual_size.height > len(pane.buffer)
+            rows = ["".join(seg.text for seg in view.render_line(y)) for y in range(view.virtual_size.height)]
+            assert any("tail-marker" in row for row in rows)
+
+    asyncio.run(_run())
+
+
+def test_log_view_rebuilds_wrap_map_once_per_settled_width(monkeypatch):
+    """A width drag costs one rebuild; a height-only resize costs none."""
+    import asyncio
+    from textual import events as tevents
+    from textual.geometry import Size as TSize
+
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="x" * 300)])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause(0.15)
+            view = pane.log_view
+            # The mount-time width change armed a debounce of its own; let it land
+            # before counting, or it is measured as a rebuild this test did not cause.
+            for _ in range(50):
+                if view._wrap_resize_timer is None:
+                    break
+                await asyncio.sleep(0.01)
+            calls: list[int] = []
+            real = view.refresh_buffer
+
+            def counted():
+                calls.append(1)
+                real()
+
+            monkeypatch.setattr(view, "refresh_buffer", counted)
+            width, height = view.size.width, view.size.height
+            view._wrap_for_width = width  # the map already matches this width
+
+            for size in (TSize(width, height), TSize(width, height + 3)):
+                view.on_resize(tevents.Resize(size, TSize(width, height)))
+            await pilot.pause(0.25)
+            assert calls == []  # same width, and height alone cannot change wrapping
+
+            for w in (90, 96, 100, 104):  # a drag: many events, one settled width
+                view.on_resize(tevents.Resize(TSize(w, height), TSize(width, height)))
+            assert calls == []
+            await pilot.pause(0.3)
+            assert len(calls) == 1
 
     asyncio.run(_run())
 
@@ -3589,6 +3665,12 @@ def test_log_pane_scroll_up_decouples_from_live_stream(monkeypatch):
                 await asyncio.sleep(0.002)
             assert resumed
             assert pane.view_state.pending_lines == 0
+            # The stream is still appending: follow re-anchors on its next paint,
+            # so give it one instead of sampling at an arbitrary instant.
+            for _ in range(50):
+                if pane.log_view.is_at_bottom:
+                    break
+                await asyncio.sleep(0.002)
             assert pane.log_view.is_at_bottom
 
     asyncio.run(_run())
@@ -3847,6 +3929,9 @@ def test_log_pane_stream_paint_gate(monkeypatch):
             pane.buffer._entries.clear()
             gen = pane._generation
             view = pane.log_view
+            # The wrap map tracks entries; a raw clear() on the buffer (test shortcut)
+            # leaves it stale, and heights below are compared against len(buffer).
+            view.refresh_buffer()
 
             # 1) Arrival after an idle gap paints immediately (gate clock backdated).
             view._stream_paint_at = time.monotonic() - 1.0
@@ -4271,5 +4356,263 @@ def test_log_view_compensation_after_immediate_user_scroll_keeps_target(monkeypa
             await pilot.wait_for_scheduled_animations()
             assert lv.scroll_y == 0
             assert pane.view_state.state == FollowState.SCROLLED
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Log pane metrics footer
+# ---------------------------------------------------------------------------
+
+# One vLLM v1 engine stat line as the container emits it (vllm/v1/metrics/loggers.py).
+_VLLM_STAT_LINE = (
+    "INFO 10-17 08:12:34 [loggers.py:331] Engine 000: Avg prompt throughput: 123.4 tokens/s, "
+    "Avg generation throughput: 45.6 tokens/s, Running: 3 reqs, Waiting: 1 reqs, "
+    "GPU KV cache usage: 12.3%, Prefix cache hit rate: 45.6%"
+)
+
+
+def test_log_pane_metrics_footer_renders_tracker_sample_once_target_ready(monkeypatch):
+    """The footer shows what the background tracker already collected, as soon as the target resolves."""
+    import asyncio
+
+    from sparkrun.cli._monitor_metrics import _SPARK_GLYPHS
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        app.metrics_scraper.observe(("h1", "c1"), _VLLM_STAT_LINE)
+        app.metrics_scraper.commit()
+
+        async with app.run_test(size=(100, 20)):
+            await asyncio.sleep(0.05)
+            footer = pane.query_one("#log-metrics", Static)
+
+            # No stream line was delivered: the row comes from the tracker alone.
+            assert footer.display is True
+            content = str(footer.content)
+            assert "tg" in content  # 5-column label field
+            assert any(glyph in content for glyph in _SPARK_GLYPHS)
+            assert "45.6" in content
+
+            # ... and it sits above the status/settings bar, which stays the
+            # pane's bottom row whether or not the metrics row is showing.
+            status = pane.query_one("#log-status", Static)
+            assert footer.region.y < status.region.y
+            assert status.region.bottom == pane.region.bottom
+
+    asyncio.run(_run())
+
+
+def test_log_pane_footer_shows_the_window_average(monkeypatch):
+    """The number is the newest window's mean: several prints in one poll collapse to one point."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        # Both prints belong to one tracker window, so its single ring point is their mean.
+        app.metrics_scraper.observe(("h1", "c1"), "Avg generation throughput: 40.0 tokens/s")
+        app.metrics_scraper.observe(("h1", "c1"), "Avg generation throughput: 50.0 tokens/s")
+        app.metrics_scraper.commit()
+
+        async with app.run_test(size=(100, 20)):
+            await asyncio.sleep(0.05)
+            content = str(pane.query_one("#log-metrics", Static).content)
+
+            assert "45.0" in content
+            assert "40.0" not in content
+            assert "50.0" not in content
+
+    asyncio.run(_run())
+
+
+def test_log_pane_blank_rows_frame_the_log_view(monkeypatch):
+    """A blank row under the title and one above the sparklines, with no orphan row when they hide."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        app.metrics_scraper.observe(("h1", "c1"), _VLLM_STAT_LINE)
+        app.metrics_scraper.commit()
+
+        async with app.run_test(size=(100, 20)):
+            await asyncio.sleep(0.25)
+            title = pane.query_one("#log-title", Static)
+            view = pane.log_view
+            footer = pane.query_one("#log-metrics", Static)
+            status = pane.query_one("#log-status", Static)
+
+            # Wrapping on: no horizontal scrollbar, so both blank rows are spent.
+            assert view.show_horizontal_scrollbar is False
+            assert view.region.y == title.region.bottom + 1
+            assert footer.region.y == view.region.bottom + 1
+            assert status.region.y == footer.region.bottom
+
+            # A hidden metrics row takes its own spacer with it; the title's stays.
+            footer.display = False
+            await asyncio.sleep(0.05)
+            assert view.region.y == title.region.bottom + 1
+            assert status.region.y == view.region.bottom
+
+    asyncio.run(_run())
+
+
+def test_log_pane_blank_rows_yield_to_the_horizontal_scrollbar(monkeypatch):
+    """Unwrapped wide content trades the spacers for the bar, and a follower keeps the tail."""
+    import asyncio
+
+    lines = [LogLine(host="h1", container="c1", text=f"line {i} " + "x" * 180) for i in range(60)]
+    target = FakeLogTarget(lines=lines)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        pane.log_view.wrap = False
+        app = _LogPaneTestApp(pane)
+        app.metrics_scraper.observe(("h1", "c1"), _VLLM_STAT_LINE)
+        app.metrics_scraper.commit()
+
+        async with app.run_test(size=(60, 20)):
+            # The pane acts on the settled verdict, one settle window after mount.
+            await asyncio.sleep(0.3)
+            title = pane.query_one("#log-title", Static)
+            view = pane.log_view
+            footer = pane.query_one("#log-metrics", Static)
+
+            # Unwrapped content wider than the view: the bar is up and takes the
+            # sparkline spacer, but the row below the title stays.
+            assert view.show_horizontal_scrollbar is True
+            assert "spark-gap" not in pane.classes
+            assert view.region.y == title.region.bottom + 1
+            assert footer.region.y == view.region.bottom
+
+            # Wrapping back on retires the bar, and the viewport shrinking under a
+            # following view must not leave it short of the tail: the stream is
+            # idle here, so nothing else re-anchors it.
+            pane.log_view.wrap = True
+            await asyncio.sleep(0.3)
+            assert view.show_horizontal_scrollbar is False
+            assert "spark-gap" in pane.classes
+            assert view.region.y == title.region.bottom + 1
+            assert footer.region.y == view.region.bottom + 1
+            assert pane.view_state.is_following is True
+            assert view.is_at_bottom is True
+
+    asyncio.run(_run())
+
+
+def test_log_pane_metrics_footer_stream_lines_do_not_feed_metrics(monkeypatch):
+    """The pane's own stream never feeds metrics: the app tracker owns them."""
+    import asyncio
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        async with app.run_test(size=(100, 20)):
+            await asyncio.sleep(0.05)
+            footer = pane.query_one("#log-metrics", Static)
+            line = LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)
+
+            # Neither prepended history nor follow traffic warms the strip.
+            pane.buffer.prepend_page([line])
+            assert footer.display is False
+
+            pane._on_lines([line], gen=pane._generation, from_follow=False)
+            pane._on_lines([line], gen=pane._generation, from_follow=True)
+            await asyncio.sleep(0.05)
+            assert footer.display is False
+            assert app.metrics_scraper.latest("gen") is None
+
+    asyncio.run(_run())
+
+
+def test_log_pane_metrics_footer_scope_switch_hides_footer_and_keeps_tracker_data(monkeypatch):
+    """A scope switch hides the row until the new target resolves; the tracker's data survives."""
+    import asyncio
+
+    from sparkrun.core.log_source import LogSource
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        app.metrics_scraper.observe(("h1", "c1"), _VLLM_STAT_LINE)
+        app.metrics_scraper.commit()
+
+        async with app.run_test(size=(100, 20)):
+            await asyncio.sleep(0.05)
+            footer = pane.query_one("#log-metrics", Static)
+            assert footer.display is True
+
+            pane._start_follow_worker(LogScope.CLUSTER)
+            assert footer.display is False
+            # Scope is a pane view concern: the tracked history is not discarded.
+            assert app.metrics_scraper.latest("gen") == 45.6
+            assert app.metrics_scraper.history("gen") == [45.6]
+
+            cluster_target = FakeLogTarget(
+                lines=[],
+                sources=[
+                    LogSource(host="h1", container="c1", role="head", rank=0),
+                    LogSource(host="h2", container="c2", role="worker", rank=1),
+                ],
+            )
+            pane._on_target_ready(cluster_target, pane._generation)
+            assert footer.display is True
+
+    asyncio.run(_run())
+
+
+def test_log_pane_metrics_footer_filters_to_target_sources(monkeypatch):
+    """The row aggregates only the sources in the pane's current scope."""
+    import asyncio
+
+    from sparkrun.core.log_source import LogSource
+
+    target = FakeLogTarget(lines=[])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+
+    async def _run():
+        pane = LogPane(host="h1", cluster_id="cid1", container="c1", scope=LogScope.CONTAINER)
+        app = _LogPaneTestApp(pane)
+        app.metrics_scraper.observe(("h1", "c1"), "Avg generation throughput: 100.0 tokens/s")
+        app.metrics_scraper.observe(("h2", "c2"), "Avg generation throughput: 50.0 tokens/s")
+        app.metrics_scraper.commit()
+
+        async with app.run_test(size=(100, 20)):
+            await asyncio.sleep(0.05)
+            footer = pane.query_one("#log-metrics", Static)
+
+            # Container scope: one source, so one rank's value — not the cluster sum.
+            assert "100.0" in str(footer.content)
+            assert "150.0" not in str(footer.content)
+
+            pane._on_target_ready(
+                FakeLogTarget(
+                    lines=[],
+                    sources=[
+                        LogSource(host="h1", container="c1", role="head", rank=0),
+                        LogSource(host="h2", container="c2", role="worker", rank=1),
+                    ],
+                ),
+                pane._generation,
+            )
+            assert "150.0" in str(footer.content)
 
     asyncio.run(_run())
