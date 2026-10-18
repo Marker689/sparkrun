@@ -70,6 +70,44 @@ model with its own key:
 The same rule applies to a hand-written `distribution_config`: each entry's `revision` is authoritative, and an entry
 without one is fetched unpinned.
 
+### Additional models and distribution overrides
+
+Use `distribution_config.additional_models` to distribute auxiliary models while keeping the primary model, its
+`model_revision`, runtime-added models (such as speculative drafts), and the normal container distribution:
+
+```yaml
+model: org/primary
+model_revision: primary-sha
+distribution_config:
+  additional_models:
+    - org/tokenizer
+    - name: org/auxiliary
+      revision: auxiliary-sha
+      target: [0]
+```
+
+Each entry is a model name or a mapping with `name`, optional `revision`, and optional `target` node indices. Targets
+are zero-based in the selected host list; omitted targets, `[]`, and `[-1]` all mean every selected node. An auxiliary
+model never inherits the primary model's revision. The additional list may be omitted, empty, or `null`.
+
+The existing `distribution_config.models` and `distribution_config.containers` blocks replace their respective default
+sections. Additions append to either default or explicit models after runtime preparation. For example,
+`models: {entries: []}` with `additional_models` distributes the extras without restoring the default primary entry.
+`models.enabled: false` and model-distribution skip controls disable the entire combined list, including additions.
+This includes the existing skip behavior when `model` is a local path or `cluster_config.resolved_model_path` is set.
+
+Before distribution, sparkrun resolves templates such as `{model}` and deduplicates the combined configuration:
+
+- Models with the same resolved name **and revision** become one entry. Different revisions, including an unpinned
+  request versus a pinned request, remain distinct. GGUF quantization selectors remain part of the name.
+- Containers with the same resolved image name become one entry.
+- Duplicate entries combine their targets; an all-node request takes precedence. Repeated node indices are removed,
+  and entries retain their first-appearance order.
+
+Recipe export preserves the additional list and keeps implicit default sections implicit. With `include`, the normal
+list-replacement rule applies: a child's `additional_models` replaces the inherited list; `[]` or `null` clears it.
+Omitting the key inherits the base recipe's additions.
+
 ### Per-machine images
 
 Normally every node runs `container:`. A recipe serving **pre-optimized, machine-tuned images** instead declares a

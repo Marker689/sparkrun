@@ -191,6 +191,8 @@ class DistributionConfig:
         default_factory=DistributionResourceConfig[DistributionContainerEntry]
     )
     externally_provided: bool = True
+    additional_models: list[DistributionModelEntry] = field(default_factory=list)
+    """Recipe additions, kept separate until runtime preparation has finished."""
 
     def __post_init__(self) -> None:
         self.validate()
@@ -205,6 +207,10 @@ class DistributionConfig:
                 raise RecipeError("distribution_config.%s must be a resource configuration" % kind)
             if any(not isinstance(entry, entry_type) for entry in resource.entries):
                 raise RecipeError("distribution_config.%s requires %s entries" % (kind, entry_type.__name__))
+        if not isinstance(self.additional_models, list) or any(
+            not isinstance(entry, DistributionModelEntry) for entry in self.additional_models
+        ):
+            raise RecipeError("distribution_config.additional_models requires a list of DistributionModelEntry entries")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DistributionConfig":
@@ -250,7 +256,22 @@ class DistributionConfig:
             models=resource_config_from_dict(data.get("models"), DistributionModelEntry, model_entry_from_dict),
             containers=resource_config_from_dict(data.get("containers"), DistributionContainerEntry, container_entry_from_dict),
             externally_provided=data.get("externally_provided", True),
+            additional_models=_parse_additional_models(data.get("additional_models")),
         )
+
+    def to_recipe_dict(self) -> dict[str, Any]:
+        """Export declarations without turning implicit defaults into overrides.
+
+        State serialization uses ``asdict`` instead, retaining runtime additions
+        and provenance flags for resuming the same operation.
+        """
+        data: dict[str, Any] = {}
+        for kind, resource in (("models", self.models), ("containers", self.containers)):
+            if resource.explicit:
+                data[kind] = {"enabled": resource.enabled, "entries": [dataclass_asdict(entry) for entry in resource.entries]}
+        if self.additional_models:
+            data["additional_models"] = [dataclass_asdict(entry) for entry in self.additional_models]
+        return data
 
     def add_model(self, model: str, revision: str | None = None):
         """Add a model distribution config to the distribution config.
@@ -296,13 +317,87 @@ class DistributionConfig:
             config_chain["container"] = resolved_container
         config_chain["model"] = recipe.model
 
-        for entry in self.models.entries:
+        for entry in self.models.entries + self.additional_models:
             entry.name = render_template(entry.name, config_chain)
 
         for entry in self.containers.entries:
             entry.name = render_template(entry.name, config_chain)
 
         return self
+
+    def finalize(
+        self,
+        recipe: "Recipe",
+        resolved_container: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        *,
+        container_distribution: DistributionResourceConfig[DistributionContainerEntry] | None = None,
+    ) -> "DistributionConfig":
+        """Return an operation-local, resolved and deduplicated configuration.
+
+        Call after runtime/plugin preparation. Pins are part of model identity:
+        an unpinned request and a pinned request remain distinct. Duplicate
+        requests combine their targets and retain first-appearance ordering.
+        Neither the recipe nor a prepared container policy is mutated.
+        """
+        self.validate()
+        resolved = deepcopy(self)
+        if container_distribution is not None:
+            resolved.containers = deepcopy(container_distribution)
+        resolved.models.entries.extend(resolved.additional_models)
+        resolved.additional_models = []
+        resolved.resolve(recipe, resolved_container=resolved_container, overrides=overrides)
+        # Distribution treats an empty image name as the launch image. Apply
+        # that fallback before deduplication so it shares the same identity.
+        if resolved_container is not None:
+            for entry in resolved.containers.entries:
+                entry.name = entry.name or resolved_container
+        resolved.models.entries = _deduplicate_distribution_entries(resolved.models.entries, lambda entry: (entry.name, entry.revision))
+        resolved.containers.entries = _deduplicate_distribution_entries(resolved.containers.entries, lambda entry: entry.name)
+        return resolved
+
+
+def _deduplicate_distribution_entries(entries: list[_Entry], key: Callable[[_Entry], object]) -> list[_Entry]:
+    """Coalesce entries owned by a finalized copy, including repeated targets."""
+    merged: dict[object, _Entry] = {}
+    for entry in entries:
+        entry.target = [-1] if not entry.target or -1 in entry.target else list(dict.fromkeys(entry.target))
+        identity = key(entry)
+        existing = merged.get(identity)
+        if existing is None:
+            merged[identity] = entry
+        elif -1 in existing.target or -1 in entry.target:
+            existing.target = [-1]
+        else:
+            existing.target = list(dict.fromkeys(existing.target + entry.target))
+    return list(merged.values())
+
+
+def _parse_additional_models(raw: Any) -> list[DistributionModelEntry]:
+    """Parse the additive list with actionable errors for malformed entries."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RecipeError("distribution_config.additional_models must be a list")
+    entries = []
+    for index, value in enumerate(raw):
+        path = "distribution_config.additional_models[%d]" % index
+        if isinstance(value, DistributionModelEntry):
+            entry = value
+        elif isinstance(value, str):
+            entry = DistributionModelEntry(name=value)
+        elif isinstance(value, dict):
+            entry = DistributionModelEntry(name=value.get("name", ""), target=value.get("target", []), revision=value.get("revision"))
+        else:
+            raise RecipeError("%s must be a model name or an entry mapping" % path)
+        if not isinstance(entry.name, str) or not entry.name.strip():
+            raise RecipeError("%s.name must be a non-empty string" % path)
+        if not isinstance(entry.target, list) or any(type(target) is not int for target in entry.target):
+            raise RecipeError("%s.target must be a list of node indices" % path)
+        if entry.revision is not None and (not isinstance(entry.revision, str) or not entry.revision.strip()):
+            raise RecipeError("%s.revision must be a non-empty string or null" % path)
+        entries.append(entry)
+    return entries
 
 
 def _default_distribution_config(
@@ -337,13 +432,16 @@ def _parse_distribution_config(data: dict[str, Any]) -> DistributionConfig:
     An *omitted* ``models`` or ``containers`` subkey falls back to the
     auto-default single entry (``{model}`` / ``{container}``) so a recipe can,
     e.g., add a second model to distribute without having to re-list the
-    container it never customized.  A subkey that IS present is honored
-    literally — an explicit ``entries: []`` or ``enabled: false`` still means
-    "distribute nothing", not "use the default".
+    container it never customized. A subkey that IS present is honored
+    literally: ``entries: []`` does not restore default entries, and
+    ``enabled: false`` disables the resource including any additions.
 
     The recipe's top-level ``model_revision`` is stamped onto the auto-generated
     model entry (and onto the one inherited when ``models`` is omitted), so a
     recipe that lists its own entries owns their revisions outright.
+
+    ``additional_models`` is kept separate until finalization, so it adds to
+    either default or explicit models without runtime hooks changing its pins.
     """
     raw = data.get("distribution_config")
     model_revision = data.get("model_revision")
@@ -395,6 +493,7 @@ def _parse_distribution_config(data: dict[str, Any]) -> DistributionConfig:
     return DistributionConfig(
         models=_parse_models(raw["models"]) if "models" in raw else default.models,
         containers=_parse_containers(raw["containers"]) if "containers" in raw else default.containers,
+        additional_models=_parse_additional_models(raw.get("additional_models")),
     )
 
 
@@ -2521,7 +2620,7 @@ class Recipe:
         # add distribution_config iff it was provided in the input recipe
         dist_cfg = self.distribution_config
         if dist_cfg and dist_cfg.externally_provided:
-            d["distribution_config"] = dataclass_asdict(dist_cfg)
+            d["distribution_config"] = dist_cfg.to_recipe_dict()
 
         return d
 

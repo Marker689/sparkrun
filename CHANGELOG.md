@@ -12,6 +12,10 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Added
 
+- Recipes accept `distribution_config.additional_models` to stage auxiliary models
+  alongside default and runtime-added models. Final distribution deduplicates models
+  by resolved name and revision, containers by image name, and combines their targets.
+  Recipe export preserves additive configuration without freezing implicit defaults.
 - `export systemd --pin` pins a mutable image tag (`repo@sha256:…`) and model revision
   (commit) in the baked service recipe, so restarts serve the same build. References
   already pinned are kept. `--offline` pins what every candidate host already holds

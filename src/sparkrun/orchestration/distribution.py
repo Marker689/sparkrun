@@ -932,12 +932,7 @@ def distribute_from_config(
 
     prefs = prefs or ModelDistributionPrefs()
 
-    from copy import deepcopy
-
-    dist_cfg = deepcopy(recipe.distribution_config)
-    if container_distribution is not None:
-        dist_cfg.containers = deepcopy(container_distribution)
-    dist_cfg.resolve(recipe, resolved_container=image)
+    dist_cfg = recipe.distribution_config.finalize(recipe, resolved_container=image, container_distribution=container_distribution)
 
     # `sparkrun run --rebuild` (or `builder_config.rebuild` in the recipe) asks
     # for the freshest possible image.  For a builder that *builds*, that is a
