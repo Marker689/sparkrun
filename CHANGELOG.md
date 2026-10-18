@@ -10,6 +10,30 @@ first tagged release containing them, regardless of their original commit date.
 
 ## [Unreleased]
 
+### Added
+
+- `export systemd --pin` pins a mutable image tag (`repo@sha256:…`) and model revision
+  (commit) in the baked service recipe, so restarts serve the same build. References
+  already pinned are kept. `--offline` pins what every candidate host already holds
+  instead of asking the registry and the Hub.
+
+### Changed
+
+- `export systemd --install` needs `--trust` for an untrusted recipe with hooks or
+  container-isolation overrides: on the head node the service recipe is a local file,
+  which `run` trusts without asking. Previewing and `--uninstall` never need it.
+
+### Fixed
+
+- Recipe export keeps `executor`, `executor_config` (including `entrypoint: ""`) and the
+  declared capabilities, so `export systemd`, `export recipe [--realize]` and
+  `export running-recipe` launch the same way the source did (#323). `-o` executor keys
+  (`-o entrypoint=''`) go to `executor_config` rather than `defaults`, and jobs record the
+  caller's executor layer as `executor_overrides` for later exports. Benchmark metadata
+  is unchanged: its recipe text and hashes leave these settings out.
+
+## [0.4.0] — 2026-10-17
+
 ### 0.4.0 application and API changes
 
 - Cache revision deletion and pruning share file-identity checks, preserving
@@ -367,14 +391,6 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
-- Recipe export keeps `executor`, `executor_config` (including `entrypoint: ""`) and the
-  declared capabilities, so `export systemd`, `export recipe [--realize]` and
-  `export running-recipe` launch the same way the source did (#323). `-o` executor keys
-  (`-o entrypoint=''`) go to `executor_config` rather than `defaults`, and jobs record the
-  caller's executor layer as `executor_overrides` for later exports. `export systemd`
-  now asks for `--trust` before baking an untrusted recipe's hooks or isolation overrides
-  into the head node's local (trusted) recipe file, and gains `--pin` (with
-  `--offline/--online`) to pin a mutable image tag and model revision.
 - `api.materialize` reports the same container env as the launch: it now includes the
   runtime-cache mount and env, and layers the comm env beneath the container env as the
   executor does.
@@ -1081,7 +1097,7 @@ the post-launch lifecycle are unchanged for existing recipes.
 
 [0.3.0]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.0
 
-[Unreleased]: https://github.com/spark-arena/sparkrun/compare/v0.3.8...develop-next
+[Unreleased]: https://github.com/spark-arena/sparkrun/compare/v0.4.0...develop-next
 [0.3.1]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.1
 [0.3.2]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.2
 [0.3.3]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.3
@@ -1090,3 +1106,6 @@ the post-launch lifecycle are unchanged for existing recipes.
 [0.3.6]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.6
 [0.3.7]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.7
 [0.3.8]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.8
+[0.3.9]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.9
+[0.3.10]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.10
+[0.4.0]: https://github.com/spark-arena/sparkrun/releases/tag/v0.4.0
