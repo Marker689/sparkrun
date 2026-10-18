@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -246,29 +247,79 @@ def test_generate_metadata_unpinned_builder_leaves_raw_container():
     assert meta["recipe"]["container"] == recipe.container
 
 
-def test_published_recipe_leaves_out_deployment_settings():
-    """Executor settings and capabilities stay out of the published text and its hashes.
-
-    Recipe export gained them for #323; here they would split result series by
-    capability list and publish ``executor_config.volumes`` host paths.
-    """
+def _rich_recipe(executor_config):
     from sparkrun.core.recipe import Recipe
 
-    plain = _make_minimal_recipe()
-    rich = Recipe(
+    recipe = Recipe(
         {
             "name": "r",
             "container": "myimage:latest",
             "model": "org/model",
             "runtime": "vllm-distributed",
-            "executor_config": {"volumes": ["/home/someone/data:/data"], "entrypoint": ""},
+            "executor_config": executor_config,
             "capabilities": ["tools"],
         }
     )
-    rich.source_registry, rich.source_registry_url = "reg", ""
+    recipe.source_registry, recipe.source_registry_url = "reg", ""
+    return recipe
 
-    meta_plain = _make_bench_result_with_launch(plain, ("myimage:latest", False)).generate_metadata()
-    meta_rich = _make_bench_result_with_launch(rich, ("myimage:latest", False)).generate_metadata()
-    assert "/home/someone" not in meta_rich["recipe"]["text"] and "executor_config" not in meta_rich["recipe"]["text"]
-    assert meta_rich["recipe"]["hash"] == meta_plain["recipe"]["hash"]
-    assert meta_rich["recipe"]["effective_hash"] == meta_plain["recipe"]["effective_hash"]
+
+def test_published_recipe_carries_portable_executor_settings():
+    """A published recipe is also the prototype someone else launches: ``entrypoint: ""``
+    decides whether the image starts at all, so it is part of the record (#323)."""
+    import yaml
+
+    from sparkrun.core.recipe import Recipe
+
+    recipe = _rich_recipe({"entrypoint": "", "ipc": "host", "shm_size": "32g"})
+    meta = _make_bench_result_with_launch(recipe, ("myimage:latest", False)).generate_metadata()
+    published = yaml.safe_load(meta["recipe"]["text"])
+    assert published["executor_config"] == {"entrypoint": "", "ipc": "host", "shm_size": "32g"}
+    assert published["capabilities"] == ["tools"]
+    assert Recipe(published).executor_config["entrypoint"] == ""
+
+
+def test_published_recipe_omits_host_specific_executor_settings():
+    """Host paths and site metadata stay out; a trailing comment says what was dropped."""
+    import yaml
+
+    recipe = _rich_recipe(
+        {
+            "entrypoint": "",
+            "volumes": ["/home/someone/models:/models:ro", "/scratch"],
+            "user": "0:0",
+            "devices": ["/dev/infiniband"],
+            "kubeconfig": "/home/someone/.kube/config",
+        }
+    )
+    meta = _make_bench_result_with_launch(recipe, ("myimage:latest", False)).generate_metadata()
+    text = meta["recipe"]["text"]
+    assert "/home/someone" not in text
+    # Running as root is part of the run, so ``user`` is kept.
+    assert yaml.safe_load(text)["executor_config"] == {"entrypoint": "", "user": "0:0"}
+    assert "#   volumes: <host path>:/models:ro" in text and "#   volumes: <host path>:/scratch" in text
+    assert "#   devices" in text and "#   kubeconfig" in text
+    assert meta["recipe"]["effective_hash"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_published_recipe_without_executor_settings_is_unchanged():
+    """Recipes that declare no executor settings keep the text and hashes they had before."""
+    from sparkrun.benchmarking.metadata import public_recipe_text
+
+    recipe = _make_minimal_recipe()
+    meta = _make_bench_result_with_launch(recipe, ("myimage:latest", False)).generate_metadata()
+    assert meta["recipe"]["hash"] == hashlib.sha256(public_recipe_text(recipe.export()).encode("utf-8")).hexdigest()
+    assert "executor" not in meta["recipe"]["text"]
+
+
+def test_every_executor_config_field_is_classified_for_publication():
+    """A new ExecutorConfig field must be declared portable or host-specific, or it would be
+    silently dropped from (or, worse, wrongly kept in) every published recipe."""
+    import dataclasses
+
+    from sparkrun.benchmarking.metadata import HOST_SPECIFIC_EXECUTOR_KEYS, PORTABLE_EXECUTOR_KEYS
+    from sparkrun.orchestration.executors._base import ExecutorConfig
+
+    fields = {field.name for field in dataclasses.fields(ExecutorConfig)}
+    assert fields - PORTABLE_EXECUTOR_KEYS - HOST_SPECIFIC_EXECUTOR_KEYS == set()
+    assert not PORTABLE_EXECUTOR_KEYS & HOST_SPECIFIC_EXECUTOR_KEYS

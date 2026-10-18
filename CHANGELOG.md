@@ -29,8 +29,13 @@ first tagged release containing them, regardless of their original commit date.
   declared capabilities, so `export systemd`, `export recipe [--realize]` and
   `export running-recipe` launch the same way the source did (#323). `-o` executor keys
   (`-o entrypoint=''`) go to `executor_config` rather than `defaults`, and jobs record the
-  caller's executor layer as `executor_overrides` for later exports. Benchmark metadata
-  is unchanged: its recipe text and hashes leave these settings out.
+  caller's executor layer as `executor_overrides` for later exports.
+- Published benchmark recipes carry `executor`, `capabilities` and the portable
+  `executor_config` keys (`entrypoint`, `ipc`, `shm_size`, `user`, …), so the record
+  can be replicated. Host-specific keys (`volumes`, `devices`, `labels`, local-executor
+  paths, plugin keys) are left out and named in a trailing comment, with only the
+  container side of each volume. `hash` / `effective_hash` change for recipes that
+  declare executor settings.
 
 ## [0.4.0] — 2026-10-17
 

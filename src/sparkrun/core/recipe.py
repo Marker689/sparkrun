@@ -2378,7 +2378,7 @@ class Recipe:
     # Top-level keys that are folded into metadata on export.
     _METADATA_PROMOTED_KEYS = {"description", "maintainer"}
 
-    def _build_export_dict(self, *, effective: bool = False, deployment: bool = True) -> dict[str, Any]:
+    def _build_export_dict(self, *, effective: bool = False) -> dict[str, Any]:
         """Build a canonical recipe dict from resolved instance attributes.
 
         Applies normalizations performed by the constructor and resolvers:
@@ -2467,18 +2467,18 @@ class Recipe:
         if self.scheduler:
             d["scheduler"] = self.scheduler
 
-        # -- Deployment settings: how the workload is run and what it declares it can do --
-        if deployment:
-            # Test the mapping, never its values: ``entrypoint: ""`` is the
-            # setting that clears a consuming image ENTRYPOINT.
-            if self.executor:
-                d["executor"] = self.executor
-            if self.executor_config:
-                d["executor_config"] = dict(self.executor_config)
-            if self.capabilities:
-                d["capabilities"] = list(self.capabilities)
-            if self.unsupported_capabilities:
-                d["unsupported_capabilities"] = list(self.unsupported_capabilities)
+        # -- Executor -- (test the mapping, never its values: ``entrypoint: ""``
+        # is the setting that clears a consuming image ENTRYPOINT)
+        if self.executor:
+            d["executor"] = self.executor
+        if self.executor_config:
+            d["executor_config"] = dict(self.executor_config)
+
+        # -- Declared gateway capabilities --
+        if self.capabilities:
+            d["capabilities"] = list(self.capabilities)
+        if self.unsupported_capabilities:
+            d["unsupported_capabilities"] = list(self.unsupported_capabilities)
 
         # -- Configuration -- (declared values; overrides stay conditional,
         # unless the caller asked for what this launch actually ran)
@@ -2532,7 +2532,6 @@ class Recipe:
         *,
         effective: bool = False,
         executor_overrides: Optional[dict] = None,
-        deployment: bool = True,
     ) -> dict[str, Any]:
         """Convert the recipe to a canonical dictionary.
 
@@ -2549,14 +2548,8 @@ class Recipe:
         selector.  Split ``-o`` input with
         :func:`sparkrun.core.resolve.split_executor_overrides` first, or the
         executor keys land in ``defaults`` as serve flags.
-
-        ``deployment=False`` leaves out ``executor`` / ``executor_config`` /
-        ``capabilities`` (and ignores *executor_overrides*): the served
-        workload alone, for projections that identify or publish it.
         """
-        export_dict = self._build_export_dict(effective=effective, deployment=deployment)
-        if not deployment:
-            executor_overrides = None
+        export_dict = self._build_export_dict(effective=effective)
 
         # Bake overrides into defaults so the export is self-contained
         if overrides:
@@ -2599,7 +2592,6 @@ class Recipe:
         overrides: Optional[dict] = None,
         container_image: Optional[str] = None,
         executor_overrides: Optional[dict] = None,
-        deployment: bool = True,
     ) -> Optional[str | Path]:
         """Export the recipe as canonical YAML.
 
@@ -2614,13 +2606,10 @@ class Recipe:
             container_image: When provided, override the ``container`` field
                 (accounts for builder mutations).
             executor_overrides: Merged over ``executor_config`` (see :meth:`to_dict`).
-            deployment: Include executor settings and capabilities (see :meth:`to_dict`).
         """
         from sparkrun.utils.yaml_helpers import LiteralBlockDumper
 
-        ordered = self.to_dict(
-            overrides=overrides, container_image=container_image, executor_overrides=executor_overrides, deployment=deployment
-        )
+        ordered = self.to_dict(overrides=overrides, container_image=container_image, executor_overrides=executor_overrides)
 
         text = (
             json_dumps(ordered, sort_keys=False)

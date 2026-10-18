@@ -42,6 +42,94 @@ def public_benchmark_data(value: Any) -> Any:
     return deepcopy(value)
 
 
+#: ``executor_config`` keys a published recipe carries.  A published recipe is
+#: both the record of a run and the prototype someone else launches, so it
+#: keeps what reproduces the run anywhere (``entrypoint: ""`` decides whether
+#: the image starts at all) and drops what belongs to one site.  An allowlist:
+#: a key nobody classified (including a plugin executor's own, such as a
+#: kubeconfig path) is omitted and named in the trailing comment, never
+#: published by default.  ``tests/test_benchmark_container_pin.py`` requires
+#: every ``ExecutorConfig`` field to be in one of the two sets.
+PORTABLE_EXECUTOR_KEYS = frozenset(
+    {
+        "executor",
+        "executor_type",
+        "auto_remove",
+        "restart_policy",
+        "privileged",
+        "gpus",
+        "gpu_access_mode",
+        "accelerator_vendor",
+        "ipc",
+        "shm_size",
+        "memory_limit",
+        "network",
+        "security_opt",
+        "cap_add",
+        "ulimit",
+        "entrypoint",
+        # Whether the workload runs as root is part of the run, not of the site.
+        "user",
+    }
+)
+
+#: Host paths and site metadata: omitted from published recipes.
+HOST_SPECIFIC_EXECUTOR_KEYS = frozenset(
+    {
+        "devices",
+        "volumes",
+        "labels",
+        "working_dir",
+        "log_dir",
+        "log_file",
+        "pid_dir",
+        "pid_file",
+        "env_file",
+        "command_prefix",
+    }
+)
+
+
+def _container_side(volume: object) -> str:
+    """``/host:/ctr:ro`` → ``<host path>:/ctr:ro``; a bare path is an identity mount."""
+    parts = str(volume).split(":")
+    target = parts[1:] if len(parts) > 1 else parts
+    return ":".join(["<host path>", *target])
+
+
+def portable_recipe_text(text: str) -> str:
+    """Drop host-specific ``executor_config`` keys from a published recipe.
+
+    What was dropped is listed in a trailing YAML comment: the key names, and
+    for ``volumes`` the container side of each mount, so whoever replicates
+    the run knows a mount was there without learning this site's paths.
+    Text with nothing to drop is returned unchanged.
+    """
+    import yaml
+
+    data = yaml.safe_load(text)
+    executor_config = data.get("executor_config") if isinstance(data, Mapping) else None
+    if not isinstance(executor_config, Mapping):
+        return text
+    omitted = [key for key in executor_config if key not in PORTABLE_EXECUTOR_KEYS]
+    if not omitted:
+        return text
+    kept = {key: value for key, value in executor_config.items() if key in PORTABLE_EXECUTOR_KEYS}
+    data = dict(data)
+    if kept:
+        data["executor_config"] = kept
+    else:
+        data.pop("executor_config")
+    notes = []
+    for key in omitted:
+        if key == "volumes" and isinstance(executor_config[key], list):
+            notes.extend("#   volumes: %s" % _container_side(volume) for volume in executor_config[key])
+        else:
+            notes.append("#   %s" % key)
+    comment = "# Host-specific executor_config omitted (set your own to replicate):\n%s\n" % "\n".join(notes)
+    return yaml.safe_dump(data, sort_keys=False) + comment
+
+
 def model_metadata(recipe: "Recipe") -> dict[str, Any]:
     """Shared model fields for local export and publication provenance."""
     fields = {
