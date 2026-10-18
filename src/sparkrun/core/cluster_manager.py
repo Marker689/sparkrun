@@ -82,6 +82,19 @@ def _parse_env_file(path: str) -> dict[str, str]:
     return out
 
 
+_MODEL_OPTION_FIELDS = (
+    "validation",
+    "file_selection",
+    "provider",
+    "fallback",
+    "streams_per_host",
+    "max_streams",
+    "idle_timeout_s",
+    "timeout_s",
+    "stall_retries",
+)
+
+
 @dataclass
 class ResourceDistributionPrefs:
     """Per-cluster distribution preferences for one resource kind.
@@ -119,6 +132,9 @@ class ResourceDistributionPrefs:
     fallback: bool | None = None
     streams_per_host: int | None = None
     max_streams: int | None = None
+    idle_timeout_s: float | None = None
+    timeout_s: float | None = None
+    stall_retries: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ResourceDistributionPrefs":
@@ -134,6 +150,9 @@ class ResourceDistributionPrefs:
             fallback=data.get("fallback"),
             streams_per_host=data.get("streams_per_host"),
             max_streams=data.get("max_streams"),
+            idle_timeout_s=data.get("idle_timeout_s"),
+            timeout_s=data.get("timeout_s"),
+            stall_retries=data.get("stall_retries"),
         )
 
     def is_default(self) -> bool:
@@ -141,10 +160,7 @@ class ResourceDistributionPrefs:
             self.enabled
             and self.preserve_perms
             and not self.skip_fan_out
-            and all(
-                value is None
-                for value in (self.validation, self.file_selection, self.provider, self.fallback, self.streams_per_host, self.max_streams)
-            )
+            and all(getattr(self, name) is None for name in _MODEL_OPTION_FIELDS)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -155,7 +171,7 @@ class ResourceDistributionPrefs:
             out["skip_fan_out"] = True
         if not self.enabled:
             out["enabled"] = False
-        for name in ("validation", "file_selection", "provider", "fallback", "streams_per_host", "max_streams"):
+        for name in _MODEL_OPTION_FIELDS:
             value = getattr(self, name)
             if value is not None:
                 out[name] = value

@@ -17,7 +17,8 @@ def result(rc, stderr=b""):
 
 @pytest.mark.parametrize("complete,expected", [(True, 2), (False, 1)])
 def test_vanished_retry_requires_inventory(complete, expected, caplog):
-    req = request()
+    # A configured ceiling: the retry must inherit the shrinking deadline.
+    req = replace(request(), timeout=3600)
     io = Mock()
     io.execute.side_effect = [
         result(24, b'file has vanished: "blob"\nrsync warning: some files vanished before they could be transferred (code 24)'),

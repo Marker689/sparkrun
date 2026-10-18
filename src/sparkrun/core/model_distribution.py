@@ -5,7 +5,7 @@ from __future__ import annotations
 from sparkrun.feedback import FeedbackReporter, get_feedback
 
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from inspect import signature
 import logging
@@ -23,6 +23,13 @@ MODEL_PULL_API_VERSION = 1
 _PROVIDERS: dict[str, ModelDistributionProvider] = {}
 enlist_registry_state(globals(), "_PROVIDERS")
 _CONFIG: ContextVar[Any] = ContextVar("model_distribution_config", default=None)
+# Seconds without transferred bytes advancing before a copy is called stalled.
+DEFAULT_MODEL_TRANSFER_IDLE_TIMEOUT_S = 600
+DEFAULT_MODEL_TRANSFER_STALL_RETRIES = 1
+# What a provider receives when no total ceiling is configured. Providers
+# predating the progress watchdog do arithmetic on request.timeout, so they
+# get a large finite value rather than None.
+PROVIDER_FALLBACK_TIMEOUT_S = 24 * 60 * 60
 _BINDINGS: ContextVar[dict[tuple[str, str], ValidatedModelBinding] | None] = ContextVar("validated_models", default=None)
 
 
@@ -54,7 +61,11 @@ class ModelCopyRequest:
     operation_id: str
     offline: bool = False
     dry_run: bool = False
-    timeout: float = 7200
+    # Total ceiling; None (the default) means none. A transfer is bounded by
+    # its progress instead: idle_timeout seconds without a byte advancing
+    # cancels it, however long the healthy part took (#324).
+    timeout: float | None = None
+    idle_timeout: float | None = field(default=DEFAULT_MODEL_TRANSFER_IDLE_TIMEOUT_S, kw_only=True)
     config: Any = field(default=None, repr=False, compare=False)
     session: HostSession | None = field(default=None, repr=False, compare=False)
     cancelled: Callable[[], bool] = field(default=lambda: False, repr=False, compare=False)
@@ -73,8 +84,10 @@ class ModelCopyRequest:
                 or set(target.required_files) - paths
             ):
                 raise ModelArtifactError("model transfer files must be unique members of the manifest")
-        if not math.isfinite(self.timeout) or self.timeout < 0:
+        if self.timeout is not None and (not math.isfinite(self.timeout) or self.timeout < 0):
             raise ModelArtifactError("model transfer timeout must be finite and nonnegative")
+        if self.idle_timeout is not None and (not math.isfinite(self.idle_timeout) or self.idle_timeout <= 0):
+            raise ModelArtifactError("model transfer idle timeout must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -142,6 +155,41 @@ def _setting(config: Any, key: str, default: Any) -> Any:
     return get(key, default) if callable(get) else default
 
 
+@dataclass(frozen=True)
+class TransferTimeouts:
+    """How long a model transfer may run, from ``model_transfer_*`` config."""
+
+    idle_timeout: float = DEFAULT_MODEL_TRANSFER_IDLE_TIMEOUT_S
+    timeout: float | None = None
+    stall_retries: int = DEFAULT_MODEL_TRANSFER_STALL_RETRIES
+
+
+def transfer_timeouts(config=None) -> TransferTimeouts:
+    """Resolve the progress watchdog settings.
+
+    ``model_transfer_idle_timeout_s`` (positive, default 600) bounds a stall;
+    ``model_transfer_timeout_s`` (0, the default, means none) is an opt-in
+    total ceiling; ``model_transfer_stall_retries`` (default 1) resumes a
+    stalled rsync that many times before failing.
+    """
+    config = _CONFIG.get() if config is None else config
+
+    def number(key, default, *, allow_zero):
+        value = _setting(config, key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ModelArtifactError(key + " must be a nonnegative number of seconds")
+        if value == 0 and not allow_zero:
+            raise ModelArtifactError(key + " must be positive")
+        return value
+
+    idle = number("model_transfer_idle_timeout_s", DEFAULT_MODEL_TRANSFER_IDLE_TIMEOUT_S, allow_zero=False)
+    total = number("model_transfer_timeout_s", 0, allow_zero=True)
+    retries = _setting(config, "model_transfer_stall_retries", DEFAULT_MODEL_TRANSFER_STALL_RETRIES)
+    if type(retries) is not int or retries < 0:
+        raise ModelArtifactError("model_transfer_stall_retries must be a nonnegative integer")
+    return TransferTimeouts(idle, total or None, retries)
+
+
 def validation_policy(config=None) -> str:
     config = _CONFIG.get() if config is None else config
     # Every policy prepares manifests. Legacy permits missing-inventory
@@ -207,7 +255,7 @@ def try_model_transfer(request: ModelCopyRequest, *, pull: bool = False) -> Mode
     if request.cancelled():
         raise ModelDistributionFailed("model transfer cancelled")
     try:
-        result = method(request)
+        result = method(request if request.timeout is not None else replace(request, timeout=PROVIDER_FALLBACK_TIMEOUT_S))
     except ModelDistributionUnsupported as exc:
         fallback = _setting(request.config, "model_distribution_fallback", getattr(provider, "fallback_on_unsupported", False))
         if _setting(request.config, "model_distribution_provider", "auto") == "auto" and fallback is True:

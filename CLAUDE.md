@@ -3009,6 +3009,18 @@ Before launching, sparkrun can pre-sync models and container images from the con
   These are presence heuristics, not read-permission or snapshot-completeness checks. A false hit skips the remote
   download, but head fan-out still runs; with the old flags retries repeated the broken transfer. Corrected rsync
   flags repair existing destinations without cache deletion (issue #299).
+- **Transfers are bounded by progress, not time** (`models/_stream.py:ProgressWatch`, #324). A fixed 2-hour
+  deadline failed every transfer whose size outgrew the link (195 GiB at 20 MiB/s). `execute_stream` now takes
+  `idle_timeout` + a `ProgressWatch` fed by the caller's stdout parser, and raises `ModelTransferStalled` when the
+  **byte count** stops growing; output without growth (rsync repeating a progress line) is not progress. One watch
+  per attempt, because a retried rsync counts from zero while `CopyProgress` keeps the cross-attempt maximum.
+  `core/model_distribution.py:transfer_timeouts` resolves `model_transfer_idle_timeout_s` / `_timeout_s` (opt-in
+  ceiling, 0 = none) / `_stall_retries`; `ModelCopyRequest.timeout` is `None` by default, and `try_model_transfer`
+  hands third-party providers `PROVIDER_FALLBACK_TIMEOUT_S` instead, since older providers do arithmetic on it.
+  rsync `--timeout` (exit 30) is the same interval as a backstop and counts as a stall. The watch deliberately
+  does **not** run where a healthy rsync moves no bytes: after `expected` bytes (NFS close/flush can take minutes)
+  and, on a resume (`armed=False`), before the first byte (the receiver checksums the whole partial) — a false
+  stall there would be #324 again. rsync `--timeout` bounds both.
 - **Reuse before transfer** (`models/snapshot_links.py`): manifest preparation keeps sparkrun snapshots
   self-contained regular files (what lets the cache agent budget and prune them), and neither the repair
   download (`hf_hub_download(local_dir=…)`, which never consults the cache) nor the `--copy-links` fan-out looked

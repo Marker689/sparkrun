@@ -16,6 +16,9 @@ model_file_selection: auto            # auto | all | safetensors
 model_distribution_provider: auto     # auto | builtin | registered provider name
 model_transfer_streams_per_host: 2     # concurrent rsync processes per destination
 model_transfer_max_streams: 16         # total rsync processes per copy operation
+model_transfer_idle_timeout_s: 600     # cancel a copy/download whose bytes stop advancing
+model_transfer_timeout_s: 0            # optional total ceiling; 0 (default) = none
+model_transfer_stall_retries: 1        # resume a stalled rsync this many times
 # model_distribution_fallback: true   # optional override of provider policy
 ```
 
@@ -56,6 +59,9 @@ distribution:
     provider: builtin
     streams_per_host: 2
     max_streams: 16
+    idle_timeout_s: 600
+    timeout_s: 0
+    stall_retries: 1
     # fallback: false
 ```
 
@@ -418,6 +424,31 @@ processes without closing a borrowed session or releasing publication leases
 before workers finish. Core revalidates every target before publishing runtime
 bindings, including aliases. A single large file stays a single transfer;
 this scheduler does not split GGUF files into byte ranges.
+
+### Stall detection, not a deadline
+
+A transfer may take as long as it needs while it is moving. Each rsync is
+watched through its `--info=progress2` byte count: when the count has not grown
+for `model_transfer_idle_timeout_s` (default 600 seconds), that rsync is
+cancelled and resumed from its partial file, up to `model_transfer_stall_retries`
+times (default 1). After that the host fails with the file, the idle time and
+the bytes moved, for example `model transfer stalled: no progress for 600s
+(model-00012-of-00040.safetensors, 3.10 of 4.88 GiB transferred)`. Repeated
+progress output with an unchanged count does not count as progress. The idle
+clock starts with the process, so a connection that hangs before any data moves
+is caught too. Two windows move no bytes while healthy and are not watched:
+after the last byte (the receiver closing and flushing on a slow shared cache)
+and, on a resumed attempt, before the first byte (rsync checksumming the
+partial file). Rsync's own `--timeout`, set to the same interval, bounds those
+and makes the remote end exit if the controller is gone. The Hugging Face repair
+download is watched the same way through its sampled byte count, with the idle
+clock restarted once the download adapter has bootstrapped. The legacy fallback
+path uses rsync `--timeout` alone, at a fixed 600 seconds.
+`SPARKRUN_NO_RSYNC_RETRY=1` also disables stall resumes.
+
+There is no total ceiling by default: a fixed one failed every transfer whose
+size outgrew the link, however healthy it was. Set `model_transfer_timeout_s`
+(or `timeout_s` under a cluster's `distribution.model`) to impose one.
 
 CLI and API feedback report aggregate/per-host logical bytes processed,
 active stream counts, and logical bytes per second. Counters include data

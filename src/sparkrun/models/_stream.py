@@ -9,16 +9,83 @@ from sparkrun.models.artifacts import ModelArtifactError
 from sparkrun.transports.session import HostCommandResult, StreamingHostSession
 
 
-def execute_stream(session, host, script, *, timeout, cancelled, stdout=None, stdout_limit: int | None = 16 * 1024**2):
+class ModelTransferStalled(ModelArtifactError):
+    """A transfer's byte count stopped advancing for its idle interval."""
+
+    def __init__(self, idle: float, transferred: int):
+        super().__init__("model transfer stalled: no progress for %ds (%d bytes transferred)" % (idle, transferred))
+        self.idle = idle
+        self.transferred = transferred
+
+
+class ProgressWatch:
+    """Idle clock reset only when a transferred-byte count actually grows.
+
+    Output alone proves nothing: rsync repeats an unchanged progress line, and
+    a heartbeat would keep a dead transfer alive. One watch per attempt, since
+    a retried rsync counts from zero again.
+
+    Two windows move no bytes while healthy, so the clock does not run there:
+    once *expected* bytes have moved (the receiver may spend minutes flushing
+    and closing on a slow shared cache), and, with ``armed=False``, until the
+    first byte (a resumed rsync first checksums the whole partial file). The
+    process's own bounds (rsync ``--timeout``, an explicit ceiling) cover both.
+    """
+
+    def __init__(self, *, expected: int | None = None, armed: bool = True, clock=time.monotonic):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self.expected = expected
+        self.armed = armed
+        self.transferred = 0
+        self._last = clock()
+
+    def advance(self, count: int) -> None:
+        with self._lock:
+            if count > self.transferred:
+                self.transferred = count
+                self._last = self._clock()
+                self.armed = True
+
+    def touch(self) -> None:
+        """Restart the idle clock at a phase boundary the caller recognizes."""
+        with self._lock:
+            self._last = self._clock()
+
+    def idle(self) -> float:
+        with self._lock:
+            if not self.armed or (self.expected is not None and self.transferred >= self.expected):
+                return 0.0
+            return self._clock() - self._last
+
+
+def execute_stream(
+    session,
+    host,
+    script,
+    *,
+    timeout,
+    cancelled,
+    stdout=None,
+    stdout_limit: int | None = 16 * 1024**2,
+    idle_timeout: float | None = None,
+    watch: ProgressWatch | None = None,
+):
     """Drain both pipes while supervising the process, including stdin delivery.
 
     Only this handle is cancelled; the session may also own publication leases
     and other callers' work. Output retention is bounded independently of live
     progress. Remote open_process supplies the SSH disconnect guard.
+
+    *timeout* ``None`` means no total ceiling. With *idle_timeout*, *watch*
+    (fed by the caller's *stdout* parser) must keep advancing or the process
+    is cancelled with :class:`ModelTransferStalled`.
     """
     if not isinstance(session, StreamingHostSession):
         raise ModelArtifactError("model copies require a streaming host session")
-    deadline = time.monotonic() + timeout
+    if idle_timeout is not None and watch is None:
+        raise ValueError("an idle timeout needs a progress watch")
+    deadline = None if timeout is None else time.monotonic() + timeout
     if cancelled():
         raise ModelArtifactError("model copy cancelled")
     process = session.open_process(host, ["bash", "-s"])
@@ -63,8 +130,10 @@ def execute_stream(session, host, script, *, timeout, cancelled, stdout=None, st
         while process.poll() is None or any(thread.is_alive() for thread in threads):
             if cancelled():
                 raise ModelArtifactError("model copy cancelled")
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise ModelArtifactError("model transfer deadline exceeded")
+            if idle_timeout is not None and (idle := watch.idle()) >= idle_timeout:
+                raise ModelTransferStalled(idle, watch.transferred)
             if errors:
                 raise ModelArtifactError("could not read model transfer output") from errors[0]
             time.sleep(0.05)

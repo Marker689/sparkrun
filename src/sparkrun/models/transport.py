@@ -6,15 +6,18 @@ import base64
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import replace
+from functools import partial
 import threading
 import logging
+import math
 from pathlib import PurePosixPath
 import time
 
-from sparkrun.core.model_distribution import ModelCopyRequest, ModelTransferResult
+from sparkrun.core.model_distribution import ModelCopyRequest, ModelTransferResult, transfer_timeouts
 from sparkrun.models.artifacts import ModelArtifactError
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models._copy_progress import CopyProgress
+from sparkrun.models._stream import ModelTransferStalled, ProgressWatch
 from sparkrun.core.operation import CURRENT, submit
 from sparkrun.orchestration.ssh import RemoteResult, build_ssh_opts_string, rsync_retry_disabled, should_run_locally
 from sparkrun.orchestration.transfer import (
@@ -42,6 +45,10 @@ def copy_script(request: ModelCopyRequest, target, ssh_kwargs: dict, *, relaxed:
     ) or request.source_host == target.host
     args = ["rsync", "-r", "--copy-links", "--mkpath", "--protect-args", "--ignore-times", "--from0", "--partial-dir=.sparkrun-partial"]
     args += ["--info=progress2", "--outbuf=L", "--no-human-readable", "--omit-dir-times"]
+    if request.idle_timeout is not None:
+        # rsync's own I/O-idle timeout: the remote end exits by itself too,
+        # even if this controller's watchdog never gets to cancel it.
+        args.append("--timeout=%d" % math.ceil(request.idle_timeout))
     if not relaxed:
         args.append("--times")
     if not local_destination:
@@ -70,6 +77,21 @@ def copy_script(request: ModelCopyRequest, target, ssh_kwargs: dict, *, relaxed:
 _BATCH_BYTES = 64 * 1024**2
 
 
+# rsync's exit status when its --timeout fired: no data moved for that long.
+_RSYNC_TIMEOUT_RC = 30
+
+
+def _stall_reason(target, sizes, idle, transferred) -> str:
+    files = target.required_files
+    subject = files[0] if len(files) == 1 else "%d files" % len(files)
+    return "model transfer stalled: no progress for %ds (%s, %.2f of %.2f GiB transferred)" % (
+        idle,
+        subject,
+        transferred / 2**30,
+        sum(sizes[path] for path in files) / 2**30,
+    )
+
+
 def copy_limits(config) -> tuple[int, int]:
     get = getattr(config, "get", None)
     values = []
@@ -96,69 +118,102 @@ def _batches(target, sizes):
         yield replace(target, required_files=tuple(sorted(small)))
 
 
-def _copy_job(request, target, io, ssh_kwargs, deadline, cancelled, progress):
+def _remaining(deadline):
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def _copy_job(request, target, io, ssh_kwargs, deadline, cancelled, parser, *, sizes, stall_retries):
+    """Run one batch's rsync: bounded by progress, retried within limits.
+
+    One retry each for vanished source files or attribute errors (the
+    original policy), plus *stall_retries* resumes after a stall; the partial
+    directory keeps what a stalled attempt already moved.
+    """
     relaxed = False
-    for attempt in range(2):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+    retried = False
+    stalls = 0
+    while True:
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
             return "model transfer deadline exceeded"
         if cancelled():
             return "model copy cancelled"
+        # A resume first checksums its partial file, which moves no bytes.
+        watch = ProgressWatch(expected=sum(sizes[path] for path in target.required_files), armed=stalls == 0)
         try:
             result = io.execute(
                 request.source_host,
                 copy_script(request, target, ssh_kwargs, relaxed=relaxed),
                 timeout=remaining,
                 cancelled=cancelled,
-                stdout=progress,
+                stdout=parser(watch),
+                idle_timeout=request.idle_timeout,
+                watch=watch,
             )
+        except ModelTransferStalled as exc:
+            stalled = (exc.idle, exc.transferred)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        else:
             transfer = RemoteResult(
                 target.host, result.returncode, result.stdout.decode(errors="replace"), result.stderr.decode(errors="replace")
             )
             if transfer.success or rsync_attribute_errors_only(transfer):
                 return None
-            logger.warning(
-                "Model copy %s -> %s attempt %d failed: %s",
-                request.source_host or "control",
-                target.host,
-                attempt + 1,
-                transfer.stderr[-1500:],
-            )
-            if attempt == 0 and not rsync_retry_disabled() and not cancelled():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return "model transfer deadline exceeded"
-                if rsync_had_vanished_files(transfer):
-                    report = io.observe(
-                        request.source_host,
-                        request.manifest,
-                        request.source_cache_root,
-                        timeout=min(60, remaining),
-                        cancelled=cancelled,
-                    )
-                    if report.complete:
+            if transfer.returncode == _RSYNC_TIMEOUT_RC and request.idle_timeout is not None:
+                stalled = (request.idle_timeout, watch.transferred)
+            else:
+                logger.warning(
+                    "Model copy %s -> %s attempt failed: %s",
+                    request.source_host or "control",
+                    target.host,
+                    transfer.stderr[-1500:],
+                )
+                if not retried and not rsync_retry_disabled() and not cancelled():
+                    retried = True
+                    remaining = _remaining(deadline)
+                    if remaining is not None and remaining <= 0:
+                        return "model transfer deadline exceeded"
+                    if rsync_had_vanished_files(transfer):
+                        report = io.observe(
+                            request.source_host,
+                            request.manifest,
+                            request.source_cache_root,
+                            timeout=60 if remaining is None else min(60, remaining),
+                            cancelled=cancelled,
+                        )
+                        if report.complete:
+                            continue
+                    elif rsync_has_attribute_permission_error(transfer):
+                        relaxed = True
                         continue
-                elif rsync_has_attribute_permission_error(transfer):
-                    relaxed = True
-                    continue
-            return classify_rsync_failure(transfer) + ": " + transfer.stderr[-1500:]
-        except Exception as exc:
-            return str(exc) or type(exc).__name__
-    return "model copy failed"
+                return classify_rsync_failure(transfer) + ": " + transfer.stderr[-1500:]
+        reason = _stall_reason(target, sizes, *stalled)
+        if stalls < stall_retries and not rsync_retry_disabled() and not cancelled():
+            stalls += 1
+            logger.warning(
+                "Model copy %s -> %s: %s; resuming (%d/%d)", request.source_host or "control", target.host, reason, stalls, stall_retries
+            )
+            continue
+        return reason
 
 
 def builtin_copy(request: ModelCopyRequest, io: ModelHostIO, ssh_kwargs: dict) -> ModelTransferResult:
     """Fair bounded fan-out, with disjoint file batches per destination.
 
-    One invocation has one source and one deadline across scheduling, retries,
-    and output draining. The coordinator alone publishes results/callbacks.
+    One invocation has one source. Each rsync is bounded by its progress
+    (``request.idle_timeout``); a total deadline applies only when one is
+    configured (``request.timeout``) or the operation carries one. The
+    coordinator alone publishes results/callbacks.
     Core has already acquired leases and collapsed shared-cache aliases.
     """
     per_host, maximum = copy_limits(request.config)
+    stall_retries = transfer_timeouts(request.config).stall_retries
     state = CURRENT.get()
-    deadline = time.monotonic() + request.timeout
+    deadlines = [time.monotonic() + request.timeout] if request.timeout is not None else []
     if state is not None and state.deadline is not None:
-        deadline = min(deadline, state.deadline)
+        deadlines.append(state.deadline)
+    deadline = min(deadlines, default=None)
     stopped = threading.Event()
 
     def cancelled():
@@ -186,7 +241,7 @@ def builtin_copy(request: ModelCopyRequest, io: ModelHostIO, ssh_kwargs: dict) -
         while active or any(pending.values()):
             if cancelled():
                 raise ModelArtifactError("model copy cancelled")
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 for host in pending:
                     if host not in outcomes:
                         outcomes[host], errors[host] = "failed", "model transfer deadline exceeded"
@@ -204,7 +259,19 @@ def builtin_copy(request: ModelCopyRequest, io: ModelHostIO, ssh_kwargs: dict) -
                         key = pending[host].popleft()
                         target, _ = jobs[key]
                         progress.start(key)
-                        future = submit(pool, _copy_job, request, target, io, ssh_kwargs, deadline, cancelled, progress.parser(key))
+                        future = submit(
+                            pool,
+                            _copy_job,
+                            request,
+                            target,
+                            io,
+                            ssh_kwargs,
+                            deadline,
+                            cancelled,
+                            partial(progress.parser, key),
+                            sizes=sizes,
+                            stall_retries=stall_retries,
+                        )
                         active[future] = key
                         active_hosts[host] += 1
                         admitted = True
@@ -213,7 +280,8 @@ def builtin_copy(request: ModelCopyRequest, io: ModelHostIO, ssh_kwargs: dict) -
                     break
             if not active:
                 break
-            completed, _ = wait(active, timeout=min(0.1, max(0, deadline - time.monotonic())), return_when=FIRST_COMPLETED)
+            poll = 0.1 if deadline is None else min(0.1, max(0, deadline - time.monotonic()))
+            completed, _ = wait(active, timeout=poll, return_when=FIRST_COMPLETED)
             for future in completed:
                 key = active.pop(future)
                 target, _ = jobs[key]

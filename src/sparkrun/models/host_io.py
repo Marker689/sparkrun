@@ -54,7 +54,17 @@ class ModelHostIO:
             return True
         return False
 
-    def execute(self, host: str | None, script: str, *, timeout: float = 30, cancelled=None, stdout=None) -> HostCommandResult:
+    def execute(
+        self,
+        host: str | None,
+        script: str,
+        *,
+        timeout: float | None = 30,
+        cancelled=None,
+        stdout=None,
+        idle_timeout: float | None = None,
+        watch=None,
+    ) -> HostCommandResult:
         self.check_leases()
         session = self.local if host is None else self.session
 
@@ -63,7 +73,7 @@ class ModelHostIO:
             return cancelled is not None and cancelled()
 
         try:
-            if cancelled is not None or self._owners:
+            if cancelled is not None or self._owners or watch is not None or timeout is None:
                 from sparkrun.models._stream import execute_stream
 
                 result = execute_stream(
@@ -76,6 +86,8 @@ class ModelHostIO:
                     # Lease supervision must not truncate previously unbounded
                     # metadata reads. Bulk copy output retains its existing cap.
                     stdout_limit=None if cancelled is None and stdout is None else 16 * 1024**2,
+                    idle_timeout=idle_timeout,
+                    watch=watch,
                 )
             else:
                 result = session.execute(host or "localhost", ["bash", "-s"], input_data=script.encode(), timeout=timeout)

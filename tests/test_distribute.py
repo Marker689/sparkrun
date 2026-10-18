@@ -1074,6 +1074,7 @@ class TestDistributeModelFromLocal:
             "--no-perms",
             "--no-group",
             "--omit-dir-times",
+            "--timeout=600",
         ]
         # Best-effort chown runs when preserving perms.
         mock_fix.assert_called_once()
@@ -1113,7 +1114,7 @@ class TestDistributeModelFromLocal:
 
         distribute_model_from_local("org/model", ["h1"], preserve_perms=False)
         opts = mock_rsync.call_args.kwargs["rsync_options"]
-        assert opts == ["-r", "--links", "--copy-unsafe-links", "--size-only", "--mkpath", "--partial"]
+        assert opts == ["-r", "--links", "--copy-unsafe-links", "--size-only", "--mkpath", "--partial", "--timeout=600"]
         assert "-a" not in opts
         # No ownership/group preservation flags that trip chgrp under root_squash.
         assert "-o" not in opts and "-g" not in opts
@@ -1241,7 +1242,7 @@ class TestDistributeModelFromHead:
         dist_script = mock_run.call_args_list[1][0][1]
         # The head→worker hop lands on the same kind of destination as the
         # control→host one, so it carries the same NFS-safe relaxation.
-        assert 'RSYNC_ATTR_FLAGS="-a --copy-unsafe-links --no-perms --no-group --omit-dir-times"' in dist_script
+        assert 'RSYNC_ATTR_FLAGS="-a --copy-unsafe-links --no-perms --no-group --omit-dir-times --timeout=600"' in dist_script
 
     @mock.patch("sparkrun.orchestration.ssh.run_remote_script_streaming")
     def test_no_preserve_perms_renders_recursive_flag(self, mock_run):
@@ -1251,7 +1252,7 @@ class TestDistributeModelFromHead:
 
         distribute_model_from_head("org/model", ["head", "w1"], preserve_perms=False)
         dist_script = mock_run.call_args_list[1][0][1]
-        assert 'RSYNC_ATTR_FLAGS="-r --links --copy-unsafe-links"' in dist_script
+        assert 'RSYNC_ATTR_FLAGS="-r --links --copy-unsafe-links --timeout=600"' in dist_script
 
     @mock.patch("sparkrun.orchestration.ssh.run_remote_script_streaming")
     def test_skip_fan_out_ensures_head_only(self, mock_run):

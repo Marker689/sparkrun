@@ -1382,6 +1382,13 @@ class ExampleModelProvider:
 # register_model_distribution_provider("example", ExampleModelProvider())
 ```
 
+`request.idle_timeout` (seconds, default 600) is the stall bound: cancel a
+transfer whose byte count stops advancing for that long, however long it has run.
+`request.timeout` is an optional total ceiling. Core's own requests leave it
+`None` unless one is configured, and a provider then receives a large finite
+value (`PROVIDER_FALLBACK_TIMEOUT_S`, 24 hours), so providers that compute a
+deadline from it keep working.
+
 Return exactly the requested hosts with `complete`, `already_present`, or `failed`
 and per-host `errors` for failures. Core rejects changed manifest identities,
 missing/extra hosts, conflicting evidence and failed outcomes; every claimed

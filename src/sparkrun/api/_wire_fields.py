@@ -356,6 +356,9 @@ DTO_FIELDS = {
         "fallback",
         "streams_per_host",
         "max_streams",
+        "idle_timeout_s",
+        "timeout_s",
+        "stall_retries",
     ],
     "sparkrun.core.cluster_manager.ClusterDistributionConfig": ["model", "tuning"],
     "sparkrun.core.cluster_manager.ClusterDefinition": [

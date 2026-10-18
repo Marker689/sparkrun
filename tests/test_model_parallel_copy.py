@@ -138,7 +138,7 @@ def test_operation_cancel_and_deadline_stop_active_workers_and_admission(simulat
             assert started.wait(2)
             if cancel:
                 state.cancel.set()
-            end = time.monotonic() + timeout
+            end = time.monotonic() + (timeout if timeout is not None else 60)
             while not cancelled() and time.monotonic() < end:
                 time.sleep(0.01)
             raise ModelArtifactError("model copy cancelled" if cancelled() else "model transfer deadline exceeded")

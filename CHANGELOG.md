@@ -25,6 +25,14 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Fixed
 
+- Model distribution no longer fails healthy transfers at a fixed two-hour deadline (#324).
+  A copy or Hugging Face repair download runs as long as its byte count keeps advancing;
+  one that stops for `model_transfer_idle_timeout_s` (default 600) is cancelled, resumed
+  `model_transfer_stall_retries` times (default 1), then reported with the file, idle time
+  and bytes moved. A total ceiling is opt-in via `model_transfer_timeout_s`. All three can
+  be set per cluster under `distribution.model` (`idle_timeout_s`, `timeout_s`,
+  `stall_retries`). Model rsyncs, including the legacy fallback path, now pass
+  `--timeout`.
 - Recipe export keeps `executor`, `executor_config` (including `entrypoint: ""`) and the
   declared capabilities, so `export systemd`, `export recipe [--realize]` and
   `export running-recipe` launch the same way the source did (#323). `-o` executor keys

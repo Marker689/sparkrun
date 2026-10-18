@@ -34,7 +34,12 @@ class CopyProgress:
                 self.counts[key] = self.jobs[key][1]
                 self.completed.add(key)
 
-    def parser(self, key):
+    def parser(self, key, watch=None):
+        """Feed *key*'s displayed count, and *watch* the attempt's raw count.
+
+        The display keeps the highest count across attempts; the watch needs
+        this attempt's own, which restarts from zero on a retry.
+        """
         pending = b""
 
         def feed(data):
@@ -44,7 +49,10 @@ class CopyProgress:
             for line in lines:
                 match = re.match(rb"\s*([0-9,]+)\s+[0-9]+%\s", line)
                 if match:
-                    self.advance(key, int(match[1].replace(b",", b"")))
+                    count = int(match[1].replace(b",", b""))
+                    self.advance(key, count)
+                    if watch is not None:
+                        watch.advance(count)
 
         return feed
 

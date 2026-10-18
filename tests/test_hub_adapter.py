@@ -226,8 +226,9 @@ def test_run_adapter_streams_repair_output_to_progress():
     request, selected = _tiny_manifest()
     io = mock.Mock()
 
-    def execute(host, script, *, timeout, stdout=None):
-        assert stdout is not None and timeout == 7200
+    def execute(host, script, *, timeout, stdout=None, idle_timeout=None, watch=None):
+        # No total ceiling: the download is bounded by its progress (#324).
+        assert stdout is not None and timeout is None and idle_timeout == 600 and watch is not None
         stdout(b"SPARKRUN_MODEL_PROGRESS 3 3\n")
         return HostCommandResult(host, 0, b'SPARKRUN_MODEL_RESULT={"revision":"%s","repaired":1}\n' % REVISION.encode(), b"")
 

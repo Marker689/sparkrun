@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from sparkrun.core.config import resolve_hf_cache_home
+from sparkrun.core.model_distribution import DEFAULT_MODEL_TRANSFER_IDLE_TIMEOUT_S
 from sparkrun.models.download import download_model, is_model_cached, model_cache_path
 from sparkrun.orchestration.transfer import (
     TransferFailure,
@@ -30,13 +31,14 @@ from sparkrun.core.progress import PROGRESS
 
 logger = logging.getLogger(__name__)
 
-# Generous execution timeout (seconds) for control→host model rsync.
-# build_ssh_cmd only sets ConnectTimeout (TCP connect); without an overall
-# timeout a host that connects then stalls (frozen NFS, hung rsync) blocks
-# the whole as_completed loop forever.  Model caches can be tens of GB and
-# the first sync to a fresh host is the slowest, so this is intentionally
-# large — it exists to break true hangs, not to bound healthy transfers.
-DEFAULT_MODEL_RSYNC_TIMEOUT = 2 * 60 * 60  # 2 hours
+# rsync's own I/O-idle timeout for model transfers (``--timeout``): a stream
+# that moves no data for this long exits, a slow one that keeps moving never
+# does. build_ssh_cmd only sets ConnectTimeout, so this is what breaks a host
+# that connects and then stalls (frozen NFS, dead link). There is deliberately
+# no total ceiling: a fixed one failed every transfer whose size outgrew the
+# link, however healthy it was (#324).
+MODEL_RSYNC_IDLE_TIMEOUT = DEFAULT_MODEL_TRANSFER_IDLE_TIMEOUT_S
+_IDLE_OPT = "--timeout=%d" % MODEL_RSYNC_IDLE_TIMEOUT
 
 # Filesystem types that indicate a network-shared cache directory.  Used by
 # the setup wizard's shared-cache detection (see ``detect_shared_cache``).
@@ -80,8 +82,9 @@ def _model_rsync_options(preserve_perms: bool) -> list[str]:
             "--links",
             "--copy-unsafe-links",
             *NFS_SAFE_ATTR_OPTS,
+            _IDLE_OPT,
         ]
-    return ["-r", "--links", "--copy-unsafe-links", "--size-only", "--mkpath", "--partial"]
+    return ["-r", "--links", "--copy-unsafe-links", "--size-only", "--mkpath", "--partial", _IDLE_OPT]
 
 
 def detect_shared_cache(
@@ -297,7 +300,7 @@ def distribute_model_from_local(
         ssh_key=ssh_key,
         ssh_options=ssh_options,
         rsync_options=_model_rsync_options(preserve_perms),
-        timeout=timeout if timeout is not None else DEFAULT_MODEL_RSYNC_TIMEOUT,
+        timeout=timeout,
         dry_run=dry_run,
     )
 
@@ -517,6 +520,7 @@ def distribute_model_from_head(
         ssh_options=ssh_options,
     )
     rsync_attr_flags = " ".join(["-a", "--copy-unsafe-links", *NFS_SAFE_ATTR_OPTS]) if preserve_perms else "-r --links --copy-unsafe-links"
+    rsync_attr_flags += " " + _IDLE_OPT
     dist_script = read_script("model_distribute.sh").format(
         # Validated rather than quoted (double-quoted on use, must still expand
         # $HOME on the head); targets get the same treatment as the image

@@ -14,6 +14,7 @@ from sparkrun.core.model_distribution import (
     ModelPullRequest,
     ModelTarget,
     record_binding,
+    transfer_timeouts,
     try_model_transfer,
 )
 from sparkrun.models.acquisition import run_adapter
@@ -39,6 +40,12 @@ _REPAIRABLE = {"missing", "wrong_size", "checksum_mismatch"}
 class PreparedModel:
     manifest: ModelArtifactManifest
     bindings: tuple[ValidatedModelBinding, ...]
+
+
+def _transfer_limits(config) -> dict:
+    """``ModelCopyRequest`` timeout fields from ``model_transfer_*`` config."""
+    limits = transfer_timeouts(config)
+    return {"timeout": limits.timeout, "idle_timeout": limits.idle_timeout}
 
 
 def _report_error(report: CacheValidationReport) -> str:
@@ -97,6 +104,7 @@ def _acquire(
             session=io.session,
             cancelled=io.cancelled,
             token=lambda: token,
+            **_transfer_limits(config),
         )
         result = try_model_transfer(pull, pull=True)
     if result is None:
@@ -333,6 +341,7 @@ def prepare_model(
                         config=config,
                         session=io.session,
                         cancelled=io.cancelled,
+                        **_transfer_limits(config),
                     )
                     outcome = try_model_transfer(copy)
                     if outcome is None:

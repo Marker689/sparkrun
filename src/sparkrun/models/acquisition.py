@@ -7,6 +7,8 @@ import json
 import inspect
 from textwrap import indent
 
+from sparkrun.core.model_distribution import operation_config, transfer_timeouts
+from sparkrun.models._stream import ModelTransferStalled, ProgressWatch
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest, ModelArtifactRequest, ModelInventoryUnavailable
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.manifest import HUB_ADAPTER_VERSION, read_weight_index
@@ -47,9 +49,13 @@ def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, canc
         for parent, _, names in os.walk(directory):
             for item in names:
                 try:
-                    found += os.lstat(os.path.join(parent, item)).st_size
+                    stat = os.lstat(os.path.join(parent, item))
                 except OSError:
-                    pass
+                    continue
+                # Allocated blocks, not the apparent size: a preallocated
+                # (sparse) file would otherwise read as complete at once.
+                blocks = getattr(stat, "st_blocks", None)
+                found += stat.st_size if blocks is None else min(stat.st_size, blocks * 512)
         return found
 
     def sample():
@@ -186,8 +192,9 @@ class RepairProgress:
     """
 
     _MARKER = b"SPARKRUN_MODEL_PROGRESS "
+    _READY = b"SPARKRUN_MODEL_ADAPTER_READY"
 
-    def __init__(self, host: str | None, *, clock=None):
+    def __init__(self, host: str | None, *, clock=None, watch=None):
         import threading
         import time
 
@@ -200,6 +207,10 @@ class RepairProgress:
         self.last_event = self.last_log = None
         self.state = (0, 0)
         self._pending = b""
+        # Stall detection for a remote repair: only a growing byte count counts.
+        self.watch = watch
+        # Whether the adapter finished bootstrapping (uv, huggingface_hub).
+        self.ready = False
         # A control-machine repair updates from its sampler thread and its loop.
         self._lock = threading.Lock()
 
@@ -207,6 +218,12 @@ class RepairProgress:
         lines = (self._pending + data).split(b"\n")
         self._pending = lines.pop()[-4096:]
         for line in lines:
+            if line == self._READY:
+                # The download starts now; bootstrap time is not its idle time.
+                self.ready = True
+                if self.watch is not None:
+                    self.watch.touch()
+                continue
             if not line.startswith(self._MARKER):
                 continue
             try:
@@ -216,6 +233,8 @@ class RepairProgress:
             self.update(done, total)
 
     def update(self, done: int, total: int) -> None:
+        if self.watch is not None:
+            self.watch.advance(done)
         with self._lock:
             self.state = (done, total)
             self._emit("running")
@@ -261,9 +280,30 @@ def run_adapter(
     if not (manifest and files):
         result = io.execute(host, script, timeout=90)
     else:
-        progress = RepairProgress(host)
+        # Bounded by progress, not by size: a slow link that keeps
+        # downloading is healthy however long it takes (#324).
+        limits = transfer_timeouts(operation_config())
+        progress = RepairProgress(host, watch=ProgressWatch())
         try:
-            result = io.execute(host, script, timeout=7200, stdout=progress.feed)
+            result = io.execute(
+                host,
+                script,
+                timeout=limits.timeout,
+                stdout=progress.feed,
+                idle_timeout=limits.idle_timeout,
+                watch=progress.watch,
+            )
+        except ModelTransferStalled as exc:
+            progress.finish(False)
+            if not progress.ready:
+                raise ModelArtifactError(
+                    "Hugging Face repair on %s stalled: the download adapter (uv, huggingface_hub) did not start within %ds"
+                    % (host or "control", exc.idle)
+                ) from exc
+            raise ModelArtifactError(
+                "Hugging Face repair on %s stalled: no download progress for %ds (%.2f GiB downloaded)"
+                % (host or "control", exc.idle, exc.transferred / 2**30)
+            ) from exc
         except BaseException:
             progress.finish(False)
             raise
