@@ -284,8 +284,7 @@ def _prepare(options: BuildOptions, *, plan: BuildPlan, sctx, timeline) -> Build
             strict=True,
         )
 
-    resolved = deepcopy(recipe.distribution_config)
-    resolved.resolve(recipe, resolved_container=prepared.head_image or "")
+    resolved = recipe.distribution_config.finalize(recipe, resolved_container=prepared.head_image or "")
     models = (
         tuple(entry.name for entry in resolved.models.entries if entry.name and _resolve_targets(entry.target or [-1], hosts))
         if not skip_model and resolved.models.enabled

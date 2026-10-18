@@ -345,6 +345,29 @@ def test_result_excludes_models_with_no_selected_targets(io):
     assert result.models == ("org/head",)
 
 
+def test_build_result_includes_deduplicated_additions_after_runtime_preparation(io, monkeypatch):
+    from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
+
+    monkeypatch.setattr(
+        VllmDistributedRuntime, "prepare", lambda self, rec, *a, **k: rec.distribution_config.add_model("org/draft", revision="draft-sha")
+    )
+    rec = recipe(
+        distribution_config={
+            "additional_models": [
+                {"name": "{model}", "revision": "target-sha"},
+                {"name": "org/draft", "revision": "draft-sha"},
+                "org/extra",
+                "org/extra",
+                {"name": "org/elsewhere", "target": [5]},
+            ]
+        }
+    )
+    before = deepcopy(rec.distribution_config)
+    result = api.build(options(rec, hosts=("h1",)))
+    assert result.models == ("org/model", "org/draft", "org/extra")
+    assert rec.distribution_config == before
+
+
 def test_build_and_run_options_share_target_fields_and_defaults():
     from dataclasses import fields
 

@@ -112,3 +112,93 @@ def test_missing_required_local_image_prevents_callback_and_model_download(distr
         distribute_from_config(**env.kwargs)
     env.after.assert_not_called()
     env.download.assert_not_called()
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("policy", ["recipe", "prepared"])
+def test_finalized_additions_and_duplicates_reach_both_transports_once(distribution_env, monkeypatch, local, policy):
+    env = distribution_env
+    monkeypatch.setattr("sparkrun.orchestration.distribution.is_local_host", lambda h: local)
+    recipe = Recipe.from_dict(
+        {
+            "model": "org/model",
+            "model_revision": "primary-sha",
+            "runtime": "vllm-distributed",
+            "container": "org/main",
+            "distribution_config": {
+                "additional_models": [
+                    {"name": "{model}", "revision": "primary-sha", "target": [0, 0]},
+                    {"name": "org/draft", "revision": "draft-sha", "target": [0]},
+                    {"name": "org/extra", "target": [0, 0]},
+                    {"name": "org/extra", "target": [-1]},
+                    {"name": "org/extra", "revision": "extra-sha"},
+                    {"name": "org/elsewhere", "target": [1]},
+                ],
+                "containers": {"entries": [{"name": "{container}", "target": [0, 0]}, {"name": "org/main", "target": [-1]}]},
+            },
+        }
+    )
+    recipe.distribution_config.add_model("org/draft", revision="draft-sha")
+    env.kwargs["recipe"] = recipe
+    before = deepcopy(recipe.distribution_config)
+    if policy == "prepared":
+        env.kwargs["container_distribution"] = deepcopy(before.containers)
+        recipe.distribution_config.containers.enabled = False
+        before = deepcopy(recipe.distribution_config)
+
+    distribute_from_config(**env.kwargs)
+
+    expected = [("org/model", "primary-sha"), ("org/draft", "draft-sha"), ("org/extra", None), ("org/extra", "extra-sha")]
+    if local:
+        assert [c.args[0] for c in env.ensure.call_args_list] == ["org/main"]
+        assert [(c.args[0], c.kwargs["revision"]) for c in env.download.call_args_list] == expected
+    else:
+        assert env.remote_images.call_args.args[0] == [("org/main", ["node"])]
+        assert [(c.args[0], c.args[9]) for c in env.remote_model.call_args_list] == expected
+        assert all(c.args[1] == ["node"] for c in env.remote_model.call_args_list)
+    env.after.assert_called_once()
+    assert recipe.distribution_config == before
+    if policy == "prepared":
+        assert len(env.kwargs["container_distribution"].entries) == 2
+        assert env.kwargs["container_distribution"].entries[0].target == [0, 0]
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("disabled", [False, True])
+def test_additional_models_obey_disabled_and_skipped_model_distribution(distribution_env, monkeypatch, local, disabled):
+    from sparkrun.core.recipe import DistributionModelEntry
+
+    env = distribution_env
+    monkeypatch.setattr("sparkrun.orchestration.distribution.is_local_host", lambda h: local)
+    env.recipe.distribution_config.additional_models.append(DistributionModelEntry("org/extra"))
+    if disabled:
+        env.recipe.distribution_config.models.enabled = False
+    else:
+        env.kwargs["skip_model"] = True
+    distribute_from_config(**env.kwargs)
+    env.download.assert_not_called()
+    env.remote_model.assert_not_called()
+    env.after.assert_called_once()
+
+
+def test_cluster_model_duplicates_union_target_hosts(distribution_env, monkeypatch):
+    env = distribution_env
+    monkeypatch.setattr("sparkrun.orchestration.distribution.is_local_host", lambda h: False)
+    env.kwargs.update(
+        recipe=Recipe.from_dict(
+            {
+                "model": "org/model",
+                "runtime": "vllm-distributed",
+                "container": "org/main",
+                "distribution_config": {
+                    "models": {"entries": [{"name": "{model}", "target": [0, 0]}]},
+                    "additional_models": [{"name": "org/model", "target": [1, 0]}],
+                },
+            }
+        ),
+        host_list=["head", "worker"],
+        skip_container=True,
+    )
+    distribute_from_config(**env.kwargs)
+    env.remote_model.assert_called_once()
+    assert env.remote_model.call_args.args[:2] == ("org/model", ["head", "worker"])
