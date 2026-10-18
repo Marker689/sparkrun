@@ -432,6 +432,37 @@ class TestExportCommand:
         assert data["defaults"]["port"] == 9999
         assert data["defaults"]["tensor_parallel"] == 4
 
+    def test_export_running_keeps_the_executor_layer(self, runner, tmp_path, monkeypatch):
+        """``-o entrypoint=''`` at launch reaches executor_config, never ``defaults`` (#323).
+
+        Recorded as ``executor_overrides`` now; a job recorded before the split
+        carries it in ``overrides`` and is moved too.
+        """
+        from sparkrun.core.recipe import Recipe
+
+        recipe_file = tmp_path / "test-export.yaml"
+        recipe_file.write_text(yaml.safe_dump({**_TEST_RECIPE_DATA, "executor_config": {"shm_size": "8g"}}))
+        state = Recipe.load(recipe_file).__getstate__()
+        cluster_id = "sparkrun_aabbccddee66"
+        meta = {
+            "cluster_id": cluster_id,
+            "recipe": _TEST_RECIPE_NAME,
+            "hosts": ["10.0.0.1"],
+            "recipe_state": state,
+            "overrides": {"port": 9999, "ipc": "host"},
+            "executor_overrides": {"entrypoint": ""},
+        }
+        monkeypatch.setattr(
+            "sparkrun.orchestration.job_metadata.load_job_metadata",
+            lambda cid, cache_dir=None: meta if cid == cluster_id else None,
+        )
+
+        result = runner.invoke(main, ["export", "running-recipe", "aabbccddee66"])
+        assert result.exit_code == 0, result.output
+        data = yaml.safe_load(result.output)
+        assert data["executor_config"] == {"shm_size": "8g", "entrypoint": "", "ipc": "host"}
+        assert data["defaults"]["port"] == 9999 and "ipc" not in data["defaults"]
+
     def test_export_running_json(self, runner, tmp_path, monkeypatch):
         """Test export running --json outputs valid JSON."""
         import json

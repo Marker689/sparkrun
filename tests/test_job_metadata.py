@@ -917,3 +917,14 @@ def test_remove_job_metadata_still_protects_foreign_ownership(tmp_path):
     remove_job_metadata(cid, cache_dir=str(tmp_path))
 
     assert path.exists()
+
+
+def test_save_job_metadata_records_the_callers_executor_layer(tmp_path: Path, mock_recipe):
+    """Kept apart from the resolved ``executor_config`` so an export bakes only what was asked for (#323)."""
+    cluster_id = _make_cluster_id("c", "2")
+    save_job_metadata(cluster_id, mock_recipe, ["host-a"], cache_dir=str(tmp_path), executor_overrides={"entrypoint": ""})
+    assert load_job_metadata(cluster_id, cache_dir=str(tmp_path))["executor_overrides"] == {"entrypoint": ""}
+
+    other = _make_cluster_id("d", "3")
+    save_job_metadata(other, mock_recipe, ["host-a"], cache_dir=str(tmp_path))
+    assert "executor_overrides" not in load_job_metadata(other, cache_dir=str(tmp_path))

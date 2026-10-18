@@ -605,11 +605,14 @@ class BenchmarkExecution:
             except Exception:
                 logger.debug("Long-term image resolution failed", exc_info=True)
 
-        declared = recipe.export(overrides=None)
+        # Deployment settings stay out: the hashes key published result series
+        # (a capability list must not split one), and executor_config.volumes
+        # carries host paths that public_recipe_text does not redact.
+        declared = recipe.export(overrides=None, deployment=False)
         if not isinstance(declared, str):
             raise ValueError("Benchmark recipe export must return text when no path is supplied")
         declared_text = public_recipe_text(declared)
-        effective = recipe.to_dict(overrides=overrides, effective=True)
+        effective = recipe.to_dict(overrides=overrides, effective=True, deployment=False)
         # None is explicit unknown here; Recipe.export(None) would reuse the declaration.
         effective["container"] = recipe_container
         text = public_recipe_text(yaml.safe_dump(effective, sort_keys=False))

@@ -160,3 +160,13 @@ def test_cli_realize_writes_plain_yaml_to_stdout(tmp_path, v, planned):
     assert "overrides" not in data
     assert data["metadata"]["realized_for"]["nodes"] == 2
     assert "Realized for" in result.stderr
+
+
+@pytest.mark.usefixtures("idle_occupancy")
+def test_executor_settings_survive_realize(tmp_path, v, planned):
+    """The recipe's own executor_config and the CLI's executor keys both reach the realized recipe (#323)."""
+    import sparkrun.api as api
+
+    data = {**_RECIPE, "executor_config": {"entrypoint": "", "shm_size": "8g"}}
+    realized = api.realize_recipe(_options(tmp_path, data=data, overrides={"shm_size": "16g", "ipc": "host"}), pin=False)
+    assert realized.recipe["executor_config"] == {"entrypoint": "", "shm_size": "16g", "ipc": "host"}

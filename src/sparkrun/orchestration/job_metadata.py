@@ -554,6 +554,7 @@ def save_job_metadata(
     cluster_name: str | None = None,
     ssh_user: str | None = None,
     executor: "Executor | None" = None,
+    executor_overrides: dict | None = None,
     native_resource: dict | None = None,
     placement=None,
     model_cache_claims: list[dict] | None = None,
@@ -568,6 +569,9 @@ def save_job_metadata(
     Args:
         executor: Resolved executor, including its effective connection settings.
             When supplied, takes precedence over recipe executor settings.
+        executor_overrides: The caller's own executor layer (CLI ``-o`` executor
+            keys, ``--executor``), kept apart from the resolved ``executor_config``
+            so an export bakes what was asked for, not every resolved layer.
         native_resource: Executor-owned reference for controller-managed workloads.
             Persisted separately from portable identity; interpreted only by the executor.
         backends: Per-host backend bundles resolved by the launcher.
@@ -773,6 +777,8 @@ def save_job_metadata(
         target = executor.resolve_target(dry_run=True)
         meta["executor_destination_key"] = target.destination_key
         meta["executor_user_scoped"] = target.user_scoped
+    if executor_overrides:
+        meta["executor_overrides"] = dict(executor_overrides)
     if native_resource is not None:
         meta["native_resource"] = dict(native_resource)
 

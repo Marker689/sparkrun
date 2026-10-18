@@ -546,7 +546,7 @@ def run(
         from sparkrun.orchestration.job_metadata import generate_intent_id
 
         try:
-            cluster_def, target = resolve_operation_target(
+            cluster_def, _target = resolve_operation_target(
                 run_options,
                 recipe=recipe,
                 runtime=runtime,
@@ -555,7 +555,10 @@ def run(
             )
         except (ValueError, api.SparkrunError) as error:
             raise click.ClickException(str(error)) from error
-        run_options = replace(run_options, cluster=cluster_def, executor_config={**run_options.executor_overrides(), **target.overrides})
+        # The scoped cluster carries the target's settings; api.run resolves and
+        # merges the target again, so executor_config stays the caller's own
+        # (it is recorded as such in job metadata for later exports).
+        run_options = replace(run_options, cluster=cluster_def)
 
         _match = api.find_running_intent(
             generate_intent_id(recipe, overrides),

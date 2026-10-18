@@ -17,8 +17,8 @@ class RealizedRecipe:
 
     :attr:`recipe` is an ordinary v2 recipe mapping (``Recipe.export`` shape):
     matched ``overrides:`` layers and CLI serve overrides are baked into
-    ``defaults`` / ``env`` / ``container``, and the ``overrides:`` block is
-    gone. Platform tiers (``default_runtime_flags``, ``default_env``) are
+    ``defaults`` / ``env`` / ``container`` (CLI executor settings into
+    ``executor_config``), and the ``overrides:`` block is gone. Platform tiers (``default_runtime_flags``, ``default_env``) are
     **not** baked in: they are the platform's to apply at launch, and a recipe
     restating them is what ``restated-platform-env`` exists to flag.
     """
@@ -84,7 +84,9 @@ def realize_recipe(options: RunOptions, *, pin: bool = True, offline: bool | Non
     run_plan = plan(replace(options, dry_run=False, offline=options.offline if offline is None else offline), sctx=sctx)
     offline = bool(run_plan.offline and run_plan.offline.offline)
     recipe = run_plan.recipe
-    data = recipe.to_dict(overrides=dict(options.overrides or {}) or None, effective=True)
+    data = recipe.to_dict(
+        overrides=dict(options.overrides or {}) or None, effective=True, executor_overrides=options.executor_overrides() or None
+    )
 
     dropped = sorted(selector_only_config_keys(recipe, run_plan.runtime) - set(options.overrides or {}))
     defaults = data.get("defaults")

@@ -286,3 +286,27 @@ def test_executor_target_detaches_nested_connection_settings():
     copy = target.overrides
     copy["connection"]["servers"].append("third")
     assert target.overrides == {"executor": "example", "connection": {"servers": ["first"]}}
+
+
+def test_cli_ensure_leaves_executor_config_the_callers_own(tmp_path, monkeypatch):
+    """``--ensure`` scopes the cluster only: target settings (selector, pid/log dirs,
+    kubeconfig) joining ``executor_config`` would be recorded as the caller's own
+    executor layer and baked into later exports (#323)."""
+    import yaml
+    from click.testing import CliRunner
+    from sparkrun.cli import main
+
+    recipe = tmp_path / "ensure-test.yaml"
+    recipe.write_text(yaml.safe_dump({"model": "test/model", "runtime": "vllm", "container": "test/image"}), encoding="utf-8")
+    seen = []
+
+    def stop_at_plan(options, **kwargs):
+        seen.append(options)
+        raise api.SparkrunError("stop here")
+
+    monkeypatch.setattr(api, "find_running_intent", lambda *a, **kw: None)
+    monkeypatch.setattr(api, "plan", stop_at_plan)
+    result = CliRunner().invoke(main, ["run", str(recipe), "--hosts", "localhost", "--ensure", "-o", "entrypoint="])
+    assert seen, (result.output, result.exception)
+    assert seen[0].executor_config == {"entrypoint": ""}
+    assert seen[0].executor_overrides() == {"entrypoint": ""}

@@ -199,3 +199,181 @@ def test_dry_run_uninstall_does_not_connect(recipe, lab, monkeypatch):
 def test_module_is_console_free():
     source = inspect.getsource(svc)
     assert "import click" not in source and "sys.exit" not in source and "print(" not in source
+
+
+# --- issue #323: executor settings survive into the service recipe ----------------------------
+
+
+def _load(tmp_path, data, name="svc-test"):
+    path = tmp_path / ("%s.yaml" % name)
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    loaded = Recipe.load(path)
+    loaded.resolve()
+    return loaded
+
+
+def _baked(plan):
+    return yaml.safe_load(plan.recipe_yaml)
+
+
+_BASE = {"model": "test/model", "runtime": "vllm", "container": "test/image", "defaults": {"tensor_parallel": 2}}
+
+
+def test_an_empty_entrypoint_reaches_the_service_recipe(tmp_path, lab):
+    """The recipe-level fix for a consuming ENTRYPOINT must survive export, empty string and all."""
+    recipe = _load(tmp_path, {**_BASE, "executor_config": {"entrypoint": "", "shm_size": "16g"}})
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, dry_run=True))
+
+    baked = _baked(plan)
+    assert baked["executor_config"] == {"entrypoint": "", "shm_size": "16g"}
+    assert Recipe(baked).executor_config["entrypoint"] == ""
+
+
+def test_executor_overrides_go_to_executor_config_not_defaults(recipe, lab):
+    """``-o entrypoint=''`` configures the container; in ``defaults`` it would be an unmapped serve flag."""
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, overrides={"entrypoint": "", "port": 9000}, dry_run=True))
+
+    baked = _baked(plan)
+    assert baked["executor_config"] == {"entrypoint": ""}
+    assert baked["defaults"]["port"] == 9000 and "entrypoint" not in baked["defaults"]
+
+
+def test_job_source_bakes_the_recorded_executor_layer(recipe, lab, monkeypatch):
+    """A job launched with ``-o entrypoint=''`` exports a service that launches the same way."""
+    meta = {
+        "recipe_state": recipe.__getstate__(),
+        "overrides": {"port": 9999},
+        "executor_overrides": {"entrypoint": ""},
+        # The resolved config carries every layer; it is not what gets baked.
+        "executor_config": {"entrypoint": "", "auto_remove": True, "user": "1000:1000"},
+        "hosts": ["h2", "h3"],
+        "cluster": "lab",
+    }
+    monkeypatch.setattr("sparkrun.orchestration.job_metadata.load_job_metadata", lambda cid, cache_dir=None: meta)
+    monkeypatch.setattr("sparkrun.api._resolve.resolve_cluster", _resolver_with(lab))
+
+    baked = _baked(svc.plan(svc.SystemdExportOptions(job="sparkrun_aabbccdd", dry_run=True)))
+    assert baked["executor_config"] == {"entrypoint": ""}
+    assert baked["defaults"]["port"] == 9999
+
+
+# --- trust: the baked recipe is a local file on the head node ------------------------------------
+
+
+def _untrusted(tmp_path, data):
+    loaded = _load(tmp_path, data)
+    loaded.source_registry = "third-party"
+    loaded.source_registry_url = "https://example.invalid/recipes.git"
+    return loaded
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"pre_exec": ["echo hi"]}, {"executor_config": {"privileged": True}}],
+    ids=["hooks", "isolation"],
+)
+def test_installing_untrusted_hooks_or_isolation_overrides_needs_trust(tmp_path, lab, extra, monkeypatch):
+    """Preview stays possible (that is how the recipe gets audited); the install is what needs trust."""
+    from sparkrun.api import TrustRejected
+
+    monkeypatch.setattr("sparkrun.orchestration.ssh.run_remote_script", lambda *a, **kw: pytest.fail("refused install connected"))
+    recipe = _untrusted(tmp_path, {**_BASE, **extra})
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, dry_run=True))
+    assert "--trust" in plan.trust_required and set(extra) <= set(_baked(plan))
+    host = svc.SystemdHost(executable="/opt/bin/sparkrun", user_home="/home/ops")
+    with pytest.raises(TrustRejected, match="--trust"):
+        svc.install_files(plan, svc.render(plan, host))
+
+    trusted = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, trust=True, dry_run=True))
+    assert trusted.trust_required is None
+
+
+def test_an_untrusted_recipe_with_only_an_empty_entrypoint_needs_no_trust(tmp_path, lab):
+    recipe = _untrusted(tmp_path, {**_BASE, "executor_config": {"entrypoint": ""}})
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, dry_run=True))
+    assert _baked(plan)["executor_config"] == {"entrypoint": ""} and plan.trust_required is None
+
+
+# --- --pin ----------------------------------------------------------------------------------------
+
+_SHA = "sha256:" + "a" * 64
+_COMMIT = "c" * 40
+
+
+@pytest.fixture
+def resolvers(monkeypatch):
+    from sparkrun.containers import digest as digest_mod
+    from sparkrun.models import revision as revision_mod
+
+    calls = {}
+
+    def record(name, value):
+        def fn(*args, **kwargs):
+            calls.setdefault(name, []).append((args, kwargs))
+            return value
+
+        return fn
+
+    monkeypatch.setattr(digest_mod, "resolve_registry_digest", record("registry", _SHA))
+    monkeypatch.setattr(digest_mod, "resolve_host_digest", record("hosts", _SHA))
+    monkeypatch.setattr(revision_mod, "resolve_hub_commit", record("hub", _COMMIT))
+    monkeypatch.setattr(revision_mod, "resolve_cached_commit", record("cached", _COMMIT))
+    return calls
+
+
+def test_pin_is_off_by_default(recipe, lab, resolvers):
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, dry_run=True))
+    assert plan.pins == () and _baked(plan)["container"] == "test/image"
+    assert "model_revision" not in _baked(plan) and not resolvers
+
+
+def test_pin_resolves_mutable_references_online(recipe, lab, resolvers):
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, dry_run=True))
+
+    baked = _baked(plan)
+    assert baked["container"] == "test/image@" + _SHA
+    assert baked["model_revision"] == _COMMIT
+    assert baked["metadata"]["pinned"]["mode"] == "online"
+    assert {p.field: p.source for p in plan.pins} == {"container": "registry", "model_revision": "hub"}
+    assert "hosts" not in resolvers and "cached" not in resolvers
+
+
+def test_pin_keeps_references_that_are_already_pinned(tmp_path, lab, resolvers):
+    image = "test/image@" + "sha256:" + "f" * 64
+    recipe = _load(tmp_path, {**_BASE, "container": image, "model_revision": "e" * 40})
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, dry_run=True))
+
+    baked = _baked(plan)
+    assert baked["container"] == image and baked["model_revision"] == "e" * 40
+    assert plan.pins == () and not resolvers
+
+
+def test_offline_pin_requires_every_candidate_host(recipe, lab, resolvers):
+    """The service is not placed yet, so any candidate may run it: all of them must agree."""
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, offline=True, dry_run=True))
+
+    assert {p.source for p in plan.pins} == {"hosts"}
+    ((args, kwargs),) = resolvers["hosts"]
+    assert list(args[1]) == ["h1", "h2", "h3", "h4"] and args[2]["ssh_user"] == "ops"
+    assert list(resolvers["cached"][0][0][2]) == ["h1", "h2", "h3", "h4"]
+    assert "registry" not in resolvers and "hub" not in resolvers
+
+
+def test_offline_without_pin_is_refused(recipe, lab):
+    with pytest.raises(SparkrunError, match="pin"):
+        svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, offline=True, dry_run=True))
+
+
+def test_pin_writes_in_a_platform_default_image_only_when_hosts_agree(tmp_path, lab, resolvers, monkeypatch):
+    from sparkrun.core.bootstrap import get_runtime
+
+    recipe = _load(tmp_path, {key: value for key, value in _BASE.items() if key != "container"})
+    runtime_cls = type(get_runtime(recipe.runtime))
+    monkeypatch.setattr(runtime_cls, "resolve_container", lambda self, recipe, host_hardware=None: "vendor/default:1")
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, dry_run=True))
+    assert _baked(plan)["container"] == "vendor/default@" + _SHA
+
+    images = iter(["vendor/a:1", "vendor/b:1", "vendor/a:1", "vendor/a:1"])
+    monkeypatch.setattr(runtime_cls, "resolve_container", lambda self, recipe, host_hardware=None: next(images))
+    with pytest.raises(SparkrunError, match="different images"):
+        svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, dry_run=True))

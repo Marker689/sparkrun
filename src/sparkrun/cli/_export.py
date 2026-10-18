@@ -298,11 +298,15 @@ def export_running(ctx, target, hosts, hosts_file, cluster_name, output_json, sa
     recipe_state = meta.get("recipe_state")
     meta_overrides = meta.get("overrides")
     effective_image = meta.get("effective_container_image")
+    # The caller's executor layer at launch (-o entrypoint='', --executor).
+    executor_overrides = meta.get("executor_overrides")
 
     if recipe_state:
         # Best path: full-fidelity reconstruction
         recipe = Recipe._deserialize(recipe_state)
-        _output_export(recipe, output_json, save_path, overrides=meta_overrides, container_image=effective_image)
+        _output_export(
+            recipe, output_json, save_path, overrides=meta_overrides, container_image=effective_image, executor_overrides=executor_overrides
+        )
         return
 
     # Fallback: load recipe by name from registries
@@ -320,7 +324,9 @@ def export_running(ctx, target, hosts, hosts_file, cluster_name, output_json, sa
 
     if meta_overrides:
         # Good fallback: full overrides dict available
-        _output_export(recipe, output_json, save_path, overrides=meta_overrides, container_image=effective_image)
+        _output_export(
+            recipe, output_json, save_path, overrides=meta_overrides, container_image=effective_image, executor_overrides=executor_overrides
+        )
         return
 
     # Legacy fallback: reconstruct partial overrides from individual metadata fields
@@ -332,20 +338,34 @@ def export_running(ctx, target, hosts, hosts_file, cluster_name, output_json, sa
     if meta.get("served_model_name") is not None:
         legacy_overrides["served_model_name"] = meta["served_model_name"]
 
-    _output_export(recipe, output_json, save_path, overrides=legacy_overrides or None, container_image=effective_image)
+    _output_export(
+        recipe,
+        output_json,
+        save_path,
+        overrides=legacy_overrides or None,
+        container_image=effective_image,
+        executor_overrides=executor_overrides,
+    )
 
 
-def _output_export(recipe, output_json, save_path, overrides=None, container_image=None):
-    """Export recipe to stdout or file with optional overrides baked in."""
+def _output_export(recipe, output_json, save_path, overrides=None, container_image=None, executor_overrides=None):
+    """Export recipe to stdout or file with optional overrides baked in.
+
+    Executor keys among *overrides* (jobs recorded before the split) move to
+    ``executor_config`` rather than reaching ``defaults`` as serve flags.
+    """
+    from sparkrun.core.resolve import split_executor_overrides
+
+    overrides, lifted = split_executor_overrides(overrides)
+    executor_overrides = {**(executor_overrides or {}), **lifted} or None
+    kwargs = {"overrides": overrides or None, "container_image": container_image, "executor_overrides": executor_overrides}
     if save_path is None:
         if output_json:
-            print_json(recipe.to_dict(overrides=overrides, container_image=container_image))
+            print_json(recipe.to_dict(**kwargs))
         else:
-            click.echo(recipe.export(json=False, overrides=overrides, container_image=container_image))
+            click.echo(recipe.export(json=False, **kwargs))
     else:
-        click.echo(
-            "Recipe saved to %s" % recipe.export(path=save_path, json=output_json, overrides=overrides, container_image=container_image)
-        )
+        click.echo("Recipe saved to %s" % recipe.export(path=save_path, json=output_json, **kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +383,19 @@ def _output_export(recipe, output_json, save_path, overrides=None, container_ima
 @click.option("--uninstall", "do_uninstall", is_flag=True, help="Remove service from head node")
 @click.option("--start", is_flag=True, help="Start service after install (implies --install)")
 @click.option("--service-name", default=None, help="Override service name (default: {resource_namespace}-<slug>)")
+@click.option(
+    "--pin",
+    is_flag=True,
+    help="Pin a mutable container tag and model revision (image digest, model commit) so every restart serves the same build",
+)
+@click.option(
+    "--offline/--online",
+    "offline",
+    default=None,
+    help="With --pin: pin what the cluster's hosts already hold instead of asking the registry and the Hub. "
+    "Defaults to the cluster's offline setting.",
+)
+@click.option("--trust", is_flag=True, help="Export an untrusted recipe's hooks and isolation overrides after auditing it")
 @dry_run_option
 @click.pass_context
 def export_systemd(
@@ -384,6 +417,9 @@ def export_systemd(
     do_uninstall,
     start,
     service_name,
+    pin,
+    offline,
+    trust,
     dry_run,
 ):
     """Generate a systemd service for a {app_command} inference workload.
@@ -400,9 +436,19 @@ def export_systemd(
     The service runs against a copy of the cluster (hosts, user, executor,
     transport, scheduler), so placement is decided by run at each start.
 
+    --pin rewrites a mutable image tag as repo@sha256:... and the model
+    revision as a commit (references already pinned are kept), so restarts
+    never pick up a newer build. --offline pins what every cluster host
+    already holds instead of asking the registry and the Hub.
+
+    The baked recipe is trusted on the head node, so a recipe from an
+    untrusted source that runs hooks or overrides container isolation needs
+    --trust.
+
     \b
     Examples:
       {app_command} export systemd qwen3-1.7b --cluster mylab
+      {app_command} export systemd qwen3-1.7b --cluster mylab --pin
       {app_command} export systemd qwen3-1.7b --cluster mylab --install --start
       {app_command} export systemd qwen3-1.7b --cluster mylab --uninstall
       {app_command} export systemd e5f6a7b8 --install
@@ -417,8 +463,13 @@ def export_systemd(
 
     if start:
         do_install = True
+    if offline is not None and not pin:
+        raise click.UsageError("--offline/--online choose where pins come from; they only apply with --pin")
+    if do_uninstall and (pin or trust):
+        raise click.UsageError("--pin and --trust apply to what gets installed, not to --uninstall")
 
     sctx = _get_context(ctx)
+    choices = {"pin": pin, "offline": offline, "trust": trust}
     config = sctx.config
 
     if (cluster_id := _is_cluster_id(target)) is not None:
@@ -427,7 +478,7 @@ def export_systemd(
         if hosts or hosts_file or cluster_name:
             hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx.variables, sctx=sctx)
             source = {"hosts": tuple(hctx.host_list), "cluster": hctx.cluster_name}
-        export_options = svc.SystemdExportOptions(job=cluster_id, service_name=service_name, dry_run=dry_run, **source)
+        export_options = svc.SystemdExportOptions(job=cluster_id, service_name=service_name, dry_run=dry_run, **choices, **source)
     else:
         recipe, _, _ = _load_recipe(config, target, resolve=False)
         extra_kw = {}
@@ -454,6 +505,7 @@ def export_systemd(
             cluster=hctx.cluster_name,
             service_name=service_name,
             dry_run=dry_run,
+            **choices,
         )
 
     try:
@@ -462,10 +514,15 @@ def export_systemd(
         _systemd_error("No job metadata found for '%s'." % target)
     except api.SparkrunError as exc:
         _systemd_error(exc)
+    for pinned in plan.pins:
+        click.echo("Pinned %s: %s -> %s (%s)" % (pinned.field, pinned.before, pinned.after, pinned.source), err=True)
 
     if do_uninstall:
         _do_uninstall(plan)
         return
+    if do_install and plan.trust_required:
+        # Before any bootstrap install on the head node, not only at the file write.
+        _systemd_error(plan.trust_required)
 
     # Rendering needs real deployment paths, but cannot authorize installation.
     host = svc.locate_host(plan)
@@ -522,6 +579,8 @@ def export_systemd(
         click.echo(artifacts.install_script)
         click.echo("--- Install script (sudo) ---")
         click.echo(artifacts.sudo_install_script)
+        if plan.trust_required:
+            click.echo("Note: %s" % plan.trust_required, err=True)
         click.echo("To deploy, re-run with --install")
         return
 

@@ -244,3 +244,31 @@ def test_generate_metadata_unpinned_builder_leaves_raw_container():
     # pinned=False from builder means we don't override recipe_container
     assert meta["recipe"]["container_pinned"] is False
     assert meta["recipe"]["container"] == recipe.container
+
+
+def test_published_recipe_leaves_out_deployment_settings():
+    """Executor settings and capabilities stay out of the published text and its hashes.
+
+    Recipe export gained them for #323; here they would split result series by
+    capability list and publish ``executor_config.volumes`` host paths.
+    """
+    from sparkrun.core.recipe import Recipe
+
+    plain = _make_minimal_recipe()
+    rich = Recipe(
+        {
+            "name": "r",
+            "container": "myimage:latest",
+            "model": "org/model",
+            "runtime": "vllm-distributed",
+            "executor_config": {"volumes": ["/home/someone/data:/data"], "entrypoint": ""},
+            "capabilities": ["tools"],
+        }
+    )
+    rich.source_registry, rich.source_registry_url = "reg", ""
+
+    meta_plain = _make_bench_result_with_launch(plain, ("myimage:latest", False)).generate_metadata()
+    meta_rich = _make_bench_result_with_launch(rich, ("myimage:latest", False)).generate_metadata()
+    assert "/home/someone" not in meta_rich["recipe"]["text"] and "executor_config" not in meta_rich["recipe"]["text"]
+    assert meta_rich["recipe"]["hash"] == meta_plain["recipe"]["hash"]
+    assert meta_rich["recipe"]["effective_hash"] == meta_plain["recipe"]["effective_hash"]

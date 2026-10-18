@@ -24,6 +24,19 @@ scheduler, …), so the service's ``run`` plans at every start exactly as
 scheduler.  Narrowing the hosts here would decide placement once at export
 time (with no status) and again at every start inside that narrowed set —
 the "decide once" trap ``api.plan`` exists to avoid.
+
+**The baked recipe is trusted on the head node** (it is a local file there),
+so installing an untrusted recipe's hooks or isolation overrides needs
+:attr:`SystemdExportOptions.trust`, the same authorization ``run`` asks for.
+:func:`install_files` enforces it (:attr:`SystemdExportPlan.trust_required`);
+previewing and uninstalling never need it.
+
+**Pinning is opt-in** (:attr:`SystemdExportOptions.pin`): a mutable image tag
+or model revision becomes a digest / commit once, at export, so the service
+serves the same build after every restart.  References already immutable are
+kept.  Unlike ``export recipe --realize`` nothing else is decided here: an
+offline pin requires every candidate host to agree, because any of them may
+run the service.
 """
 
 from __future__ import annotations
@@ -35,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 from sparkrun.api._errors import HostsUnreachable, JobNotFound, SparkrunError
 
 if TYPE_CHECKING:
+    from sparkrun.api._pin import Pin
     from sparkrun.core.cluster_manager import ClusterDefinition
     from sparkrun.core.context import SparkrunContext
     from sparkrun.core.recipe import Recipe
@@ -62,6 +76,8 @@ class SystemdExportOptions:
     #: Recipe name/path, or a loaded :class:`~sparkrun.core.recipe.Recipe`.
     recipe: "str | Recipe | None" = None
     #: Override mapping baked into the exported recipe (recipe source only).
+    #: Executor keys (``entrypoint``, ``shm_size``, …) go to its
+    #: ``executor_config``, the rest to ``defaults``.
     overrides: dict[str, Any] = field(default_factory=dict)
     #: A recorded workload's cluster_id: export the recipe, overrides and
     #: image it was launched with.
@@ -72,6 +88,13 @@ class SystemdExportOptions:
     hosts: tuple[str, ...] | None = None
     #: Service slug (default: the recipe's slug).
     service_name: str | None = None
+    #: Authorize an untrusted recipe's hooks and isolation overrides.
+    trust: bool = False
+    #: Pin a mutable container tag and model revision in the baked recipe.
+    pin: bool = False
+    #: With :attr:`pin`: read pins off the hosts instead of the registry and
+    #: the Hub.  ``None`` defers to the cluster's ``offline:`` setting.
+    offline: bool | None = None
     dry_run: bool = False
 
 
@@ -96,6 +119,10 @@ class SystemdExportPlan:
     #: Self-update channel a bootstrap install would use.
     channel: str
     dry_run: bool = False
+    #: What :attr:`SystemdExportOptions.pin` changed (empty without it).
+    pins: "tuple[Pin, ...]" = ()
+    #: Why installing needs :attr:`SystemdExportOptions.trust`; ``None`` when it does not.
+    trust_required: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,14 +158,21 @@ def plan(options: SystemdExportOptions, *, sctx: "SparkrunContext | None" = None
     from sparkrun.api._resolve import resolve_cluster, resolve_cluster_for_job, scope_operation
     from sparkrun.orchestration.systemd_service import unit_path
     from sparkrun.core.application_profile import resource_name
+    from sparkrun.core.resolve import split_executor_overrides
     from sparkrun.utils.env import resolve_ssh_user
     from sparkrun.utils.shell import validate_unix_username
+    from sparkrun.utils.yaml_helpers import LiteralBlockDumper
+
+    if options.offline is not None and not options.pin:
+        raise SparkrunError("offline chooses where pins come from; it only applies with pin")
 
     sctx = resolve_sctx(sctx)
     hosts = list(options.hosts) if options.hosts is not None else None
+    executor_overrides: dict[str, Any] = {}
 
     if options.job is not None and options.recipe is None:
         recipe, overrides, meta = _recipe_from_job(options.job, sctx)
+        executor_overrides = dict(meta.get("executor_overrides") or {})
         if options.cluster is None and hosts is None and meta.get("hosts"):
             # The job's own hosts, reached as the cluster it recorded.
             cluster = resolve_cluster_for_job(None, list(meta["hosts"]), meta=meta, sctx=sctx)
@@ -156,6 +190,11 @@ def plan(options: SystemdExportOptions, *, sctx: "SparkrunContext | None" = None
     if not cluster.hosts:
         raise HostsUnreachable("No hosts provided, no default cluster, and no default hosts configured")
 
+    # ``-o entrypoint=''`` configures the container, not the serve command.
+    overrides, lifted = split_executor_overrides(overrides)
+    executor_overrides.update(lifted)
+    trust_required = _untrusted_reason(recipe, options.trust, sctx)
+
     slug = options.service_name or recipe.slug
     if not _SERVICE_NAME_RE.fullmatch(slug):
         raise SparkrunError("Invalid service name %r: use letters, digits, '.', '_' and '-'" % slug)
@@ -172,6 +211,11 @@ def plan(options: SystemdExportOptions, *, sctx: "SparkrunContext | None" = None
 
     cluster_name = "%s-systemd" % slug
     service_cluster = _service_cluster(cluster, cluster_name, ssh_user)
+
+    data = recipe.to_dict(overrides=overrides or None, executor_overrides=executor_overrides or None)
+    pins: tuple[Pin, ...] = ()
+    if options.pin:
+        pins = _pin_service_recipe(data, recipe, cluster, ssh_kwargs, offline=options.offline, sctx=scoped)
     return SystemdExportPlan(
         recipe=recipe,
         overrides=overrides,
@@ -184,10 +228,12 @@ def plan(options: SystemdExportOptions, *, sctx: "SparkrunContext | None" = None
         head_host=service_cluster.hosts[0],
         ssh_user=ssh_user,
         ssh_kwargs=ssh_kwargs,
-        recipe_yaml=str(recipe.export(overrides=overrides)),
+        recipe_yaml=yaml.dump(data, Dumper=LiteralBlockDumper, indent=2, sort_keys=False, default_flow_style=False),
         cluster_yaml=yaml.safe_dump(_cluster_document(service_cluster), default_flow_style=False),
         channel=scoped.config.self_update_channel,
         dry_run=options.dry_run,
+        pins=pins,
+        trust_required=trust_required,
     )
 
 
@@ -225,8 +271,16 @@ def render(plan: SystemdExportPlan, host: SystemdHost) -> SystemdExportArtifacts
 
 
 def install_files(plan: SystemdExportPlan, artifacts: SystemdExportArtifacts) -> str:
-    """Write the recipe and cluster files on the head node; returns its stdout."""
+    """Write the recipe and cluster files on the head node; returns its stdout.
+
+    Raises:
+        TrustRejected: :attr:`SystemdExportPlan.trust_required` is set.
+    """
+    from sparkrun.api._errors import TrustRejected
     from sparkrun.orchestration.ssh import run_remote_script
+
+    if plan.trust_required:
+        raise TrustRejected(plan.trust_required)
 
     r = run_remote_script(plan.head_host, artifacts.install_script, **plan.ssh_kwargs, dry_run=plan.dry_run)
     if not r.success:
@@ -301,6 +355,64 @@ def _recipe_from_job(cluster_id: str, sctx: "SparkrunContext") -> "tuple[Recipe,
     if meta.get("effective_container_image"):
         recipe.container = meta["effective_container_image"]
     return recipe, dict(meta.get("overrides") or {}), meta
+
+
+def _untrusted_reason(recipe: "Recipe", trust: bool, sctx: "SparkrunContext") -> str | None:
+    """Why baking *recipe* into the head node's local (trusted) recipe file needs trust, or ``None``.
+
+    On the head node the service recipe is a local path, which ``run`` trusts
+    without asking, so installing is where the authorization has to happen.
+    """
+    from sparkrun.core.launcher import recipe_hook_commands, recipe_isolation_overrides, resolve_recipe_trust
+
+    hooks = recipe_hook_commands(recipe)
+    isolation = recipe_isolation_overrides(recipe)
+    if not (hooks or isolation) or resolve_recipe_trust(recipe, trust, sctx=sctx):
+        return None
+    what = ["hooks (%s)" % ", ".join(hooks)] if hooks else []
+    if isolation:
+        what.append("container isolation overrides")
+    return (
+        "Recipe '%s' is not from a trusted source and sets %s. The service runs it as a local recipe on the head "
+        "node, where it would be trusted without asking. Audit the recipe, then install with trust (--trust)."
+        % (getattr(recipe, "qualified_name", None) or recipe.name, " and ".join(what))
+    )
+
+
+def _pin_service_recipe(
+    data: dict[str, Any], recipe: "Recipe", cluster: "ClusterDefinition", ssh_kwargs: dict[str, Any], *, offline: bool | None, sctx
+) -> "tuple[Pin, ...]":
+    """Pin *data* against every candidate host: the service may start on any of them."""
+    from sparkrun.api._pin import PinScope, pin_recipe_data
+    from sparkrun.core.bootstrap import get_runtime
+    from sparkrun.core.cluster_manager import ResolvedClusterConfig
+    from sparkrun.core.offline import resolve_offline
+
+    default_image = None
+    if not data.get("container") and not data.get("containers"):
+        # Written in only when every host agrees: the service is not placed yet.
+        runtime = get_runtime(recipe.runtime, sctx.variables)
+        try:
+            images = {runtime.resolve_container(recipe, host_hardware=cluster.hardware_for(host)) for host in cluster.hosts}
+        except ValueError as exc:  # unprobed hosts under a require-metadata application profile
+            raise SparkrunError("Cannot pin the platform default image: %s" % exc) from exc
+        images.discard(None)
+        if len(images) > 1:
+            raise SparkrunError(
+                "Cannot pin: the recipe names no container and the cluster's hosts default to different images (%s). "
+                "Name the container in the recipe or with --image." % ", ".join(sorted(images))
+            )
+        default_image = next(iter(images), None)
+    local_cache_dir, remote_cache_dir, _mode, _iface = ResolvedClusterConfig.from_definition(cluster).resolve_transfer_config(sctx.config)
+    scope = PinScope(
+        recipe=recipe,
+        hosts=tuple(cluster.hosts),
+        ssh_kwargs=dict(ssh_kwargs),
+        default_image=default_image,
+        cache_dir=remote_cache_dir,
+        local_cache_dir=local_cache_dir,
+    )
+    return pin_recipe_data(data, scope, offline=resolve_offline(offline, cluster).offline, sctx=sctx)
 
 
 def _service_cluster(source: "ClusterDefinition", name: str, ssh_user: str) -> "ClusterDefinition":

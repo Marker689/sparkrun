@@ -367,6 +367,14 @@ system, gateway registry, and execution-strategy extension points shipped in
 
 ### Fixed
 
+- Recipe export keeps `executor`, `executor_config` (including `entrypoint: ""`) and the
+  declared capabilities, so `export systemd`, `export recipe [--realize]` and
+  `export running-recipe` launch the same way the source did (#323). `-o` executor keys
+  (`-o entrypoint=''`) go to `executor_config` rather than `defaults`, and jobs record the
+  caller's executor layer as `executor_overrides` for later exports. `export systemd`
+  now asks for `--trust` before baking an untrusted recipe's hooks or isolation overrides
+  into the head node's local (trusted) recipe file, and gains `--pin` (with
+  `--offline/--online`) to pin a mutable image tag and model revision.
 - `api.materialize` reports the same container env as the launch: it now includes the
   runtime-cache mount and env, and layers the comm env beneath the container env as the
   executor does.

@@ -568,6 +568,8 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
     cluster_def = plan.cluster
     if plan._destination is not None and plan._destination.user_scoped:
         cluster_def = replace(cluster_def, user=plan._destination.ssh_user)
+    # What the caller asked of the executor, before connection settings join it.
+    requested_executor = options.executor_overrides()
     if plan.executor_target is not None:
         options = replace(
             options,
@@ -805,6 +807,7 @@ def run(options: RunOptions, *, sctx: "SparkrunContext | None" = None, plan: Run
         "before_start": None if options.dry_run else _evict_before_start,
         "recipe_fingerprint": plan.recipe_fingerprint,
         "owner": options.owner,
+        "executor_overrides": requested_executor,
         "execution_context": execution_context,
         "execution_strategy": execution_strategy,
         "prepared_execution": prepared_execution,

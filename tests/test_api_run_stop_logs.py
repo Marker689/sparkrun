@@ -1906,3 +1906,16 @@ def test_strategy_must_return_prepared_execution_before_launch(monkeypatch):
         api.run(api.RunOptions(recipe=recipe, hosts=("localhost",), solo=True, dry_run=True))
     strategy.finalize_preparation.assert_called_once()
     launch.assert_not_called()
+
+
+@pytest.mark.usefixtures("unavailable_hardware_probe", "idle_occupancy")
+def test_run_hands_the_callers_executor_layer_to_the_launch():
+    """``-o entrypoint=''`` is recorded apart from resolved executor settings, so a job export can bake it (#323)."""
+    from sparkrun.core.recipe import Recipe
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "vllm", "model": "test/m"})
+    opts = api.RunOptions(recipe=recipe, hosts=("h1",), overrides={"entrypoint": "", "port": 8000})
+    with patch("sparkrun.core.launcher.launch_inference", side_effect=api.SparkrunError("fixture launch failure")) as launch:
+        with pytest.raises(api.SparkrunError, match="fixture launch failure"):
+            api.run(opts)
+    assert launch.call_args.kwargs["executor_overrides"] == {"entrypoint": ""}

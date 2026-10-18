@@ -1197,6 +1197,11 @@ def launch_inference(
     # reproduce it.  ``owner`` tags the component that created the job.
     recipe_fingerprint: str | None = None,
     owner: str | None = None,
+    # The caller's own executor layer (``-o entrypoint=''``, ``--executor``),
+    # recorded in job metadata so an export of the job reproduces it.  Not
+    # read for resolution: ``executor_config`` above carries it, merged with
+    # connection settings the export must not freeze.
+    executor_overrides: dict | None = None,
     # Optional recipe-local execution strategy.  The shared launcher still
     # owns asset preparation and the before_start replacement barrier; only
     # final activation is delegated.
@@ -1946,6 +1951,7 @@ def launch_inference(
                 cluster_name=job_cluster_name,
                 ssh_user=job_ssh_user,
                 executor=executor,
+                executor_overrides=executor_overrides,
                 placement=placement,
                 model_cache_claims=workload_claims(),
                 sctx=sctx,
