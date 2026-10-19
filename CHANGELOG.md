@@ -10,6 +10,15 @@ first tagged release containing them, regardless of their original commit date.
 
 ## [Unreleased]
 
+### Fixed
+
+- On a controller with no `ssh.key`, the setup wizard now verifies key-based SSH with
+  the key it just generated and installed. It re-probed without it, reported every host
+  as "Still failing", and skipped all later setup steps as unreachable.
+- `uvx sparkrun setup install` writes tab-completion for the installed tool instead of
+  the first `sparkrun` on PATH, which under uvx is uvx's throwaway copy in the uv cache.
+  After `uv cache clean`, that broke every new shell.
+
 ## [0.4.1] — 2026-10-19
 
 ### Added
