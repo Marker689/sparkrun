@@ -133,6 +133,33 @@ def test_real_controller_http_error_is_inventory_unavailable(hub_origin):
         manifest.fetch_inventory(ModelArtifactRequest("org/missing", endpoint=endpoint), token=False)
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_file_filters_never_fetch_excluded_weights_or_indexes(hub_origin, tmp_path, capsys, remote):
+    endpoint, requests = hub_origin
+    request = ModelArtifactRequest("org/tiny", endpoint=endpoint, allow_patterns=("*.json",), ignore_patterns=("*.index.json",))
+
+    def adapter(**kwargs):
+        script = acquisition.hub_script(request, str(tmp_path), token=None, **kwargs)
+        program = script.split("<<'SPARKRUN_HUB_ADAPTER'\n", 1)[1].rsplit("\nSPARKRUN_HUB_ADAPTER", 1)[0]
+        exec(compile(program, "remote-adapter", "exec"), {})
+        return json.loads(capsys.readouterr().out.split("SPARKRUN_MODEL_RESULT=", 1)[1])
+
+    inventory = adapter() if remote else manifest.fetch_inventory(request, token=False)
+    assert "weight_map" not in inventory
+    selected = manifest.select_manifest(request, inventory)
+    files = tuple(f.path for f in selected.files)
+    assert files == ("config.json",)
+    if remote:
+        assert adapter(manifest=selected, files=files)["repaired"] == 1
+    else:
+        acquisition.repair_snapshot_files(request.repo, selected.revision, str(tmp_path), endpoint, False, files)
+    snapshot = tmp_path / selected.relative_snapshot
+    assert (snapshot / "config.json").read_bytes() == FILES["config.json"]
+    assert not (snapshot / "model.safetensors").exists()
+    assert not (snapshot / "model.safetensors.index.json").exists()
+    assert not any(path.endswith(("model.safetensors", "model.safetensors.index.json")) for _, path in requests)
+
+
 @pytest.mark.parametrize("model", ["org/tiny", "org/missing"])
 def test_generated_adapter_uses_the_hub_transport(hub_origin, tmp_path, capsys, model):
     endpoint, _ = hub_origin

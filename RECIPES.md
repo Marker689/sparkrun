@@ -98,8 +98,8 @@ This includes the existing skip behavior when `model` is a local path or `cluste
 
 Before distribution, sparkrun resolves templates such as `{model}` and deduplicates the combined configuration:
 
-- Models with the same resolved name **and revision** become one entry. Different revisions, including an unpinned
-  request versus a pinned request, remain distinct. GGUF quantization selectors remain part of the name.
+- Models with the same resolved name, revision, **and file patterns** become one entry. Different revisions, including
+  an unpinned request versus a pinned request, remain distinct. GGUF quantization selectors remain part of the name.
 - Containers with the same resolved image name become one entry.
 - Duplicate entries combine their targets; an all-node request takes precedence. Repeated node indices are removed,
   and entries retain their first-appearance order.
@@ -107,6 +107,38 @@ Before distribution, sparkrun resolves templates such as `{model}` and deduplica
 Recipe export preserves the additional list and keeps implicit default sections implicit. With `include`, the normal
 list-replacement rule applies: a child's `additional_models` replaces the inherited list; `[]` or `null` clears it.
 Omitting the key inherits the base recipe's additions.
+
+#### Download selected files from an auxiliary model
+
+Model mappings in both `models.entries` and `additional_models` accept `allow_patterns` and `ignore_patterns` lists.
+For example, stage configuration and Python files from an upstream model alongside fine-tuned weights:
+
+```yaml
+model: org/finetuned-model
+distribution_config:
+  additional_models:
+    - name: org/original-model
+      revision: upstream-commit-sha
+      allow_patterns: ["*.json", "*.py"]
+      ignore_patterns: ["*.safetensors.index.json", "*.bin.index.json"]
+```
+
+- Patterns are case-sensitive globs matched against repository-relative paths. `*`, `?`, and character classes such
+  as `[ab]` are supported; `*.json` also matches `subdir/config.json`. Quote globs in YAML.
+- Omitted or `null` `allow_patterns` allows all files. With an allow list, a file must match at least one pattern.
+  `ignore_patterns` then removes any matching files; exclusions win. An omitted, `null`, or empty ignore list excludes
+  nothing. An empty allow list or any other selection matching no files fails with an error.
+- Explicit filters replace automatic weight/GGUF file selection for that entry. Only selected files are downloaded,
+  validated, and transferred; matching a weight index does not automatically include its referenced shards. Include
+  every file you need. Existing cached files outside the selection are left in place.
+- Pattern order and repeated patterns do not affect deduplication. Full requests and distinct filtered requests stay
+  separate, so exclusions from one entry cannot discard files required by another. Overlapping requests at the same
+  resolved commit reuse cached files.
+- Filtered requests require an authoritative inventory (online or previously saved for the same selection). They
+  never fall back to an unfiltered repository download, even with legacy cache validation enabled.
+
+Files remain in the upstream repository's normal HF snapshot directory. This stages files only; it does not copy or
+link them into the fine-tuned model's directory.
 
 ### Per-machine images
 

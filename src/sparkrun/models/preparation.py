@@ -25,6 +25,7 @@ from sparkrun.models.artifacts import (
     ModelArtifactRequest,
     ModelInventoryUnavailable,
     ValidatedModelBinding,
+    normalize_file_patterns,
 )
 from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
@@ -150,6 +151,8 @@ def prepare_model(
     revision: str | None = None,
     projector: str | None = None,
     file_selection: str = "auto",
+    allow_patterns: tuple[str, ...] | list[str] | None = None,
+    ignore_patterns: tuple[str, ...] | list[str] | None = None,
     endpoint: str | None = None,
     transfer_mode: str = "local",
     transfer_hosts: list[str] | None = None,
@@ -182,7 +185,13 @@ def prepare_model(
     if worker_transfer_hosts is not None and len(worker_transfer_hosts) != len(hosts) - 1:
         raise ModelArtifactError("worker transfer addresses must align with model workers")
     request = ModelArtifactRequest(
-        model, revision, endpoint or os.environ.get("HF_ENDPOINT", "https://huggingface.co"), projector, file_selection
+        model,
+        revision,
+        endpoint or os.environ.get("HF_ENDPOINT", "https://huggingface.co"),
+        projector,
+        file_selection,
+        normalize_file_patterns(allow_patterns, "allow_patterns"),
+        normalize_file_patterns(ignore_patterns, "ignore_patterns"),
     )
     operation = uuid.uuid4().hex
     ssh = ssh_kwargs or {}
@@ -384,7 +393,12 @@ def prepare_model(
             bindings.append(binding)
             try:
                 ref = request.revision or "main"
-                if not re.fullmatch(r"[0-9a-f]{40}", ref) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ref) and ".." not in ref:
+                if (
+                    not request.has_file_patterns
+                    and not re.fullmatch(r"[0-9a-f]{40}", ref)
+                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ref)
+                    and ".." not in ref
+                ):
                     # Compatibility with HF loaders and offline pin/inspection
                     # tools. Runtime bindings still use the immutable snapshot.
                     io.publish(

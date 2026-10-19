@@ -57,6 +57,8 @@ FIELD_SCHEMAS = {
     "export_files": {"type": "boolean"},
     "extra_docker_opts": {"items": {"maxLength": 4096, "type": "string"}, "maxItems": 512, "minItems": 1, "type": "array"},
     "file_selection": {"enum": ["auto", "all", "safetensors"], "type": "string"},
+    "allow_patterns": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1, "maxLength": 4096}, "maxItems": 512},
+    "ignore_patterns": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1, "maxLength": 4096}, "maxItems": 512},
     "fetch_manifest": {
         "type": "boolean",
         "description": "Consent to origin resolution when manifest is omitted. Offline imports still require a manifest.",

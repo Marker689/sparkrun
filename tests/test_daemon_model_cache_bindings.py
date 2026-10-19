@@ -33,6 +33,19 @@ def test_every_python_parameter_has_a_reviewed_binding(binding):
     assert_parameters_classified(binding, _resolve(binding.target))
 
 
+@pytest.mark.parametrize("operation", ["inspect", "repair", "resolve", "import"])
+@pytest.mark.parametrize("allow", [["*.json", "*.py"], [], None])
+def test_model_cache_request_bindings_preserve_file_patterns(operation, allow, monkeypatch):
+    monkeypatch.setattr("sparkrun.orchestration.primitives.build_ssh_kwargs", lambda config: {})
+    binding = next(b for b in BINDINGS if b.name == "model_cache." + operation)
+    register_core_ops()
+    op = get_daemon_op(binding.name)
+    arguments = {"model": "org/model", "cache_dir": "/cache", "allow_patterns": allow, "ignore_patterns": ["*.index.json"]}
+    request = binding.arguments(check_request(op, arguments), SimpleNamespace(config=SimpleNamespace()))["request"]
+    assert request.allow_patterns == (tuple(allow) if allow is not None else None)
+    assert request.ignore_patterns == ("*.index.json",)
+
+
 def test_new_target_parameter_requires_review_without_becoming_a_wire_input():
     binding = next(b for b in BINDINGS if b.name == "model_cache.delete")
     target = Mock()

@@ -138,7 +138,7 @@ if payload['revision'] is None:
         files.append(dict(path=f.rfilename, size=f.size, checksum_algorithm=algorithm, checksum=checksum))
     result = dict(revision=info.sha, files=files)
     index = next((f for f in info.siblings or () if f.rfilename == 'model.safetensors.index.json'), None)
-    if index is not None and request['file_selection'] != 'all':
+    if index is not None and request['file_selection'] != 'all' and request.get('allow_patterns') is None and not request.get('ignore_patterns'):
         entry = next(f for f in files if f['path'] == index.rfilename)
         result['weight_map'] = read_weight_index(repo, info.sha, request['endpoint'], payload['token'], entry)
 else:

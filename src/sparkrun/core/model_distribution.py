@@ -213,8 +213,52 @@ def record_binding(binding: ValidatedModelBinding) -> None:
         key = binding.model, binding.host
         old = bindings.get(key)
         if old is not None and old.manifest.identity != binding.manifest.identity:
-            raise ModelArtifactError("one host cannot bind the same model name to different artifacts")
+            binding = _merge_filtered_bindings(old, binding)
         bindings[key] = binding
+
+
+def _merge_filtered_bindings(old: ValidatedModelBinding, new: ValidatedModelBinding) -> ValidatedModelBinding:
+    """Combine validated file scopes in one snapshot, never different revisions.
+
+    The union is operation-local: persisted manifests retain their individual
+    selection identities. A union of partial scopes remains marked as filtered.
+    """
+    left, right = old.manifest, new.manifest
+    if not (left.has_file_patterns or right.has_file_patterns) or (left.repo, left.revision, left.endpoint, old.snapshot_path) != (
+        right.repo,
+        right.revision,
+        right.endpoint,
+        new.snapshot_path,
+    ):
+        raise ModelArtifactError("one host cannot bind the same model name to different artifacts")
+    files = {entry.path: entry for entry in left.files}
+    for entry in right.files:
+        if entry.path in files and files[entry.path] != entry:
+            raise ModelArtifactError("filtered model inventories disagree about " + entry.path)
+        files[entry.path] = entry
+    for name in ("weight_path", "projector_path"):
+        a, b = getattr(left, name), getattr(right, name)
+        if a is not None and b is not None and a != b:
+            raise ModelArtifactError("filtered model inventories disagree about " + name)
+    if not left.has_file_patterns and len(files) == len(left.files):
+        return old
+    if not right.has_file_patterns and len(files) == len(right.files):
+        return new
+    manifest = replace(
+        left,
+        selection="file-patterns-v1:union",
+        files=tuple(files[path] for path in sorted(files)),
+        weight_path=left.weight_path or right.weight_path,
+        projector_path=left.projector_path or right.projector_path,
+        weight_files=tuple(sorted(set(left.weight_files) | set(right.weight_files))),
+    )
+    report = replace(
+        new.report,
+        manifest_id=manifest.identity,
+        checked_files=len(files),
+        level="checksum" if old.report.level == new.report.level == "checksum" else "metadata",
+    )
+    return replace(new, manifest=manifest, report=report)
 
 
 def prepared_model(model: str, host: str) -> ValidatedModelBinding | None:

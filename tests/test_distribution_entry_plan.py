@@ -9,6 +9,7 @@ import pytest
 from sparkrun.core.recipe import Recipe
 from sparkrun.orchestration.comm_env import ClusterCommEnv
 from sparkrun.orchestration.distribution import DistributionError, TransferModeResult, distribute_from_config
+from sparkrun.orchestration.distribution import _distribute_single_model
 from sparkrun.orchestration.infiniband import IBDetectionResult
 
 
@@ -202,3 +203,61 @@ def test_cluster_model_duplicates_union_target_hosts(distribution_env, monkeypat
     distribute_from_config(**env.kwargs)
     env.remote_model.assert_called_once()
     assert env.remote_model.call_args.args[:2] == ("org/model", ["head", "worker"])
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("section", ["models", "additional_models"])
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_recipe_file_filters_reach_preparation_and_never_use_unfiltered_fallback(
+    distribution_env, monkeypatch, local, section, unavailable
+):
+    from sparkrun.models.artifacts import ModelInventoryUnavailable
+
+    env = distribution_env
+    entry = {"name": "org/upstream", "allow_patterns": ["*.json", "*.py"], "ignore_patterns": ["*.index.json"]}
+    config = {"models": {"entries": [entry] if section == "models" else []}}
+    if section == "additional_models":
+        config[section] = [entry]
+    recipe = Recipe.from_dict({"model": "org/model", "runtime": "vllm-distributed", "container": "image", "distribution_config": config})
+    env.kwargs.update(recipe=recipe, skip_container=True)
+    monkeypatch.setattr("sparkrun.orchestration.distribution.is_local_host", lambda h: local)
+    monkeypatch.setattr("sparkrun.orchestration.distribution._distribute_single_model", _distribute_single_model)
+    prepare = Mock(side_effect=ModelInventoryUnavailable("unreachable") if unavailable else None)
+    monkeypatch.setattr("sparkrun.models.preparation.prepare_model", prepare)
+    legacy = Mock(side_effect=AssertionError("unfiltered fallback"))
+    for name in ("distribute_model_from_local", "distribute_model_from_head", "distribute_model_per_node"):
+        monkeypatch.setattr("sparkrun.models.distribute." + name, legacy)
+    if unavailable:
+        with pytest.raises(DistributionError, match="inventory"):
+            distribute_from_config(**env.kwargs)
+    else:
+        distribute_from_config(**env.kwargs)
+    prepare.assert_called_once()
+    assert prepare.call_args.args[0] == "org/upstream"
+    assert prepare.call_args.kwargs["allow_patterns"] == ["*.json", "*.py"]
+    assert prepare.call_args.kwargs["ignore_patterns"] == ["*.index.json"]
+    env.download.assert_not_called()
+    legacy.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["local", "push", "delegated", "pull"])
+@pytest.mark.parametrize("patterns", [{"allow_patterns": []}, {"allow_patterns": ["*.json"]}, {"ignore_patterns": ["*.safetensors"]}])
+def test_filtered_inventory_failure_blocks_every_legacy_transfer_mode(monkeypatch, unavailable_model_inventory, mode, patterns):
+    failures = _distribute_single_model(
+        "org/model",
+        ["head", "worker"],
+        ["head", "worker"],
+        "/cache",
+        "/local-cache",
+        mode,
+        None,
+        None,
+        {},
+        None,
+        None,
+        False,
+        True,
+        **patterns,
+    )
+    assert len(failures) == 2
+    assert all("cannot use an unfiltered fallback" in failure.detail for failure in failures)

@@ -30,6 +30,18 @@ def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 
+def normalize_file_patterns(value: object, field: str) -> tuple[str, ...] | None:
+    """Canonicalize a file allow/ignore list without broadening an empty allowlist."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(pattern, str) or not pattern.strip() or "\x00" in pattern for pattern in value
+    ):
+        raise ModelArtifactError("%s must be a list of non-empty glob strings or null" % field)
+    patterns = tuple(sorted(set(value)))
+    return None if field == "ignore_patterns" and not patterns else patterns
+
+
 @dataclass(frozen=True)
 class ModelArtifactRequest:
     model: str
@@ -37,10 +49,14 @@ class ModelArtifactRequest:
     endpoint: str = "https://huggingface.co"
     projector: str | None = None
     file_selection: str = "auto"
+    allow_patterns: tuple[str, ...] | None = None
+    ignore_patterns: tuple[str, ...] | None = None
 
     def __post_init__(self):
         from sparkrun.models.download import parse_gguf_model_spec
 
+        for name in ("allow_patterns", "ignore_patterns"):
+            object.__setattr__(self, name, normalize_file_patterns(getattr(self, name), name))
         if self.file_selection not in {"auto", "all", "safetensors"}:
             raise ModelArtifactError("model file selection must be auto, all or safetensors")
         repo, _ = parse_gguf_model_spec(self.model)
@@ -63,7 +79,20 @@ class ModelArtifactRequest:
 
     @property
     def key(self) -> str:
-        return _digest({**asdict(self), "revision": self.revision or "main", "selection_version": SELECTION_VERSION})
+        data = asdict(self)
+        if not self.has_file_patterns:
+            # Existing unfiltered manifests keep their lookup keys across upgrades.
+            data.pop("allow_patterns")
+            data.pop("ignore_patterns")
+        return _digest({**data, "revision": self.revision or "main", "selection_version": SELECTION_VERSION})
+
+    @property
+    def has_file_patterns(self) -> bool:
+        return self.allow_patterns is not None or self.ignore_patterns is not None
+
+    @property
+    def pattern_selection(self) -> str:
+        return "file-patterns-v1:" + _digest({"allow_patterns": self.allow_patterns, "ignore_patterns": self.ignore_patterns})
 
     @property
     def repo(self) -> str:
@@ -138,6 +167,10 @@ class ModelArtifactManifest:
                 raise ModelArtifactError("selected runtime file is missing from the manifest")
         if self.provenance not in {"huggingface-model-info", "operator-import"}:
             raise ModelArtifactError("unsupported manifest provenance")
+
+    @property
+    def has_file_patterns(self) -> bool:
+        return self.selection.startswith("file-patterns-v1:")
 
     @property
     def identity(self) -> str:

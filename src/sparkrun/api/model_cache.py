@@ -181,6 +181,8 @@ def repair_model(
         revision=request.revision,
         projector=request.projector,
         file_selection=request.file_selection,
+        allow_patterns=request.allow_patterns,
+        ignore_patterns=request.ignore_patterns,
         endpoint=request.endpoint,
         transfer_mode=transfer_mode,
         checksums=checksums,

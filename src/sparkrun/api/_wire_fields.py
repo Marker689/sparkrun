@@ -503,7 +503,15 @@ DTO_FIELDS = {
         "compute_capability",
     ],
     "sparkrun.core.hardware.HostHardware": ["accelerators", "fingerprint", "notes", "ib_info", "driver_versions", "source"],
-    "sparkrun.models.artifacts.ModelArtifactRequest": ["model", "revision", "endpoint", "projector", "file_selection"],
+    "sparkrun.models.artifacts.ModelArtifactRequest": [
+        "model",
+        "revision",
+        "endpoint",
+        "projector",
+        "file_selection",
+        "allow_patterns",
+        "ignore_patterns",
+    ],
     "sparkrun.models.artifacts.ModelArtifactFile": ["path", "size", "checksum_algorithm", "checksum"],
     "sparkrun.models.artifacts.ModelArtifactManifest": [
         "repo",

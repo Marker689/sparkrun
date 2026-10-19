@@ -1011,6 +1011,8 @@ def distribute_from_config(
                         dry_run,
                         offline=offline,
                         projector=recipe.runtime_config.get("mmproj") if mn == recipe.model else None,
+                        allow_patterns=entry.allow_patterns,
+                        ignore_patterns=entry.ignore_patterns,
                     )
                     if prepared is not None:
                         if prepared:
@@ -1150,6 +1152,8 @@ def distribute_from_config(
                         prefs=prefs,
                         offline=offline,
                         projector=recipe.runtime_config.get("mmproj") if entry.name == recipe.model else None,
+                        allow_patterns=entry.allow_patterns,
+                        ignore_patterns=entry.ignore_patterns,
                     )
             if mdl_failed:
                 from sparkrun.orchestration.transfer import present_and_raise_transfer_failure
@@ -1406,6 +1410,8 @@ def _prepare_manifest_model(
     offline=False,
     auto_delegated=False,
     projector=None,
+    allow_patterns=None,
+    ignore_patterns=None,
 ):
     """Use manifest preparation in every policy; None is a compatibility fallback."""
     from sparkrun.core.model_distribution import operation_config, validation_policy
@@ -1428,6 +1434,8 @@ def _prepare_manifest_model(
             revision=revision,
             projector=projector,
             file_selection=selection,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
             transfer_mode=transfer_mode,
             transfer_hosts=transfer_hosts,
             worker_transfer_hosts=worker_transfer_hosts,
@@ -1441,13 +1449,16 @@ def _prepare_manifest_model(
             allow_cached_inventory=policy == "legacy",
         )
     except ModelInventoryUnavailable as exc:
-        if policy == "legacy":
+        if policy == "legacy" and allow_patterns is None and not ignore_patterns:
             from sparkrun.models.usage import protect_unverified
 
             protect_unverified(model, targets, cache_dir, ssh_kwargs=ssh_kwargs)
             logger.warning("Model %s is unverified: %s; using existing cache/download checks (legacy compatibility)", model, exc)
             return None
-        return [TransferFailure(host, "model inventory unavailable", str(exc)) for host in targets]
+        detail = str(exc)
+        if allow_patterns is not None or ignore_patterns:
+            detail += "; filtered model requests require an authoritative inventory and cannot use an unfiltered fallback"
+        return [TransferFailure(host, "model inventory unavailable", detail) for host in targets]
     except ModelArtifactError as exc:
         return [TransferFailure(host, "model preparation failed", str(exc)) for host in targets]
     return []
@@ -1470,6 +1481,8 @@ def _distribute_single_model(
     prefs: ModelDistributionPrefs | None = None,
     offline: bool = False,
     projector: str | None = None,
+    allow_patterns: list[str] | None = None,
+    ignore_patterns: list[str] | None = None,
 ) -> list["TransferFailure"]:
     """Distribute a single model to a subset of hosts.
 
@@ -1510,6 +1523,8 @@ def _distribute_single_model(
         offline=offline,
         auto_delegated=auto_delegated,
         projector=projector,
+        allow_patterns=allow_patterns,
+        ignore_patterns=ignore_patterns,
     )
     if prepared is not None:
         return prepared

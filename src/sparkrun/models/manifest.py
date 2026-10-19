@@ -27,6 +27,18 @@ def select_manifest(request: ModelArtifactRequest, inventory: dict) -> ModelArti
     if request.revision and re.fullmatch(r"[0-9a-f]{40}", request.revision) and revision != request.revision:
         raise ModelArtifactError("Hub returned a different revision than the requested commit")
     files = [ModelArtifactFile(**entry) for entry in inventory["files"]]
+    if request.has_file_patterns:
+        files = [
+            entry
+            for entry in files
+            if (request.allow_patterns is None or any(fnmatchcase(entry.path, pattern) for pattern in request.allow_patterns))
+            and not any(fnmatchcase(entry.path, pattern) for pattern in request.ignore_patterns or ())
+        ]
+        if not files:
+            raise ModelArtifactError("model file patterns select no files in " + request.repo)
+        return ModelArtifactManifest(
+            request.repo, revision, request.endpoint, request.pattern_selection, tuple(sorted(files, key=lambda entry: entry.path))
+        )
     weight, projector = None, None
     weight_files: tuple[str, ...] = ()
     selection = "full-snapshot-v1"
@@ -123,7 +135,7 @@ def fetch_inventory(request: ModelArtifactRequest, *, token: str | None = None, 
         raise ModelInventoryUnavailable("Hugging Face inventory is unavailable for " + request.repo) from exc
     result = inventory_from_info(info)
     index = next((f for f in info.siblings or () if f.rfilename == "model.safetensors.index.json"), None)
-    if index is not None and request.file_selection != "all":
+    if index is not None and request.file_selection != "all" and not request.has_file_patterns:
         entry = next(f for f in result["files"] if f["path"] == index.rfilename)
         try:
             result["weight_map"] = read_weight_index(request.repo, info.sha, request.endpoint, token, entry)
@@ -201,6 +213,10 @@ def check_request(manifest: ModelArtifactManifest, request: ModelArtifactRequest
         raise ModelArtifactError("saved manifest does not match the requested repository/endpoint")
     if request.revision and re.fullmatch(r"[0-9a-f]{40}", request.revision) and manifest.revision != request.revision:
         raise ModelArtifactError("saved manifest does not match the requested commit")
+    if manifest.has_file_patterns != request.has_file_patterns or (
+        request.has_file_patterns and manifest.selection != request.pattern_selection
+    ):
+        raise ModelArtifactError("saved manifest does not match the requested file patterns")
     # Re-run selection against the recorded inventory. This catches wrong quant
     # or projector imports without treating observed cache contents as truth.
     selected = select_manifest(
@@ -217,3 +233,5 @@ def check_request(manifest: ModelArtifactManifest, request: ModelArtifactRequest
         manifest.projector_path,
     ):
         raise ModelArtifactError("saved manifest does not match the requested selection")
+    if request.has_file_patterns and selected.files != manifest.files:
+        raise ModelArtifactError("saved manifest contains files outside the requested file patterns")

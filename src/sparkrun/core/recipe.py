@@ -144,6 +144,25 @@ class DistributionModelEntry:
     target: list[int] = field(default_factory=list)
     """Node indices to distribute to. ``[-1]`` means all nodes."""
     revision: str | None = None
+    allow_patterns: list[str] | None = None
+    ignore_patterns: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        from sparkrun.models.artifacts import normalize_file_patterns, ModelArtifactError
+
+        try:
+            for name in ("allow_patterns", "ignore_patterns"):
+                value = normalize_file_patterns(getattr(self, name), name)
+                setattr(self, name, list(value) if value is not None else None)
+        except ModelArtifactError as error:
+            raise RecipeError("distribution model %r: %s" % (self.name, error)) from error
+
+    @property
+    def pattern_key(self) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+        return (
+            tuple(self.allow_patterns) if self.allow_patterns is not None else None,
+            tuple(self.ignore_patterns) if self.ignore_patterns is not None else None,
+        )
 
 
 @dataclass
@@ -221,6 +240,8 @@ class DistributionConfig:
                 name=entry["name"],
                 target=list(entry.get("target", [])),
                 revision=entry.get("revision"),
+                allow_patterns=entry.get("allow_patterns"),
+                ignore_patterns=entry.get("ignore_patterns"),
             )
 
         def container_entry_from_dict(entry: dict[str, Any]) -> DistributionContainerEntry:
@@ -266,11 +287,19 @@ class DistributionConfig:
         and provenance flags for resuming the same operation.
         """
         data: dict[str, Any] = {}
+
+        def export_entry(entry):
+            return {
+                key: value
+                for key, value in dataclass_asdict(entry).items()
+                if value is not None or key not in {"allow_patterns", "ignore_patterns"}
+            }
+
         for kind, resource in (("models", self.models), ("containers", self.containers)):
             if resource.explicit:
-                data[kind] = {"enabled": resource.enabled, "entries": [dataclass_asdict(entry) for entry in resource.entries]}
+                data[kind] = {"enabled": resource.enabled, "entries": [export_entry(entry) for entry in resource.entries]}
         if self.additional_models:
-            data["additional_models"] = [dataclass_asdict(entry) for entry in self.additional_models]
+            data["additional_models"] = [export_entry(entry) for entry in self.additional_models]
         return data
 
     def add_model(self, model: str, revision: str | None = None):
@@ -283,7 +312,7 @@ class DistributionConfig:
         """
         # scan through existing models and make sure that we don't add a duplicate
         for existing_model in self.models.entries:
-            if existing_model.name == model:
+            if existing_model.name == model and existing_model.pattern_key == (None, None):
                 # A later caller with a pin outranks an earlier unpinned add:
                 # dropping it would fetch the model unpinned and silently
                 # discard the revision the recipe asked for.
@@ -335,9 +364,9 @@ class DistributionConfig:
     ) -> "DistributionConfig":
         """Return an operation-local, resolved and deduplicated configuration.
 
-        Call after runtime/plugin preparation. Pins are part of model identity:
-        an unpinned request and a pinned request remain distinct. Duplicate
-        requests combine their targets and retain first-appearance ordering.
+        Call after runtime/plugin preparation. Pins and file patterns are part
+        of model identity: different revisions or selections remain distinct.
+        Duplicate requests combine targets and retain first-appearance ordering.
         Neither the recipe nor a prepared container policy is mutated.
         """
         self.validate()
@@ -352,7 +381,9 @@ class DistributionConfig:
         if resolved_container is not None:
             for entry in resolved.containers.entries:
                 entry.name = entry.name or resolved_container
-        resolved.models.entries = _deduplicate_distribution_entries(resolved.models.entries, lambda entry: (entry.name, entry.revision))
+        resolved.models.entries = _deduplicate_distribution_entries(
+            resolved.models.entries, lambda entry: (entry.name, entry.revision, entry.pattern_key)
+        )
         resolved.containers.entries = _deduplicate_distribution_entries(resolved.containers.entries, lambda entry: entry.name)
         return resolved
 
@@ -387,7 +418,13 @@ def _parse_additional_models(raw: Any) -> list[DistributionModelEntry]:
         elif isinstance(value, str):
             entry = DistributionModelEntry(name=value)
         elif isinstance(value, dict):
-            entry = DistributionModelEntry(name=value.get("name", ""), target=value.get("target", []), revision=value.get("revision"))
+            entry = DistributionModelEntry(
+                name=value.get("name", ""),
+                target=value.get("target", []),
+                revision=value.get("revision"),
+                allow_patterns=value.get("allow_patterns"),
+                ignore_patterns=value.get("ignore_patterns"),
+            )
         else:
             raise RecipeError("%s must be a model name or an entry mapping" % path)
         if not isinstance(entry.name, str) or not entry.name.strip():
@@ -465,6 +502,8 @@ def _parse_distribution_config(data: dict[str, Any]) -> DistributionConfig:
                         name=e.get("name", ""),
                         target=e.get("target", [-1]),
                         revision=e.get("revision"),
+                        allow_patterns=e.get("allow_patterns"),
+                        ignore_patterns=e.get("ignore_patterns"),
                     )
                 )
             elif isinstance(e, str):

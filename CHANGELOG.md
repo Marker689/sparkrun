@@ -12,6 +12,11 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Added
 
+- Model entries in `distribution_config.models.entries` and `additional_models`
+  accept `allow_patterns` and `ignore_patterns` globs, allowing upstream config
+  and Python files to be staged without weights. Filters apply to downloads,
+  validation, and transfers, with distinct cache identities and no unfiltered
+  fallback. Deduplication includes file patterns and combines matching targets.
 - Recipes accept `distribution_config.additional_models` to stage auxiliary models
   alongside default and runtime-added models. Final distribution deduplicates models
   by resolved name and revision, containers by image name, and combines their targets.

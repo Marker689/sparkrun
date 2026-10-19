@@ -31,6 +31,68 @@ def _names(rc):
     return [e.name for e in rc.entries]
 
 
+@pytest.mark.parametrize("section", ["models", "additional_models"])
+def test_file_patterns_survive_export_and_state_roundtrip(section):
+    entry = {
+        "name": "org/upstream",
+        "revision": "upstream-sha",
+        "allow_patterns": ["*.py", "*.json", "*.json"],
+        "ignore_patterns": ["*.index.json"],
+    }
+    config = {section: {"entries": [entry]} if section == "models" else [entry]}
+    recipe = _recipe(config)
+    for restored in (recipe, Recipe._deserialize(recipe.__getstate__())):
+        entries = restored.distribution_config.finalize(restored).models.entries
+        upstream = next(e for e in entries if e.name == "org/upstream")
+        assert upstream.allow_patterns == ["*.json", "*.py"]
+        assert upstream.ignore_patterns == ["*.index.json"]
+        assert upstream.revision == "upstream-sha"
+    exported = recipe.distribution_config.to_recipe_dict()
+    assert _recipe(exported).distribution_config.to_recipe_dict() == exported
+    exported_entry = exported[section]["entries"][0] if section == "models" else exported[section][0]
+    assert exported_entry["allow_patterns"] == ["*.json", "*.py"]
+    assert exported_entry["ignore_patterns"] == ["*.index.json"]
+
+
+@pytest.mark.parametrize("section", ["models", "additional_models"])
+@pytest.mark.parametrize("field", ["allow_patterns", "ignore_patterns"])
+@pytest.mark.parametrize("value", ["*.json", True, [None], [""], [" "]])
+def test_recipe_rejects_invalid_file_patterns(section, field, value):
+    from sparkrun.core.recipe import RecipeError
+
+    entry = {"name": "org/upstream", field: value}
+    with pytest.raises(RecipeError, match=field):
+        _recipe({section: {"entries": [entry]} if section == "models" else [entry]})
+
+
+def test_dedup_preserves_distinct_scopes_and_unions_targets_only_for_identical_patterns():
+    recipe = _recipe(
+        {
+            "models": {"entries": [{"name": "org/upstream", "target": [0], "allow_patterns": ["*.py", "*.json"]}]},
+            "additional_models": [
+                {"name": "org/upstream", "target": [1], "allow_patterns": ["*.json", "*.py", "*.py"]},
+                {"name": "org/upstream", "allow_patterns": ["*.json"]},
+                {"name": "org/upstream", "allow_patterns": ["*.json"], "ignore_patterns": ["*.index.json"]},
+                {"name": "org/upstream", "allow_patterns": []},
+                {"name": "org/upstream"},
+                {"name": "org/upstream", "allow_patterns": None, "ignore_patterns": []},
+            ],
+        }
+    )
+    entries = recipe.distribution_config.finalize(recipe).models.entries
+    assert len(entries) == 5
+    assert entries[0].target == [0, 1]
+    assert [e.allow_patterns for e in entries] == [["*.json", "*.py"], ["*.json"], ["*.json"], [], None]
+    assert entries[2].ignore_patterns == ["*.index.json"]
+
+
+def test_runtime_full_request_does_not_upgrade_or_replace_filtered_entry():
+    recipe = _recipe({"models": {"entries": [{"name": "org/upstream", "allow_patterns": ["*.json"]}]}})
+    recipe.distribution_config.add_model("org/upstream", revision="runtime-pin")
+    entries = recipe.distribution_config.finalize(recipe).models.entries
+    assert [(e.revision, e.allow_patterns) for e in entries] == [(None, ["*.json"]), ("runtime-pin", None)]
+
+
 def test_no_block_uses_default_both():
     dc = _recipe().distribution_config
     assert _names(dc.models) == ["{model}"]

@@ -48,6 +48,9 @@ Every policy rejects invalid manifests and requires repair or failure for known
 missing/damaged files. Repair, transport and workload access failures never
 downgrade to the old checks. Selecting a model provider requires the strict
 inventory contract even if the configured validation policy is `legacy`.
+Explicit per-model file filters also require inventory in every policy: a saved
+manifest for the same selection may be reused, but the unfiltered compatibility
+fallback is disabled.
 
 Named clusters can override those settings without changing global configuration:
 
@@ -73,6 +76,24 @@ or permissions. Permission failures fail preparation rather than triggering a
 large redownload under a different identity.
 
 ## Select files without redundant weights
+
+Recipe entries in `distribution_config.models.entries` and `additional_models`
+can specify `allow_patterns` and `ignore_patterns` to stage an explicit subset,
+including ancillary files without weights. See the [recipe example](../RECIPES.md#download-selected-files-from-an-auxiliary-model).
+These filters replace automatic selection for that entry, apply to acquisition
+and every transfer leg, and do not implicitly fetch weight indexes or shards.
+An empty selection fails. Unselected files already in a snapshot remain untouched.
+
+Filtered requests have distinct lookup keys and manifest identities. A filtered
+manifest cannot validate a full request or a different selection. The same
+selection can be reused offline, including at its resolved commit. Partial
+preparation does not publish HF branch refs such as `refs/main`; use its validated
+snapshot path. A full request still checks its own expected inventory, even when
+some files were staged by a previous filtered request.
+
+The Python `ModelArtifactRequest` and daemon model-cache resolve, inspect,
+import, and repair operations accept the same `allow_patterns` / `ignore_patterns`
+fields. Pass the same patterns when inspecting or repairing a filtered cache.
 
 With inventory available, the default `auto` selection reads the root
 `model.safetensors.index.json` at the resolved commit and
