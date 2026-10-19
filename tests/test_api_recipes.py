@@ -220,8 +220,7 @@ class TestUniqueNames:
     def test_same_stem_variants_within_a_registry_are_kept(self, catalog):
         """Sibling dirs holding same-stem variants are different recipes.
 
-        They share a qualified name (built from the file stem), so they must
-        not be mistaken for the same recipe surfacing twice.
+        Their catalog names include enough path context to select either one.
         """
         _write_recipe(catalog / "community" / "recipes" / "4x-cluster", "shared-recipe", model="Qwen/Qwen3-8B", min_nodes=4)
 
@@ -230,8 +229,8 @@ class TestUniqueNames:
         assert {r.min_nodes for r in results} == {2, 4}
         assert len({r.path for r in results}) == 2
 
-        # ...and `list`'s unambiguous-name view still collapses them.
-        assert len(search_recipes("shared-recipe", registry="community", unique_names=True)) == 1
+        assert {r.name for r in results} == {"@community/shared-recipe", "@community/4x-cluster/shared-recipe"}
+        assert len(search_recipes("shared-recipe", registry="community", unique_names=True)) == 2
 
 
 class TestLocalRecipes:

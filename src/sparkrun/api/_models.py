@@ -672,10 +672,10 @@ class RecipeSummary:
     """
 
     name: str
-    """Qualified name — ``@registry/stem`` for a registry recipe, the bare
-    file stem for one discovered in the working directory."""
+    """Qualified catalog name: ``@registry/stem``, with the full relative
+    path when stems collide within that registry. Local recipes use the stem."""
     file: str
-    """File stem, i.e. the name that can be typed unqualified."""
+    """File stem (or format-defined name); use ``name`` to distinguish variants."""
     path: str
     model: str = ""
     runtime: str = ""

@@ -18,6 +18,9 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Fixed
 
+- Recipe catalogs disambiguate same-stem variants within a registry using their
+  full relative paths. Listing, detail views, and shell completion preserve these
+  choices; unique recipes keep their short names, including under search filters.
 - Recipe listings and search read `metadata.description`, including inherited
   multiline descriptions, so the monitor picker no longer shows "no description"
   for those recipes.
