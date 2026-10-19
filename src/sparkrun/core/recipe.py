@@ -31,6 +31,7 @@ from sparkrun.utils.text import (
 )
 
 if TYPE_CHECKING:
+    from sparkrun.orchestration.hooks import HookEntry
     from sparkrun.core.recipe_overrides import OverrideResolution
     from sparkrun.core.registry import RegistryManager
     from sparkrun.models.vram import VRAMEstimate
@@ -1414,9 +1415,9 @@ class Recipe:
 
         # Lifecycle hooks are lists. Tolerate a scalar as one command, while
         # validation advises the author to wrap it in a list.
-        self.pre_exec: list[str | dict[str, str]] = coerce_command_list(data.get("pre_exec", []))
-        self.post_exec: list[str] = coerce_command_list(data.get("post_exec", []))
-        self.post_commands: list[str] = coerce_command_list(data.get("post_commands", []))
+        self.pre_exec: list[HookEntry] = coerce_command_list(data.get("pre_exec", []))
+        self.post_exec: list[HookEntry] = coerce_command_list(data.get("post_exec", []))
+        self.post_commands: list[HookEntry] = coerce_command_list(data.get("post_commands", []))
         self.stop_after_post: bool = bool(data.get("stop_after_post", False))
 
         # Mods (generic, builder-agnostic): list of references resolved to

@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from _hub_download_stub import stub_hub_download
 from sparkrun.core.model_distribution import ModelTransferResult
 from sparkrun.core import model_distribution
 from sparkrun.models import acquisition, disk_space, preparation
@@ -148,21 +149,27 @@ def test_unreadable_capacity_is_not_treated_as_room(output):
 
 
 @pytest.mark.parametrize(
-    "error", [OSError(errno.ENOSPC, "full"), RuntimeError("File reconstruction error: IO Error: No space left on device (os error 28)")]
+    "error,reason",
+    [
+        (OSError(errno.ENOSPC, "full"), "out of disk space"),
+        (OSError(getattr(errno, "EDQUOT", 122), "quota"), "disk quota exceeded"),
+        (RuntimeError("File reconstruction error: IO Error: No space left on device (os error 28)"), "out of disk space"),
+    ],
 )
-def test_local_download_disk_full_is_classified_and_staging_is_removed(cluster, monkeypatch, error):
+def test_local_download_disk_full_is_classified_and_staging_is_removed(cluster, monkeypatch, error, reason):
     roots, _ = cluster
     snapshot = cache(roots[None], artifact())
     (snapshot / "tokenizer.json").unlink()
 
-    def download(*a, **kw):
+    stub_hub_download(
+        monkeypatch,
+        f"""
         from pathlib import Path
-
-        (Path(kw["local_dir"]) / "partial").write_bytes(b"partial")
-        raise error
-
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
-    with pytest.raises(ModelDiskSpaceError, match="out of disk space on control"):
+        (Path(kwargs['local_dir']) / 'partial').write_bytes(b'partial')
+        raise {error!r}
+    """,
+    )
+    with pytest.raises(ModelDiskSpaceError, match=reason + " on control"):
         preparation.prepare_model("org/model", ["worker"], cache_dir="/hf", manifest=artifact())
     assert (snapshot / "model.safetensors").read_bytes() == DATA["model.safetensors"]
     assert not list(snapshot.parent.glob(".sparkrun-repair-*"))

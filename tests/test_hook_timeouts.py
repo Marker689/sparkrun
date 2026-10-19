@@ -108,6 +108,8 @@ def test_valid_command_entries(entry):
         ({"command": ["a"]}, "non-empty string"),
         ({"copy": "/a", "command": "x"}, "both 'copy' and 'command'"),
         ({"copy": "/a", "timeout": 5}, "unknown key"),
+        ({"copy": 123}, "non-empty string"),
+        ({"copy": "/a", "dest": []}, "non-empty string"),
         ({"cmd": "x"}, "no 'command' or 'copy' key"),
         (42, "string or a mapping"),
     ],
@@ -306,6 +308,15 @@ def test_control_command_timeout_kills_the_process_group(tmp_path):
     assert rc is None
     assert time.monotonic() - start < 10
     assert _wait_absent(marker, 2.5), "a backgrounded post_command outlived the timeout"
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups")
+def test_control_timeout_kills_term_ignoring_child_after_pipes_close(tmp_path):
+    marker = tmp_path / "late"
+    command = "bash -c 'trap \"\" TERM; sleep 2; touch %s' >/dev/null 2>&1 & wait" % marker
+    rc, _ = hooks._run_control_command(command, env=dict(os.environ), timeout_s=0.5)
+    assert rc is None
+    assert _wait_absent(marker, 2.5), "a redirected child survived the shell and timeout"
 
 
 def test_post_commands_timeout_is_reported(tmp_path, monkeypatch):

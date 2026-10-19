@@ -348,6 +348,35 @@ def test_pin_keeps_references_that_are_already_pinned(tmp_path, lab, resolvers):
     assert plan.pins == () and not resolvers
 
 
+@pytest.mark.parametrize("offline", [False, True])
+def test_pin_preserves_conditions_and_pins_every_override_image(tmp_path, lab, resolvers, offline):
+    from sparkrun.core.recipe_overrides import OverrideContext, apply_recipe_override_layers
+
+    pinned = "test/pinned@sha256:" + "f" * 64
+    overrides = [
+        {"when": {"nodes": 1}, "container": "test/solo:latest"},
+        {"when": {"nodes": 2}, "container": "test/pair:latest"},
+        {"when": {"nodes": 3}, "container": pinned},
+        {"when": {"nodes": 4}, "defaults": {"gpu_memory_utilization": 0.8}},
+    ]
+    recipe = _load(tmp_path, {**_BASE, "overrides": overrides})
+    plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, offline=offline, dry_run=True))
+    baked = _baked(plan)
+    expected = ["test/solo@" + _SHA, "test/pair@" + _SHA, pinned, baked["container"]]
+    for nodes, image in enumerate(expected, 1):
+        restarted = Recipe.from_dict(baked)
+        apply_recipe_override_layers(restarted, OverrideContext(shape={"nodes": nodes}))
+        assert restarted.container == image
+    assert [o["when"] for o in baked["overrides"]] == [o["when"] for o in overrides]
+    assert baked["overrides"][3]["defaults"] == overrides[3]["defaults"]
+    assert {p.field for p in plan.pins} == {"container", "model_revision", "overrides[0].container", "overrides[1].container"}
+    calls = resolvers["hosts" if offline else "registry"]
+    assert {args[0] for args, _ in calls} == {_BASE["container"], "test/solo:latest", "test/pair:latest"}
+    if offline:
+        assert all(list(args[1]) == lab.hosts for args, _ in calls)
+        assert "registry" not in resolvers
+
+
 def test_offline_pin_requires_every_candidate_host(recipe, lab, resolvers):
     """The service is not placed yet, so any candidate may run it: all of them must agree."""
     plan = svc.plan(svc.SystemdExportOptions(recipe=recipe, cluster=lab, pin=True, offline=True, dry_run=True))

@@ -1,12 +1,14 @@
 """A model variant must preserve its base recipe's weights and runtime artifacts."""
 
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 
 import pytest
 import yaml
 
+from _hub_download_stub import stub_hub_download
 from sparkrun.core.env_templates import render_env_template
 from sparkrun.core.recipe import Recipe
 from sparkrun.core.runtime_cache import build_runtime_cache_mounts, resolve_runtime_cache_settings
@@ -65,16 +67,21 @@ def test_inherited_model_has_separate_weight_and_runtime_caches(tmp_path, monkey
             weight.write_bytes(original)
         base_files.append((weight, weight.stat().st_ino))
 
-    downloads = []
-
-    def download(repo, name, *, revision, local_dir, **kwargs):
-        downloads.append((repo, revision, name))
-        assert (repo, revision, name) == (child_id, child_revision, filename)
-        path = Path(local_dir) / name
-        path.write_bytes(replacement)
+    downloads = tmp_path / "downloads.jsonl"
+    stub_hub_download(
+        monkeypatch,
+        f"""
+        import json
+        from pathlib import Path
+        revision = kwargs['revision']
+        assert (repo, revision, filename) == {(child_id, child_revision, filename)!r}
+        with Path({str(downloads)!r}).open('a') as log:
+            log.write(json.dumps([repo, revision, filename]) + '\\n')
+        path = Path(kwargs['local_dir']) / filename
+        path.write_bytes({replacement!r})
         return str(path)
-
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+    """,
+    )
     prepared = prepare_model(
         entry.name,
         ["localhost"],
@@ -85,7 +92,7 @@ def test_inherited_model_has_separate_weight_and_runtime_caches(tmp_path, monkey
         checksums=True,
     )
     assert prepared is not None and prepared.bindings[0].report.complete
-    assert downloads == [(child_id, child_revision, filename)]
+    assert [json.loads(line) for line in downloads.read_text().splitlines()] == [[child_id, child_revision, filename]]
     for root in (source, target):
         assert (root / manifest.relative_snapshot / filename).read_bytes() == replacement
     for weight, inode in base_files:

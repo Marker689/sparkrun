@@ -125,7 +125,7 @@ def test_metadata_outage_uses_saved_inventory_but_never_excuses_known_damage(tmp
     assert prepare(tmp_path) == []
     assert "validating saved revision" in caplog.text
     (snapshot / "tokenizer.json").write_bytes(b"bad size")
-    monkeypatch.setattr(acquisition, "repair_snapshot_files", Mock(side_effect=ModelArtifactError("repair unavailable")))
+    monkeypatch.setattr(preparation, "run_adapter", Mock(side_effect=ModelArtifactError("repair unavailable")))
     failures = prepare(tmp_path)
     assert failures and "repair unavailable" in failures[0].detail
     assert "using existing cache/download checks" not in caplog.text
@@ -144,7 +144,7 @@ def test_failed_first_repair_still_saves_inventory_for_next_offline_run(tmp_path
     snapshot = cache(tmp_path, artifact())
     (snapshot / "tokenizer.json").unlink()
     repair = Mock(side_effect=ModelArtifactError("repair unavailable"))
-    monkeypatch.setattr(acquisition, "repair_snapshot_files", repair)
+    monkeypatch.setattr(preparation, "run_adapter", repair)
     failures = prepare(tmp_path)
     assert failures and "repair unavailable" in failures[0].detail
     assert manifest_path(str(tmp_path), ModelArtifactRequest("org/model")).exists()

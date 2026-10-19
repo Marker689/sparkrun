@@ -133,6 +133,24 @@ def test_real_controller_http_error_is_inventory_unavailable(hub_origin):
         manifest.fetch_inventory(ModelArtifactRequest("org/missing", endpoint=endpoint), token=False)
 
 
+def test_controller_adapter_uses_installed_client_against_real_origin(hub_origin, tmp_path):
+    from sparkrun.models.host_io import ModelHostIO
+
+    endpoint, requests = hub_origin
+    request = ModelArtifactRequest("org/tiny", endpoint=endpoint)
+    selected = manifest.select_manifest(request, manifest.fetch_inventory(request, token=False))
+    root = tmp_path / "cache with spaces"
+    files = tuple(f.path for f in selected.files)
+    with ModelHostIO() as io:
+        result = acquisition.run_adapter(io, None, request, str(root), token=False, manifest=selected, files=files)
+    assert result == {"revision": REVISION, "repaired": len(files)}
+    snapshot = root / selected.relative_snapshot
+    for name in files:
+        assert (snapshot / name).read_bytes() == FILES[name]
+    assert any(method == "GET" and "/resolve/" in path for method, path in requests)
+    assert not list(snapshot.parent.glob(".sparkrun-repair-*"))
+
+
 @pytest.mark.parametrize("remote", [False, True])
 def test_file_filters_never_fetch_excluded_weights_or_indexes(hub_origin, tmp_path, capsys, remote):
     endpoint, requests = hub_origin

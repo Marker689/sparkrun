@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from contextlib import ExitStack
 import json
 import inspect
+from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
 from textwrap import indent
 
 from sparkrun.core.model_distribution import operation_config, transfer_timeouts
@@ -16,7 +20,7 @@ from sparkrun.models.manifest import HUB_ADAPTER_VERSION, read_weight_index
 from sparkrun.utils.shell import quote
 
 
-def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, cancelled=None, sizes=None, progress=None):
+def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, cancelled=None, sizes=None, progress=None, staging_root=None):
     """Publish only selected snapshot entries; never unlink shared HF blobs.
 
     Hub force_download updates a blob but leaves an existing regular snapshot
@@ -32,6 +36,9 @@ def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, canc
     *sizes* (file -> expected size): after each file, and every two seconds
     while one downloads, measured from the staging directory, which holds the
     in-flight ``.incomplete`` file.
+
+    A local supervisor can supply *staging_root* on the snapshot filesystem
+    so it can remove abandoned staging after stopping this process.
     """
     from pathlib import Path
     from tempfile import TemporaryDirectory
@@ -73,7 +80,7 @@ def repair_snapshot_files(repo, revision, cache, endpoint, token, files, *, canc
         for name in files:
             if cancelled is not None and cancelled():
                 raise RuntimeError("model acquisition cancelled")
-            with TemporaryDirectory(prefix=".sparkrun-repair-", dir=snapshot.parent) as staging:
+            with TemporaryDirectory(prefix=".sparkrun-repair-", dir=staging_root or snapshot.parent) as staging:
                 state["staging"] = staging
                 try:
                     downloaded = hf_hub_download(
@@ -108,6 +115,8 @@ def hub_script(
     token: str | None,
     manifest: ModelArtifactManifest | None = None,
     files: tuple[str, ...] = (),
+    python: str | None = None,
+    staging_root: str | None = None,
 ) -> str:
     """One pinned adapter for controller/head acquisition; tokens travel on stdin."""
     from sparkrun.core.tooling import UV_INSTALL_BIN_DIR, UV_INSTALL_URL
@@ -118,6 +127,7 @@ def hub_script(
         "token": token,
         "revision": manifest.revision if manifest else None,
         "files": files,
+        "staging_root": staging_root,
         "sizes": {f.path: f.size for f in (manifest.files if manifest else ()) if f.path in set(files)},
     }
     program = (
@@ -147,7 +157,7 @@ else:
         print('SPARKRUN_MODEL_PROGRESS %d %d' % (done, total), flush=True)
     repair_snapshot_files(
         repo, payload['revision'], payload['cache'], request['endpoint'], payload['token'], payload['files'],
-        sizes=payload['sizes'], progress=report,
+        sizes=payload['sizes'], progress=report, staging_root=payload['staging_root'],
     )
     result = dict(revision=payload['revision'], repaired=len(payload['files']))
 print('SPARKRUN_MODEL_RESULT=' + json.dumps(result, separators=(',', ':')))
@@ -170,10 +180,14 @@ print('SPARKRUN_MODEL_RESULT=' + json.dumps(result, separators=(',', ':')))
     # This path is never reached for offline or already-complete observations.
     version_check = "import huggingface_hub; assert huggingface_hub.__version__ == %r" % HUB_ADAPTER_VERSION
     script = "set -euo pipefail\nexport HF_HUB_DOWNLOAD_TIMEOUT=60 HF_HUB_ETAG_TIMEOUT=30\n"
-    script += f"if command -v python3 >/dev/null && python3 -c {quote(version_check)} 2>/dev/null; then\n  runner=(python3)\nelse\n"
-    script += f'  export PATH="{UV_INSTALL_BIN_DIR}:$PATH"\n'
-    script += f"  if ! command -v uv >/dev/null; then curl -fLsS {quote(UV_INSTALL_URL)} | sh >&2; fi\n"
-    script += f"  runner=(uv run --no-project --with huggingface-hub=={HUB_ADAPTER_VERSION} python)\nfi\n"
+    if python is not None:
+        # The controller already has the pinned dependency in its environment.
+        script += f"runner=({quote(python)})\n"
+    else:
+        script += f"if command -v python3 >/dev/null && python3 -c {quote(version_check)} 2>/dev/null; then\n  runner=(python3)\nelse\n"
+        script += f'  export PATH="{UV_INSTALL_BIN_DIR}:$PATH"\n'
+        script += f"  if ! command -v uv >/dev/null; then curl -fLsS {quote(UV_INSTALL_URL)} | sh >&2; fi\n"
+        script += f"  runner=(uv run --no-project --with huggingface-hub=={HUB_ADAPTER_VERSION} python)\nfi\n"
     # Bootstrap failure is eligible for compatibility fallback; an unexpected
     # adapter failure after this point is not an unavailable-inventory result.
     script += "\"${runner[@]}\" -c 'from huggingface_hub.utils import httpx'\n"
@@ -185,11 +199,11 @@ print('SPARKRUN_MODEL_RESULT=' + json.dumps(result, separators=(',', ':')))
 class RepairProgress:
     """Feedback for a repair download, the peer of the copy leg's ``CopyProgress``.
 
-    A delegated head runs the download with its output captured, so without
+    The adapter runs the download with its output captured, so without
     this the launch printed nothing between "Distributing model" and the end
     of a download that can take hours. Feed it the adapter's stdout
-    (:meth:`feed`) or call :meth:`update` directly for a control-machine
-    repair. Events go out at most twice a second; a log line every ten.
+    (:meth:`feed`) for controller and delegated repairs. Events go out at
+    most twice a second; a log line every ten.
     """
 
     _MARKER = b"SPARKRUN_MODEL_PROGRESS "
@@ -208,11 +222,11 @@ class RepairProgress:
         self.last_event = self.last_log = None
         self.state = (0, 0)
         self._pending = b""
-        # Stall detection for a remote repair: only a growing byte count counts.
+        # Stall detection for a repair: only a growing byte count counts.
         self.watch = watch
         # Whether the adapter finished bootstrapping (uv, huggingface_hub).
         self.ready = False
-        # A control-machine repair updates from its sampler thread and its loop.
+        # Stream updates and the supervisor's finish call may use different threads.
         self._lock = threading.Lock()
 
     def feed(self, data: bytes) -> None:
@@ -276,14 +290,39 @@ def run_adapter(
     token: str | None,
     manifest: ModelArtifactManifest | None = None,
     files: tuple[str, ...] = (),
+    config=None,
 ) -> dict:
-    script = hub_script(request, cache, token=token, manifest=manifest, files=files)
-    if not (manifest and files):
+    with ExitStack() as cleanup:
+        staging_root = None
+        if host is None and manifest and files:
+            # The supervisor owns local staging so even SIGKILL/cancellation
+            # cleans it, after execute_stream has stopped the download process.
+            parent = (Path(cache) / manifest.relative_snapshot).parent
+            parent.mkdir(parents=True, exist_ok=True)
+            staging_root = cleanup.enter_context(TemporaryDirectory(prefix=".sparkrun-repair-", dir=parent))
+        script = hub_script(
+            request,
+            cache,
+            token=token,
+            manifest=manifest,
+            files=files,
+            python=sys.executable if host is None else None,
+            staging_root=staging_root,
+        )
+        return _execute_adapter(
+            io, host, script, cache, token=token, repair=bool(manifest and files), inventory=manifest is None, config=config
+        )
+
+
+def _execute_adapter(
+    io: ModelHostIO, host: str | None, script: str, cache: str, *, token: str | None, repair: bool, inventory: bool, config
+) -> dict:
+    if not repair:
         result = io.execute(host, script, timeout=90)
     else:
         # Bounded by progress, not by size: a slow link that keeps
         # downloading is healthy however long it takes (#324).
-        limits = transfer_timeouts(operation_config())
+        limits = transfer_timeouts(config if config is not None else operation_config())
         progress = RepairProgress(host, watch=ProgressWatch())
         try:
             result = io.execute(
@@ -314,18 +353,16 @@ def run_adapter(
         detail = result.stderr.decode(errors="replace")[-1500:]
         if token:
             detail = detail.replace(token, "<redacted>")
-        if manifest is not None and (reason := disk_failure(detail)):
+        if not inventory and (reason := disk_failure(detail)):
             raise ModelDiskSpaceError(host, cache, reason=reason, action="model download")
         lines = result.stdout.splitlines()
         unavailable = b"SPARKRUN_MODEL_ERROR=unavailable" in lines or b"SPARKRUN_MODEL_ADAPTER_READY" not in lines
         error_type = (
-            ModelInventoryUnavailable
-            if manifest is None and unavailable and b"SPARKRUN_MODEL_ERROR=invalid" not in lines
-            else ModelArtifactError
+            ModelInventoryUnavailable if inventory and unavailable and b"SPARKRUN_MODEL_ERROR=invalid" not in lines else ModelArtifactError
         )
         raise error_type(
             "Hugging Face %s on %s failed (rc=%d): %s"
-            % ("repair" if manifest else "inventory", host or "control", result.returncode, detail)
+            % ("inventory" if inventory else "repair", host or "control", result.returncode, detail)
         )
     records = [
         line.removeprefix("SPARKRUN_MODEL_RESULT=")

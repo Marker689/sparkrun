@@ -1164,7 +1164,7 @@ unbounded entry gets no watchdog, so Ctrl-C on the control machine stops sparkru
 waiting but does not stop a `pre_exec` / `post_exec` command inside the container.
 
 When the limit is reached, sparkrun terminates the hook's whole process tree inside the
-container (TERM, then KILL 10s later) and fails the launch with
+container (TERM, then KILL after a grace period of up to 10s) and fails the launch with
 `pre_exec[N] timed out after …`. `post_commands` get the same treatment on the control
 machine. A hook that finishes in time keeps anything it deliberately started in the
 background.

@@ -10,8 +10,12 @@ first tagged release containing them, regardless of their original commit date.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-19
+
 ### Added
 
+- Hardware-platform plugins can import `CollectiveBackend`, `NcclBackend`, `RcclBackend`,
+  `HcclBackend`, and `NoCollectiveBackend` directly from `sparkrun.plugins` (#328).
 - Model entries in `distribution_config.models.entries` and `additional_models`
   accept `allow_patterns` and `ignore_patterns` globs, allowing upstream config
   and Python files to be staged without weights. Filters apply to downloads,
@@ -23,8 +27,13 @@ first tagged release containing them, regardless of their original commit date.
   Recipe export preserves additive configuration without freezing implicit defaults.
 - `export systemd --pin` pins a mutable image tag (`repo@sha256:…`) and model revision
   (commit) in the baked service recipe, so restarts serve the same build. References
-  already pinned are kept. `--offline` pins what every candidate host already holds
-  instead of asking the registry and the Hub.
+  in conditional `overrides` layers are pinned without freezing their conditions;
+  already pinned references are kept. `--offline` pins what every candidate host already
+  holds instead of asking the registry and the Hub.
+- Model preparation checks free disk space on the download source and transfer targets
+  before starting payload work. It budgets only missing files, counts a damaged file's
+  full replacement, and reports disk-full and quota failures with the affected host and
+  cache path. Completed files remain available for the next attempt.
 
 ### Changed
 
@@ -37,6 +46,9 @@ first tagged release containing them, regardless of their original commit date.
   `post_commands` were previously unbounded and now share the same limit. Malformed hook
   mappings are now an `invalid-hook-entry` validation error; before, they were skipped
   with a log line.
+- Failed hooks retain the beginning and end of their output, including the final exception,
+  and save full redacted output to a local log. Other command failures also retain the end
+  of long output instead of losing the most useful diagnostics (#325).
 - `export systemd --install` needs `--trust` for an untrusted recipe with hooks or
   container-isolation overrides: on the head node the service recipe is a local file,
   which `run` trusts without asking. Previewing and `--uninstall` never need it.
@@ -48,12 +60,20 @@ first tagged release containing them, regardless of their original commit date.
   0.4.0's model-binding guard. Explicit revision conflicts remain errors.
 - Model distribution no longer fails healthy transfers at a fixed two-hour deadline (#324).
   A copy or Hugging Face repair download runs as long as its byte count keeps advancing;
-  one that stops for `model_transfer_idle_timeout_s` (default 600) is cancelled, resumed
-  `model_transfer_stall_retries` times (default 1), then reported with the file, idle time
-  and bytes moved. A total ceiling is opt-in via `model_transfer_timeout_s`. All three can
-  be set per cluster under `distribution.model` (`idle_timeout_s`, `timeout_s`,
-  `stall_retries`). Model rsyncs, including the legacy fallback path, now pass
-  `--timeout`.
+  one that stops for `model_transfer_idle_timeout_s` (default 600) is cancelled. Stalled
+  rsyncs resume up to `model_transfer_stall_retries` times (default 1) before reporting the
+  file, idle time and bytes moved. A total ceiling is opt-in via `model_transfer_timeout_s`.
+  All three can be set per cluster under `distribution.model` (`idle_timeout_s`,
+  `timeout_s`, `stall_retries`). Model rsyncs, including the legacy fallback path, now
+  pass `--timeout`. Controller downloads in local/push mode enforce the same idle and
+  total limits as delegated downloads, stop on lease loss, and clean their staging files.
+- Timed-out `post_commands` kill remaining process-group members even when a child
+  redirects its output and ignores TERM after the shell exits.
+- Successfully verified model snapshots remove leftover `.sparkrun-partial` transfer
+  files. Incomplete snapshots retain their resume data, including files outside the
+  selected manifest.
+- NCCL GID detection selects an IPv4 RoCEv2 entry and falls back to `NCCL_IB_GID_INDEX=-1`
+  (NCCL auto-selection) when detection fails, instead of forcing an unsuitable index (#327).
 - Recipe export keeps `executor`, `executor_config` (including `entrypoint: ""`) and the
   declared capabilities, so `export systemd`, `export recipe [--realize]` and
   `export running-recipe` launch the same way the source did (#323). `-o` executor keys
@@ -1131,7 +1151,8 @@ the post-launch lifecycle are unchanged for existing recipes.
 
 [0.3.0]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.0
 
-[Unreleased]: https://github.com/spark-arena/sparkrun/compare/v0.4.0...develop-next
+[Unreleased]: https://github.com/spark-arena/sparkrun/compare/v0.4.1...develop-next
+[0.4.1]: https://github.com/spark-arena/sparkrun/releases/tag/v0.4.1
 [0.3.1]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.1
 [0.3.2]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.2
 [0.3.3]: https://github.com/spark-arena/sparkrun/releases/tag/v0.3.3

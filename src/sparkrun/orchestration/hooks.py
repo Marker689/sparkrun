@@ -17,7 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from sparkrun.utils.text import coerce_command_list, excerpt, render_template, sanitize_line_continuations
 
@@ -267,7 +267,11 @@ def hook_entry_problems(entry: object, *, allow_copy: bool) -> list[str]:
         if not allow_copy:
             return ["'copy' entries are only supported in pre_exec"]
         unknown = keys - COPY_ENTRY_KEYS
-        return ["unknown key(s) %s for a copy entry (allowed: %s)" % (sorted(unknown), sorted(COPY_ENTRY_KEYS))] if unknown else []
+        problems = ["unknown key(s) %s for a copy entry (allowed: %s)" % (sorted(unknown), sorted(COPY_ENTRY_KEYS))] if unknown else []
+        for key in keys & COPY_ENTRY_KEYS:
+            if not isinstance(entry[key], str) or not entry[key].strip():
+                problems.append("'%s' must be a non-empty string" % key)
+        return problems
     if "command" not in keys:
         expected = "'command' or 'copy'" if allow_copy else "'command'"
         return ["mapping entry has no %s key (keys: %s)" % (expected, sorted(keys))]
@@ -299,25 +303,29 @@ def describe_hook_entry(entry: object) -> str:
     return str(entry)
 
 
-def _hook_steps(entries: Sequence[object], phase: HookPhase) -> list[Mapping[str, object] | tuple[str, float | None]]:
+def _hook_steps(entries: Sequence[object], phase: HookPhase) -> list[Mapping[str, str] | tuple[str, float | None]]:
     """Validate rendered entries up front: a copy mapping, or ``(command, timeout_s)``.
 
     Raises ``RuntimeError`` for a malformed entry before anything runs.  Hooks
     are fail-fast, and silently skipping a step the recipe asked for (what
     happened to these before) launches something other than the recipe.
     """
-    steps: list[Mapping[str, object] | tuple[str, float | None]] = []
+    steps: list[Mapping[str, str] | tuple[str, float | None]] = []
     for i, entry in enumerate(entries, 1):
         problems = hook_entry_problems(entry, allow_copy=phase == "pre_exec")
         if problems:
             raise RuntimeError("%s[%d] is not a valid hook entry: %s" % (phase, i, "; ".join(problems)))
         if isinstance(entry, str):
             steps.append((entry, None))
-        elif "copy" in entry:
-            steps.append(entry)
         else:
-            timeout = entry.get("timeout")
-            steps.append((entry["command"], parse_hook_timeout(timeout, allow_unbounded=True) if timeout is not None else None))
+            assert isinstance(entry, Mapping)  # validated above
+            if "copy" in entry:
+                steps.append(cast(Mapping[str, str], entry))  # copy values were validated as strings
+            else:
+                command = entry["command"]
+                assert isinstance(command, str)
+                timeout = entry.get("timeout")
+                steps.append((command, parse_hook_timeout(timeout, allow_unbounded=True) if timeout is not None else None))
     return steps
 
 
@@ -674,7 +682,9 @@ def run_post_exec(
 
     logger.info("Running %d post_exec command(s) on %s...", len(rendered), container_name)
 
-    for i, (cmd, timeout_s) in enumerate(steps, 1):
+    for i, step in enumerate(steps, 1):
+        assert isinstance(step, tuple)  # post_exec rejects copy entries
+        cmd, timeout_s = step
         _run_exec_command(
             head_host,
             container_name,
@@ -736,7 +746,9 @@ def run_post_commands(
 
     logger.info("Running %d post_command(s) on control machine...", len(rendered))
 
-    for i, (cmd, timeout_s) in enumerate(steps, 1):
+    for i, step in enumerate(steps, 1):
+        assert isinstance(step, tuple)  # post_commands rejects copy entries
+        cmd, timeout_s = step
         timeout_s = timeout_s or default_timeout
         logger.info("  post_commands[%d] (%s): %s", i, _describe_limit(None if timeout_s == float("inf") else timeout_s), cmd)
 
@@ -1064,6 +1076,7 @@ def _run_control_command(cmd: str, *, env: Mapping[str, str], timeout_s: float) 
     import signal
 
     posix = hasattr(os, "killpg")
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
     proc = subprocess.Popen(
         cmd,
         shell=True,
@@ -1071,7 +1084,7 @@ def _run_control_command(cmd: str, *, env: Mapping[str, str], timeout_s: float) 
         stderr=subprocess.STDOUT,
         text=True,
         env=dict(env),
-        **({"process_group": 0} if posix else {}),
+        process_group=0 if posix else None,
     )
     terminal = _hand_terminal_to(proc) if posix else None
     try:
@@ -1082,11 +1095,16 @@ def _run_control_command(cmd: str, *, env: Mapping[str, str], timeout_s: float) 
         try:
             stdout, _ = proc.communicate(timeout=_HOOK_KILL_AFTER_S)
         except subprocess.TimeoutExpired:
-            _kill_process_group(proc, signal.SIGKILL)
+            stdout = None
+        finally:
+            # Reaping the shell and reaching EOF do not prove its children
+            # exited: a TERM-ignoring child can redirect both output streams.
+            _kill_process_group(proc, kill_signal)
+        if stdout is None:
             stdout = _drain_after_kill(proc)
         return None, stdout or ""
     except BaseException:
-        _kill_process_group(proc, signal.SIGKILL)
+        _kill_process_group(proc, kill_signal)
         _drain_after_kill(proc)
         raise
     finally:
@@ -1179,7 +1197,7 @@ def _kill_process_group(proc: subprocess.Popen, sig: int) -> None:
 def _run_copy_command(
     host: str,
     container_name: str,
-    cmd: dict[str, str],
+    cmd: Mapping[str, str],
     ssh_kwargs: dict | None = None,
     dry_run: bool = False,
     label: str = "hook",

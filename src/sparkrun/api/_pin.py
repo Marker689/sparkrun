@@ -176,6 +176,16 @@ def pin_recipe_data(data: dict[str, Any], scope: PinScope, *, offline: bool, sct
                 entry["image"] = pinned
                 pins.append(Pin("containers[%d].image" % index, before, pinned, source))
 
+    # A service keeps conditional layers for placement at each restart. Pin
+    # their images too, without deciding which conditions match at export.
+    for index, entry in enumerate(data.get("overrides") or []):
+        before = entry.get("container")
+        if before:
+            pinned, source = _pin_image(before, scope, offline=offline, config=config, v=v)
+            if pinned != before:
+                entry["container"] = pinned
+                pins.append(Pin("overrides[%d].container" % index, before, pinned, source))
+
     model, revision = data.get("model") or "", data.get("model_revision")
     if is_hub_model(model) and not is_commit(revision):
         commit, source = _pin_revision(model, revision, scope, offline=offline, config=config)

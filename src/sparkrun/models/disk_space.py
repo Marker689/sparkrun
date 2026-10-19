@@ -16,10 +16,12 @@ def disk_failure(error) -> str | None:
         seen.add(id(error))
         text = str(error).lower()
         if getattr(error, "errno", None) == errno.ENOSPC or any(
-            part in text for part in ("no space left on device", "out of disk space", "os error 28")
+            part in text for part in ("no space left on device", "out of disk space", "os error 28", "[errno 28]")
         ):
             return "out of disk space"
-        if getattr(error, "errno", None) == getattr(errno, "EDQUOT", 122) or "disk quota exceeded" in text:
+        if getattr(error, "errno", None) == getattr(errno, "EDQUOT", 122) or any(
+            part in text for part in ("disk quota exceeded", "[errno %d]" % getattr(errno, "EDQUOT", 122))
+        ):
             return "disk quota exceeded"
         error = getattr(error, "__cause__", None) or getattr(error, "__context__", None)
     return None

@@ -493,7 +493,10 @@ and, on a resumed attempt, before the first byte (rsync checksumming the
 partial file). Rsync's own `--timeout`, set to the same interval, bounds those
 and makes the remote end exit if the controller is gone. The Hugging Face repair
 download is watched the same way through its sampled byte count, with the idle
-clock restarted once the download adapter has bootstrapped. The legacy fallback
+clock restarted once the download adapter has bootstrapped. This applies both to
+controller downloads in local/push mode and to downloads on a delegated host. A
+controller download stops on timeout or publication-lease loss and removes its
+temporary staging files, preserving completed snapshot files. The legacy fallback
 path uses rsync `--timeout` alone, at a fixed 600 seconds.
 `SPARKRUN_NO_RSYNC_RETRY=1` also disables stall resumes.
 

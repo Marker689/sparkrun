@@ -127,33 +127,12 @@ def _acquire(
         )
         result = _transfer(pull, pull=True)
     if result is None:
-        if host is None:
-            from sparkrun.models.acquisition import RepairProgress, repair_snapshot_files
-            from sparkrun.models.hub import configure_hub_client
-
-            configure_hub_client()
-            progress = RepairProgress(None)
-            wanted = set(files)
-            try:
-                repair_snapshot_files(
-                    request.repo,
-                    manifest.revision,
-                    root,
-                    request.endpoint,
-                    token,
-                    files,
-                    cancelled=io.cancelled,
-                    sizes={f.path: f.size for f in manifest.files if f.path in wanted},
-                    progress=progress.update,
-                )
-            except BaseException as exc:
-                progress.finish(False)
-                if reason := disk_failure(exc):
-                    raise ModelDiskSpaceError(host, root, reason=reason, action="model download") from exc
-                raise
-            progress.finish(True)
-        else:
-            run_adapter(io, host, request, root, token=token, manifest=manifest, files=files)
+        try:
+            run_adapter(io, host, request, root, token=token, manifest=manifest, files=files, config=config)
+        except OSError as exc:
+            if reason := disk_failure(exc):
+                raise ModelDiskSpaceError(host, root, reason=reason, action="model download") from exc
+            raise
     verified = io.observe(host, manifest, root, checksums=checksums)
     if not verified.complete:
         raise ModelArtifactError("model source still invalid after one repair: " + _report_error(verified))

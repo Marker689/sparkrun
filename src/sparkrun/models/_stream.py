@@ -132,7 +132,7 @@ def execute_stream(
                 raise ModelArtifactError("model copy cancelled")
             if deadline is not None and time.monotonic() >= deadline:
                 raise ModelArtifactError("model transfer deadline exceeded")
-            if idle_timeout is not None and (idle := watch.idle()) >= idle_timeout:
+            if idle_timeout is not None and watch is not None and (idle := watch.idle()) >= idle_timeout:
                 raise ModelTransferStalled(idle, watch.transferred)
             if errors:
                 raise ModelArtifactError("could not read model transfer output") from errors[0]
