@@ -1068,6 +1068,7 @@ def _evict_superseded_deployments(
         only the latter makes deletion safe.
     """
     import sparkrun.api as api
+    from sparkrun.core.application_profile import resource_name
     from sparkrun.orchestration.executor import query_status_for_cluster
     from sparkrun.orchestration.primitives import build_ssh_kwargs
 
@@ -1076,6 +1077,7 @@ def _evict_superseded_deployments(
             cluster_def,
             list(candidate_hosts),
             ssh_kwargs=build_ssh_kwargs(config) if config else {},
+            host_hardware=cluster_def.hosts_hardware or None,
             config=config,
             v=sctx.variables if sctx is not None else None,
         )
@@ -1088,7 +1090,7 @@ def _evict_superseded_deployments(
     if strict and status.observation_errors:
         raise RuntimeError("could not query cluster status before workload replacement: %s" % status.observation_errors)
 
-    prefix = "sparkrun_%s_" % intent_id
+    prefix = resource_name("_%s_" % intent_id)
     target = set(target_hosts)
     # cluster_id -> every host in the snapshot it occupies (insertion-ordered).
     occupied: dict[str, list[str]] = {}
