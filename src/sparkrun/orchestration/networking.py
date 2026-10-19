@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from sparkrun.orchestration.infiniband import parse_kv_output
 from sparkrun.scripts import inject_shell_vars, read_script
 from sparkrun.utils.shell import quote
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.orchestration.sudo import SudoPasswords
@@ -314,7 +315,7 @@ def detect_cx7_for_hosts(
     detections: dict[str, CX7HostDetection] = {}
     for result in results:
         if not result.success:
-            logger.warning("CX7 detection failed on %s: %s", result.host, result.stderr[:200])
+            logger.warning("CX7 detection failed on %s: %s", result.host, excerpt(result.stderr, 200))
             detections[result.host] = CX7HostDetection(host=result.host)
             continue
         raw = parse_cx7_detect_output(result.stdout)
@@ -919,7 +920,7 @@ def detect_switch(
         r = run_remote_script(target_host, full_script, timeout=30, dry_run=dry_run, **kw)
 
     if not r.success:
-        logger.warning("Switch detection failed on %s: %s", target_host, r.stderr[:200])
+        logger.warning("Switch detection failed on %s: %s", target_host, excerpt(r.stderr, 200))
         return None
 
     raw = parse_kv_output(r.stdout)
@@ -1069,7 +1070,7 @@ def detect_topology(
             if r.success:
                 host_neighbors[host] = _parse_arping_output(r.stdout)
             else:
-                logger.warning("  %s: arping failed: %s", host, r.stderr[:200])
+                logger.warning("  %s: arping failed: %s", host, excerpt(r.stderr, 200))
     else:
         logger.info("[dry-run] Would run neighbor discovery on %d host(s)", len(arping_hosts))
 
@@ -1857,7 +1858,7 @@ def apply_cx7_plan(
             logger.info("  [OK] %s: configured", hp.host)
         else:
             # Callers render failures; logging them too printed each one twice.
-            logger.debug("  [FAIL] %s: %s", hp.host, result.stderr[:200])
+            logger.debug("  [FAIL] %s: %s", hp.host, excerpt(result.stderr, 200))
 
         if is_local:
             await_routes(remote_hosts)
@@ -1997,7 +1998,7 @@ def parse_keyscan_output(target: str, returncode: int, stdout: str, stderr: str)
     kv = parse_kv_output(stdout or "")
     error = kv.get("KEYSCAN_ERROR", "")
     if returncode != 0 and not error:
-        error = (stderr or "").strip()[:200] or "exit code %d" % returncode
+        error = excerpt(stderr, 200) or "exit code %d" % returncode
     if "KEYSCAN_ADDED" not in kv and not error:
         error = "no result reported"
     failed = kv.get("KEYSCAN_FAILED", "").split()
@@ -2193,7 +2194,7 @@ def discover_cx7_peers(
         return []
 
     if result.returncode != 0:
-        logger.warning("CX7 peer discovery failed: %s", result.stderr[:200])
+        logger.warning("CX7 peer discovery failed: %s", excerpt(result.stderr, 200))
         return []
 
     parsed = parse_kv_output(result.stdout)

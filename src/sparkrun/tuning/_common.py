@@ -17,6 +17,7 @@ from sparkrun.core.config import resolve_sparkrun_cache_dir
 from sparkrun.core.image_distribution import image_distribution_operation
 from sparkrun.utils import format_duration as _format_duration  # noqa: F401 — re-exported for local callers
 from sparkrun.utils.shell import quote, safe_remote_path
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.core.config import SparkrunConfig
@@ -551,7 +552,7 @@ class BaseTuner:
         else:
             logger.warning(
                 "Step 3/5: Could not detect Triton version, using 'unknown': %s",
-                result.stderr[:200] if result.stderr else "(no output)",
+                excerpt(result.stderr, 200) or "(no output)",
             )
 
         return version
@@ -727,7 +728,7 @@ class BaseTuner:
             logger.warning(
                 "  Failed to sync tuning configs back from %s: %s",
                 self.host,
-                result.stderr[:200],
+                excerpt(result.stderr, 200),
             )
 
     def _cleanup_container(self) -> None:

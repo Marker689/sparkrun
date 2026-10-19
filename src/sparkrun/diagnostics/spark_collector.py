@@ -14,6 +14,7 @@ from sparkrun.diagnostics.ndjson_writer import NDJSONWriter
 from sparkrun.orchestration.ssh import run_remote_scripts_parallel
 from sparkrun.scripts import read_script
 from sparkrun.utils import parse_kv_output
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,7 @@ def collect_sudo_diagnostics(
                     {
                         "host": host,
                         "error": "Sudo diagnostics failed with rc=%d" % result.returncode,
-                        "stderr": result.stderr.strip()[:500],
+                        "stderr": excerpt(result.stderr, 500),
                     },
                 )
             logger.warning("Sudo diagnostics failed on %s: rc=%d", host, result.returncode)
@@ -341,7 +342,7 @@ def collect_spark_diagnostics(
                     {
                         "host": result.host,
                         "error": "Script failed with rc=%d" % result.returncode,
-                        "stderr": result.stderr.strip()[:500],
+                        "stderr": excerpt(result.stderr, 500),
                     },
                 )
             logger.warning("Diagnostics failed on %s: rc=%d", result.host, result.returncode)
@@ -357,7 +358,7 @@ def collect_spark_diagnostics(
                     {
                         "host": result.host,
                         "error": "Incomplete diagnostics (missing DIAG_COMPLETE sentinel)",
-                        "stderr": result.stderr.strip()[:500],
+                        "stderr": excerpt(result.stderr, 500),
                     },
                 )
             continue

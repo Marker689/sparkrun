@@ -3252,6 +3252,14 @@ Shared helpers used across multiple modules to avoid circular imports:
   `cluster_config.remote_cache_dir`), and every one of them was confirmed to *execute* before hardening. Note a value
   can need both treatments at once: a model id is quoted where used as a value **and** folded into the cache path by
   `model_cache_path`, where it can only be refused — so a hostile id raises rather than rendering.
+- `text.excerpt(text, limit)` — the one way to bound command output for a message: keeps the start *and* the end,
+  cut at line boundaries, with the omitted count stated. Failing commands explain themselves last (a traceback's
+  exception line), so the old `stderr[:500]` head-cuts dropped exactly the cause (issue #325). Hook failures
+  (`pre_exec` / `post_exec` / `post_commands`) also write the complete, redacted output to
+  `~/.cache/sparkrun/failures/<cluster_id>-<host>.log` (0600, overwritten by the next failure there, pruned after
+  30 days) and name it in the error. Writing that file is best effort and never replaces the hook's own error. Full
+  remote-script stdout/stderr is DEBUG-logged on failure too (`ssh._log_captured_output`), which is what
+  `--collect-diagnostics` records; before this, a failing script's stderr was logged at no level at all.
 - `coerce_value()` — type coercion for CLI string inputs (to int, float, bool)
 - `suppress_noisy_loggers()` — silences verbose HTTP/transport loggers
 - `resolve_ssh_user()` — SSH user resolution (cluster → config → local login via `getpass` → fallback)
@@ -3268,6 +3276,7 @@ Shared helpers used across multiple modules to avoid circular imports:
 | `~/.cache/sparkrun/registries/`      | Git-cloned recipe registries                      |
 | `~/.cache/sparkrun/jobs/`            | Job metadata (cluster_id → recipe mapping)        |
 | `~/.cache/sparkrun/pending/`         | PID lock files for in-progress operations         |
+| `~/.cache/sparkrun/failures/`        | Full, redacted output of the latest hook failure per workload and host |
 | `~/.cache/huggingface/`              | HuggingFace model cache (mounted into containers) |
 
 Readiness budgets live under `readiness:` in `config.yaml`

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from sparkrun.core.context import SparkrunContext
 from sparkrun.orchestration import tailscale as ts
+from sparkrun.utils.text import excerpt
 
 from ._errors import (
     TailscaleAuthFailed,
@@ -208,7 +209,7 @@ def join(
             noise = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip() and not ln.strip().startswith("TS_")]
             if noise:
                 detail = "%s: %s" % (detail, noise[-1]) if detail else noise[-1]
-            message = detail or (r.stderr or "").strip()[:200] or "join failed"
+            message = detail or excerpt(r.stderr, 200) or "join failed"
         hosts.append(
             HostJoinState(
                 host=h,

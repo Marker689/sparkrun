@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.core.backend_select import BackendBundle
@@ -694,7 +695,7 @@ def launch_containers_parallel(
             host, cname = futures[future]
             result = future.result()
             if not result.success and not ctx.dry_run:
-                logger.error("Failed to launch container %s on %s: %s", cname, host, result.stderr[:200])
+                logger.error("Failed to launch container %s on %s: %s", cname, host, excerpt(result.stderr, 200))
                 from sparkrun.orchestration.launch_diagnostics import log_launch_failure_hint
 
                 # Passed the full stderr, not the truncated copy above: a CDI

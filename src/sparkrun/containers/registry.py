@@ -12,6 +12,7 @@ import subprocess
 
 from sparkrun.core.progress import PROGRESS, progress_heartbeat
 from sparkrun.utils.images import is_pullable_image_ref, parse_image_ref
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,9 @@ def pull_image(image: str, dry_run: bool = False, required: bool = True) -> int:
         logger.log(PROGRESS, "Docker image ready: %s", image)
     if result.returncode != 0:
         if required:
-            logger.error("Failed to pull image %s: %s", image, result.stderr[:200])
+            logger.error("Failed to pull image %s: %s", image, excerpt(result.stderr, 200))
         else:
-            logger.info("[NON-CRITICAL] Failed to pull image %s: %s", image, result.stderr[:200])
+            logger.info("[NON-CRITICAL] Failed to pull image %s: %s", image, excerpt(result.stderr, 200))
     return result.returncode
 
 

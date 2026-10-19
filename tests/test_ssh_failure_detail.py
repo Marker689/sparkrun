@@ -44,10 +44,14 @@ def test_failure_detail_no_output_is_explicit():
     assert _failure_detail(_res()) == "(no output)"
 
 
-def test_failure_detail_truncates():
+def test_failure_detail_truncates_keeping_both_ends():
     # Truncation is marked, so a reader can tell a clipped message from a
-    # complete one instead of guessing at the tail.
-    assert _failure_detail(_res(stderr="x" * 500), limit=200) == "x" * 200 + "… (truncated)"
+    # complete one; and the end survives, since that is where a failing
+    # command says why (issue #325).
+    detail = _failure_detail(_res(stderr="START" + "x" * 500 + "THE-REASON"), limit=200)
+    assert detail.startswith("START")
+    assert detail.endswith("THE-REASON")
+    assert "chars omitted" in detail
 
 
 def test_failure_detail_does_not_mark_untruncated_output():
@@ -95,3 +99,16 @@ def test_stderr_still_wins_end_to_end(mock_run, caplog):
         run_remote_script("s", "#!/bin/bash\ntrue")
 
     assert "Could not resolve hostname s" in caplog.text
+
+
+@patch("sparkrun.orchestration.ssh.subprocess.run")
+def test_failure_logs_full_stderr_at_debug(mock_run, caplog):
+    """The WARNING line is bounded; DEBUG (what --collect-diagnostics records) is not."""
+    stderr = "Traceback (most recent call last):\n" + "  frame\n" * 400 + "ValueError: the root cause"
+    mock_run.return_value = MagicMock(returncode=1, stdout=b"", stderr=stderr.encode())
+
+    with caplog.at_level(logging.DEBUG, logger="sparkrun.orchestration.ssh"):
+        run_remote_script("spark2", "#!/bin/bash\nexit 1")
+
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(stderr in message for message in debug)

@@ -39,6 +39,7 @@ from sparkrun.tuning._common import (
     resolve_tuning_timeout,
 )
 from sparkrun.utils.shell import quote, safe_remote_path, validate_git_url
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.core.config import SparkrunConfig
@@ -324,7 +325,7 @@ class VllmTuner:
             return "%s/vllm-tune.sh" % dest
 
         if not result.success:
-            logger.error("Failed to install vllm-tune on %s: %s", self.host, result.stderr[:500])
+            logger.error("Failed to install vllm-tune on %s: %s", self.host, excerpt(result.stderr, 500))
             return None
 
         # The install script echoes the resolved vllm-tune.sh path on the last line.

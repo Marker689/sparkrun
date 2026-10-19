@@ -29,6 +29,7 @@ import yaml
 from . import manifests
 from .client import KubectlClient
 from .errors import ServiceAccountSetupError
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ def mint_token(client: KubectlClient, spec: ServiceAccountSpec) -> str:
         args += ["--duration", spec.token_duration]
     result = client.run(args)
     if not result.success:
-        raise ServiceAccountSetupError("Failed to mint token for %s/%s: %s" % (spec.namespace, spec.name, result.stderr.strip()[:400]))
+        raise ServiceAccountSetupError("Failed to mint token for %s/%s: %s" % (spec.namespace, spec.name, excerpt(result.stderr, 400)))
     token = result.stdout.strip()
     if not token:
         raise ServiceAccountSetupError("kubectl create token returned an empty token")
@@ -188,7 +189,7 @@ def configure_service_account(
         raise ServiceAccountSetupError("A Kubernetes client is required to apply service-account manifests")
     apply_res = client.apply(manifests_yaml)
     if not apply_res.success:
-        raise ServiceAccountSetupError("Failed to apply service-account manifests: %s" % apply_res.stderr.strip()[:400])
+        raise ServiceAccountSetupError("Failed to apply service-account manifests: %s" % excerpt(apply_res.stderr, 400))
     result.applied = True
 
     token = mint_token(client, spec)

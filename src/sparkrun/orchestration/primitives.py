@@ -27,6 +27,7 @@ from sparkrun.orchestration.ssh import (
     should_run_locally,
 )
 from sparkrun.orchestration.comm_env import ClusterCommEnv
+from sparkrun.utils.text import excerpt
 from sparkrun.orchestration.infiniband import (
     generate_ib_detect_script,
     parse_ib_detect_output,
@@ -694,7 +695,7 @@ def detect_host_ip(
         return "<HEAD_IP>"
 
     if not result.success:
-        raise RuntimeError("Failed to detect IP on %s: %s" % (host, result.stderr[:200]))
+        raise RuntimeError("Failed to detect IP on %s: %s" % (host, excerpt(result.stderr, 200)))
 
     ip = result.last_line.strip()
     if not is_valid_ip(ip):

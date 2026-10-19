@@ -39,6 +39,7 @@ from sparkrun.plugins.k8s.orchestration.errors import (
 from sparkrun.plugins.k8s.orchestration.job import LauncherJobResult, LauncherJobSpec
 from sparkrun.plugins.k8s.orchestration.kubectl import normalize_release_version
 from sparkrun.plugins.k8s.orchestration.serviceaccount import ServiceAccountSpec
+from sparkrun.utils.text import excerpt
 
 from ._errors import (
     ClusterUnreachable,
@@ -352,7 +353,7 @@ def setup_kueue(
 
         apply_res = client.apply(manifests_yaml)
         if not apply_res.success:
-            raise KueueSetupError("Failed to apply Kueue provisioning manifests: %s" % apply_res.stderr.strip()[:400])
+            raise KueueSetupError("Failed to apply Kueue provisioning manifests: %s" % excerpt(apply_res.stderr, 400))
         result.provisioned = True
         return result
     except _kueue.KueueError as exc:
@@ -475,7 +476,7 @@ def _launch_jobset(
         before_start()
     apply_res = _launch.submit_jobset(client, plan)
     if not apply_res.success:
-        raise JobSetLaunchError("Failed to submit JobSet %s: %s" % (name, apply_res.stderr.strip()[:400]))
+        raise JobSetLaunchError("Failed to submit JobSet %s: %s" % (name, excerpt(apply_res.stderr, 400)))
     result.submitted = True
     return result
 
@@ -582,7 +583,7 @@ def run_launcher_job(
     client = make_client(sctx, kubeconfig=kubeconfig, context=context, namespace=ns)
     apply_res = client.run_launcher_job(spec)
     if not apply_res.success:
-        raise LauncherJobError("Failed to apply launcher Job %s: %s" % (name, apply_res.stderr.strip()[:400]))
+        raise LauncherJobError("Failed to apply launcher Job %s: %s" % (name, excerpt(apply_res.stderr, 400)))
     result.applied = True
 
     return result

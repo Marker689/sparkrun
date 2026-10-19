@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from sparkrun.utils.shell import quote, args_list_to_shell_str, stdin_bytes
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -364,16 +365,30 @@ def _failure_detail(result: "RemoteResult", limit: int = _DEFAULT_FAILURE_DETAIL
     remote command that failed for a stated reason.  Mirrors the fallback
     :func:`sparkrun.orchestration.hooks._run_exec_command` already applies.
 
-    Truncation is marked when it happens, so a reader can tell a complete
-    message from a clipped one rather than guessing at the tail.
+    Long output keeps its start *and* its end (:func:`~sparkrun.utils.text.excerpt`),
+    with the omission marked, since the end is usually where a failing
+    command says why.
     """
+
     for stream in (result.stderr, result.stdout):
         text = (stream or "").strip()
         if text:
-            if len(text) > limit:
-                return text[:limit] + "… (truncated)"
-            return text
+            return excerpt(text, limit)
     return "(no output)"
+
+
+def _log_captured_output(result: "RemoteResult") -> None:
+    """DEBUG-log a script's captured output in full, whatever its outcome.
+
+    The failure WARNING carries only a bounded excerpt. DEBUG is what
+    ``--collect-diagnostics`` records, so this is where the rest of a failing
+    command's output has to land; stderr on failure was once not logged at any
+    level (issue #325).
+    """
+    if result.stdout.strip():
+        logger.debug("Remote script stdout on %s:\n%s", result.host, result.stdout.strip())
+    if result.stderr.strip():
+        logger.debug("Remote script stderr on %s:\n%s", result.host, result.stderr.strip())
 
 
 def _run_subprocess(
@@ -534,7 +549,9 @@ def run_remote_script(
 
     if allow_local and should_run_locally(host, ssh_user):
         logger.debug("  Dispatching locally (no SSH) for: %s", host)
-        return replace(run_local_script(script, timeout=timeout), host=host)
+        result = replace(run_local_script(script, timeout=timeout), host=host)
+        _log_captured_output(result)
+        return result
 
     if session_guard:
         script = wrap_with_session_guard(script)
@@ -550,14 +567,7 @@ def run_remote_script(
     # subprocess receives argv directly (shell=False). Shell quoting here
     # becomes literal characters in SSH options and identity-file paths.
     result = _run_subprocess(cmd, host, "SSH script", timeout=timeout, input_data=script, quiet=quiet)
-    if result.success:
-        if result.stdout.strip():
-            logger.debug("Remote script stdout on %s:\n%s", host, result.stdout.strip())
-        if result.stderr.strip():
-            logger.debug("Remote script stderr on %s:\n%s", host, result.stderr.strip())
-    else:
-        if result.stdout.strip():
-            logger.debug("Remote script stdout on %s:\n%s", host, result.stdout.strip())
+    _log_captured_output(result)
     return result
 
 

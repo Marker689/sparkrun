@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from .client import KubectlClient
 from .errors import K8sError
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def probe_cluster(client: KubectlClient, *, timeout: int = 15) -> ClusterInfo:
     reachable = server_version is not None
     message = None
     if not reachable:
-        message = (result.stderr.strip() or "cluster API did not report a server version")[:400]
+        message = excerpt(result.stderr, 400) or "cluster API did not report a server version"
 
     return ClusterInfo(
         reachable=reachable,

@@ -55,6 +55,7 @@ from sparkrun.orchestration.rdma import (
     parse_perftest_lat,
 )
 from sparkrun.utils.shell import quote
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.core.cluster_manager import ClusterDefinition
@@ -329,7 +330,7 @@ def _run_probe(hosts: list[str], ssh_kwargs: dict, *, dry_run: bool) -> dict[str
     facts: dict[str, RdmaHostFacts] = {}
     for r in results:
         if not r.success:
-            facts[r.host] = RdmaHostFacts(host=r.host, error=(r.stderr or "probe failed").strip()[:200])
+            facts[r.host] = RdmaHostFacts(host=r.host, error=excerpt(r.stderr or "probe failed", 200))
             continue
         facts[r.host] = parse_device_facts(r.host, parse_kv_output(r.stdout))
     # Never drop a host: a missing entry and a failed one read the same to a

@@ -291,6 +291,36 @@ def format_duration(seconds: float) -> str:
     return "%dh %dm %ds" % (h, m, s)
 
 
+def excerpt(text: str | None, limit: int, *, head_share: float = 0.25) -> str:
+    """Bound command output for a message while keeping both of its ends.
+
+    A failing command explains itself last: a traceback's exception line, a
+    shell's final error. Keeping only the start of the output (the old
+    ``stderr[:500]``) dropped exactly that part (issue #325). This keeps about
+    *head_share* of *limit* from the start, for context, and spends the rest on
+    the end. Each cut moves to a line boundary within half its share, and the
+    omitted count is stated, so a clipped message never passes as complete.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head_budget = max(0, int(limit * head_share))
+    tail_budget = max(1, limit - head_budget)
+    head = text[:head_budget]
+    cut = head.rfind("\n")
+    # Snap only when it costs at most half the part's budget; a long single
+    # line is better cut mid-line than reduced to a stub.
+    if cut > 0 and cut >= len(head) // 2:
+        head = head[:cut]
+    tail = text[-tail_budget:]
+    cut = tail.find("\n")
+    if 0 <= cut < len(tail) - 1 and cut <= len(tail) // 2:
+        tail = tail[cut + 1 :]
+    omitted = len(text) - len(head) - len(tail)
+    marker = "… [%d chars omitted] …" % omitted
+    return "\n".join(part for part in (head.rstrip(), marker, tail.lstrip("\n")) if part)
+
+
 def format_hook_summary(recipe_label: str, hooks, *, isolation=(), limit: int = 100) -> str:
     """Describe untrusted recipe hooks in a few lines, for a trust prompt.
 

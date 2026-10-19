@@ -33,6 +33,7 @@ from .client import KubectlClient
 from .errors import K8sError
 from .inventory import GPU_PRODUCT_LABEL, NodeInfo
 from .manifests import managed_by_labels, render_manifests
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +234,7 @@ def install_component(
     manifest = fetch_manifest(url)
     apply_res = client.apply(manifest, server_side=True, timeout=timeout)
     if not apply_res.success:
-        raise KueueError("Failed to apply manifest from %s: %s" % (url, apply_res.stderr.strip()[:400]))
+        raise KueueError("Failed to apply manifest from %s: %s" % (url, excerpt(apply_res.stderr, 400)))
     wait_res = client.run(
         ["-n", namespace, "wait", "--for=condition=Available", "deploy/%s" % deployment, "--timeout=%ds" % timeout],
         timeout=timeout + 30,

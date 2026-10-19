@@ -11,6 +11,7 @@ from scitrera_app_framework import ext_parse_bool
 
 from sparkrun.runtimes.base import RuntimePlugin
 from sparkrun.runtimes._vllm_common import VllmRuntimeBase, VLLM_FLAG_MAP, VLLM_BOOL_FLAGS
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.core.recipe import Recipe
@@ -180,7 +181,7 @@ class VllmRayRuntime(VllmRuntimeBase):
         if not dry_run and not result.success:
             logger.warning(
                 "Failed to write ray_non_carry_over_env_vars.json: %s",
-                (result.stderr or "")[:200],
+                excerpt(result.stderr, 200),
             )
 
     # --- Log following hooks ---

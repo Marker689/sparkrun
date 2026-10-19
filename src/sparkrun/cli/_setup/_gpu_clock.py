@@ -15,6 +15,7 @@ from .._common import (
     host_options,
 )
 from . import setup
+from sparkrun.utils.text import excerpt
 
 #: SM clock ceiling (MHz) suggested by the status report.  Not applied
 #: implicitly — locking the clock always takes an explicit MAX_CLOCK, since a
@@ -100,11 +101,11 @@ def _report_status(host_list, ssh_kwargs, dry_run) -> int:
     failures = []
     for r in results:
         if not r.success:
-            failures.append((r.host, (r.stderr or r.stdout).strip()[:200]))
+            failures.append((r.host, excerpt(r.stderr or r.stdout, 200)))
             continue
         rows = _parse_status_rows(r.stdout)
         if not rows:
-            failures.append((r.host, (r.stdout or r.stderr).strip()[:200] or "no GPUs reported"))
+            failures.append((r.host, excerpt(r.stdout or r.stderr, 200) or "no GPUs reported"))
             continue
         unit = _parse_unit_state(r.stdout)
         for idx, cur, mx, apps, persistence in rows:
@@ -290,7 +291,7 @@ def setup_throttle_gpu_clock(ctx, max_clock, hosts, hosts_file, cluster_name, us
     for h in host_list:
         r = result_map.get(h)
         if r and not r.success:
-            click.echo("  [FAIL] %s: %s" % (h, (r.stderr or r.stdout).strip()[:200]), err=True)
+            click.echo("  [FAIL] %s: %s" % (h, excerpt(r.stderr or r.stdout, 200)), err=True)
 
     click.echo()
     parts = []

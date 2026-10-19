@@ -34,6 +34,7 @@ from ._phases import (
 from ._ssh import _run_ssh_mesh, _check_ssh_host_identities
 from ._sudo import _record_setup_phase, host_password_prompt, interactive_sudo_passwords, run_sudo_action, save_sudoers_entry
 from sparkrun.orchestration.job_metadata import PRUNE_KEEP_PER_INTENT, PRUNE_MAX_AGE_DAYS
+from sparkrun.utils.text import excerpt
 
 
 @setup.command("completion", hidden=True)
@@ -1204,7 +1205,7 @@ def setup_fix_permissions(ctx, hosts, hosts_file, cluster_name, user, cache_dir,
                 click.echo("  [OK]   %s: %s" % (h, r.stdout.strip()))
         else:
             fail_count += 1
-            click.echo("  [FAIL] %s: %s" % (h, r.stderr.strip()[:200]), err=True)
+            click.echo("  [FAIL] %s: %s" % (h, excerpt(r.stderr, 200)), err=True)
 
     click.echo()
     parts = []
@@ -1293,7 +1294,7 @@ def setup_clear_cache(ctx, hosts, hosts_file, cluster_name, user, save_sudo, dry
             click.echo("  [OK]   %s: %s" % (h, r.stdout.strip()))
         else:
             fail_count += 1
-            click.echo("  [FAIL] %s: %s" % (h, r.stderr.strip()[:200]), err=True)
+            click.echo("  [FAIL] %s: %s" % (h, excerpt(r.stderr, 200)), err=True)
 
     click.echo()
     parts = []
@@ -1407,7 +1408,7 @@ def setup_earlyoom(ctx, hosts, hosts_file, cluster_name, user, extra_prefer, ext
     for h in host_list:
         r = result_map.get(h)
         if r and not r.success:
-            click.echo("  [FAIL] %s: %s" % (h, r.stderr.strip()[:200]), err=True)
+            click.echo("  [FAIL] %s: %s" % (h, excerpt(r.stderr, 200)), err=True)
 
     click.echo()
     parts = []

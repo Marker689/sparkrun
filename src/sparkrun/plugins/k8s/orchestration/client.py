@@ -22,6 +22,7 @@ from sparkrun.utils.shell import b64_wrap_bash, quote
 
 from .errors import K8sError
 from .kubectl import KubectlBinary
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,9 @@ class KubectlClient:
             raise K8sError("kubectl binary not found at %s" % self.binary_path) from exc
         result = RemoteResult(host=self.label, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
         if not result.success:
-            logger.debug("kubectl %s FAILED rc=%d: %s", args[:2], proc.returncode, proc.stderr.strip()[:200])
+            logger.debug("kubectl %s FAILED rc=%d: %s", args[:2], proc.returncode, excerpt(proc.stderr, 200))
             if check:
-                raise K8sError("kubectl %s failed: %s" % (" ".join(args), proc.stderr.strip()[:400]))
+                raise K8sError("kubectl %s failed: %s" % (" ".join(args), excerpt(proc.stderr, 400)))
         return result
 
     def run_json(self, args: list[str], *, timeout: int | None = _DEFAULT_TIMEOUT) -> dict:
@@ -115,7 +116,7 @@ class KubectlClient:
         """
         result = self.run(args, timeout=timeout)
         if not result.success:
-            raise K8sError("kubectl %s failed: %s" % (" ".join(args), result.stderr.strip()[:400]))
+            raise K8sError("kubectl %s failed: %s" % (" ".join(args), excerpt(result.stderr, 400)))
         if "--ignore-not-found" in args and not result.stdout.strip():
             return {}
         try:

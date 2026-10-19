@@ -7,6 +7,7 @@ import logging
 import click
 
 from .._common import _get_cluster_manager
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +256,7 @@ def save_sudoers_entry(label, host_list, user, ssh_kwargs, passwords, *, config,
             installed.append(h)
             click.echo("  [OK]   %s: %s" % (h, result.detail))
         else:
-            click.echo("  [FAIL] %s: %s" % (h, result.detail[:200]), err=True)
+            click.echo("  [FAIL] %s: %s" % (h, excerpt(result.detail, 200)), err=True)
     click.echo("Sudoers install: %d OK, %d failed." % (len(installed), len(targets) - len(installed)))
     if installed:
         _record_setup_phase(cluster_name, user, installed, "sudoers", files=[path])

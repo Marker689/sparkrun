@@ -42,6 +42,7 @@ from sparkrun.orchestration.primitives import run_script_on_host
 from sparkrun.orchestration.ssh import run_rsync
 from sparkrun.utils import parse_scoped_name
 from sparkrun.utils.shell import safe_remote_path
+from sparkrun.utils.text import excerpt
 
 if TYPE_CHECKING:
     from sparkrun.core.config import SparkrunConfig
@@ -284,7 +285,7 @@ def _rsync_to_head(
         failure = TransferFailure(
             host=head,
             reason=classify_rsync_failure(result),
-            detail=(result.stderr or "")[:400],
+            detail=excerpt(result.stderr, 400),
         )
         present_and_raise_transfer_failure(
             [failure],

@@ -22,6 +22,7 @@ from typing import Any
 
 from sparkrun.core.hardware import HostHardware
 from sparkrun.scripts import inject_shell_vars, read_script
+from sparkrun.utils.text import excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -348,8 +349,8 @@ def probe_host(
         **(ssh_kwargs or {}),
     )
     if not result.success:
-        logger.warning("Hardware probe failed on %s: %s", host, result.stderr[:200])
-        return HostHardware(notes="hardware probe failed: %s" % result.stderr[:120])
+        logger.warning("Hardware probe failed on %s: %s", host, excerpt(result.stderr, 200))
+        return HostHardware(notes="hardware probe failed: %s" % excerpt(result.stderr, 120))
 
     return _parse_probe_result(result.stdout)
 
@@ -397,8 +398,8 @@ def probe_hosts(
     hardware: dict[str, HostHardware] = {}
     for result in results:
         if not result.success:
-            logger.warning("Hardware probe failed on %s: %s", result.host, result.stderr[:200])
-            hardware[result.host] = HostHardware(notes="hardware probe failed: %s" % result.stderr[:120])
+            logger.warning("Hardware probe failed on %s: %s", result.host, excerpt(result.stderr, 200))
+            hardware[result.host] = HostHardware(notes="hardware probe failed: %s" % excerpt(result.stderr, 120))
         else:
             hardware[result.host] = _parse_probe_result(result.stdout)
 

@@ -15,6 +15,7 @@ from sparkrun.core.application_profile import remote_cache_path, get_application
 import logging
 import subprocess
 from pathlib import Path
+from sparkrun.utils.text import excerpt
 
 from sparkrun.orchestration.ssh import (
     build_ssh_cmd,
@@ -146,7 +147,7 @@ def ensure_nv_monitor(
             logger.warning(
                 "Cannot create deploy directory on %s: %s",
                 r.host,
-                r.stderr.strip()[:200] or r.stdout.strip()[:200],
+                excerpt(r.stderr, 200) or excerpt(r.stdout, 200),
             )
             status[r.host] = False
 
@@ -182,7 +183,7 @@ def ensure_nv_monitor(
             logger.info("Deployed nv-monitor to %s", r.host)
             status[r.host] = True
         else:
-            logger.warning("Failed to deploy nv-monitor to %s: %s", r.host, r.stderr.strip()[:200])
+            logger.warning("Failed to deploy nv-monitor to %s: %s", r.host, excerpt(r.stderr, 200))
             status[r.host] = False
 
     return status

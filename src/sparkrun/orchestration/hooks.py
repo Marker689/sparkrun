@@ -19,7 +19,7 @@ from pathlib import Path
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
-from sparkrun.utils.text import coerce_command_list, render_template, sanitize_line_continuations
+from sparkrun.utils.text import coerce_command_list, excerpt, render_template, sanitize_line_continuations
 
 logger = logging.getLogger(__name__)
 
@@ -590,12 +590,122 @@ def run_post_commands(
                 logger.info("  | %s", line)
 
         if result.returncode != 0:
-            raise RuntimeError("post_commands[%d] failed (exit %d): %s" % (i, result.returncode, cmd))
+            raise RuntimeError(
+                _hook_failure_message(
+                    "post_commands[%d] failed (exit %d): %s" % (i, result.returncode, cmd),
+                    cmd=cmd,
+                    stdout=result.stdout,
+                    stderr="",
+                    log_key="%s-control" % (hook_env.get("SPARKRUN_CLUSTER_ID") or "unscoped"),
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+# Inline budget for a failed hook's output. The message reaches the terminal
+# and, for an exported systemd unit, the journal; the full output goes to a
+# file (see _save_failure_output).
+HOOK_FAILURE_EXCERPT_LIMIT = 3000
+_COPY_FAILURE_EXCERPT_LIMIT = 1000
+# A failure log is kept per workload and host, overwritten by the next failure
+# there; this bounds the ones whose workload never fails (or runs) again.
+FAILURE_LOG_MAX_AGE_S = 30 * 24 * 3600
+_FAILURE_LOG_KEY = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _redactor():
+    """Redactor for hook output, including the HF token when one can be read.
+
+    The token lookup reads a file and can raise (an unreadable token file); a
+    failure message must never be lost to that, so it degrades to the
+    pattern- and environment-based redaction.
+    """
+    from sparkrun.core.config import resolve_hf_token
+    from sparkrun.diagnostics.redaction import Redactor
+
+    try:
+        token = resolve_hf_token()
+    except Exception as exc:
+        logger.debug("HF token unavailable for redaction: %s", exc)
+        token = None
+    return Redactor([token])
+
+
+def _failure_log_dir() -> Path:
+    from sparkrun.core.config import resolve_sparkrun_cache_dir
+
+    return resolve_sparkrun_cache_dir() / "failures"
+
+
+def _save_failure_output(log_key: str, content: str) -> Path | None:
+    """Write a failed hook's complete output where the user can read it later.
+
+    One file per workload and host, overwritten by the next failure, so it
+    always describes the latest attempt without accumulating. Best effort: a
+    failure to write is logged and never replaces the hook's own error.
+    """
+    from sparkrun.utils.fs import atomic_private_write
+
+    try:
+        directory = _failure_log_dir()
+        path = directory / ("%s.log" % _FAILURE_LOG_KEY.sub("_", log_key).strip("._"))
+    except Exception as exc:
+        logger.warning("Could not resolve where to save full hook output: %s", exc)
+        return None
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_private_write(path, content)
+    except OSError as exc:
+        logger.warning("Could not save full hook output to %s: %s", path, exc)
+        return None
+    _prune_failure_logs(directory, keep=path)
+    return path
+
+
+def _prune_failure_logs(directory: Path, *, keep: Path) -> None:
+    import time
+
+    cutoff = time.time() - FAILURE_LOG_MAX_AGE_S
+    for entry in directory.glob("*.log"):
+        try:
+            if entry != keep and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError as exc:
+            logger.debug("Could not prune failure log %s: %s", entry, exc)
+
+
+def _hook_failure_message(summary: str, *, cmd: str, stdout: str, stderr: str, log_key: str) -> str:
+    """Failure message for a hook: a head+tail excerpt plus where the rest is.
+
+    The excerpt keeps the end of the output, where a traceback names its
+    exception (issue #325). Both the message and the saved file are redacted,
+    since hook output can echo tokens and the message reaches the journal.
+    """
+    from datetime import datetime, timezone
+
+    redact = _redactor()
+    output = stderr if (stderr or "").strip() else stdout
+    # Redact before cutting: a cut through a token leaves a fragment that
+    # neither the literal match nor the KEY=value pattern recognizes.
+    detail = excerpt(redact(output or ""), HOOK_FAILURE_EXCERPT_LIMIT) or "(no output)"
+    sections = ["%s\n" % summary, "time: %s\n" % datetime.now(timezone.utc).isoformat(), "command:\n%s\n" % cmd]
+    for name, stream in (("stderr", stderr), ("stdout", stdout)):
+        if (stream or "").strip():
+            sections.append("--- %s ---\n%s\n" % (name, stream.rstrip()))
+    path = _save_failure_output(log_key, redact("\n".join(sections)))
+    message = "%s:\n%s" % (summary, detail)
+    if path is not None:
+        message += "\n(full output: %s)" % path
+    return message
+
+
+def _copy_failure_message(label: str, host: str, container_name: str, result) -> str:
+    detail = excerpt(result.stderr or result.stdout, _COPY_FAILURE_EXCERPT_LIMIT) or "(no output)"
+    return "%s copy failed on %s/%s: %s" % (label, host, container_name, detail)
 
 
 def _post_launch_context(context: dict[str, str], head_host: str = "") -> HookLaunchContext:
@@ -645,8 +755,15 @@ def _run_exec_command(
     result = run_script_on_host(host, script, ssh_kwargs=ssh_kwargs, timeout=600, dry_run=dry_run)
 
     if not dry_run and not result.success:
-        error_msg = result.stderr or result.stdout or "(no output)"
-        raise RuntimeError("%s failed (exit %d) on %s/%s: %s" % (label, result.returncode, host, container_name, error_msg[:500]))
+        raise RuntimeError(
+            _hook_failure_message(
+                "%s failed (exit %d) on %s/%s" % (label, result.returncode, host, container_name),
+                cmd=cmd,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                log_key="%s-%s" % ((env or {}).get("SPARKRUN_CLUSTER_ID") or "unscoped", host),
+            )
+        )
 
 
 def _run_copy_command(
@@ -727,9 +844,7 @@ def _run_copy_command(
             label=label,
         )
         if not result.success:
-            raise TransferError(
-                "%s copy failed on %s/%s: %s" % (label, host, container_name, result.stderr[:500] if result.stderr else "(no output)")
-            )
+            raise TransferError(_copy_failure_message(label, host, container_name, result))
         return
     elif should_run_locally(host, kw.get("ssh_user")):
         # Local: docker cp directly
@@ -740,9 +855,7 @@ def _run_copy_command(
         }
         result = run_script_on_host(host, script, ssh_kwargs=ssh_kwargs, timeout=120)
         if not result.success:
-            raise TransferError(
-                "%s copy failed on %s/%s: %s" % (label, host, container_name, result.stderr[:500] if result.stderr else "(no output)")
-            )
+            raise TransferError(_copy_failure_message(label, host, container_name, result))
     else:
         # Remote: rsync source to temp dir, then docker cp.
         # Check steps in order so the FIRST failure (root cause) is reported,
@@ -761,7 +874,7 @@ def _run_copy_command(
             failure = TransferFailure(
                 host=host,
                 reason=classify_rsync_failure(mkdir_result),
-                detail=(mkdir_result.stderr or mkdir_result.stdout or "")[:400],
+                detail=excerpt(mkdir_result.stderr or mkdir_result.stdout, 400),
             )
             present_and_raise_transfer_failure(
                 [failure],
@@ -798,9 +911,7 @@ def _run_copy_command(
         }
         result = run_script_on_host(host, script, ssh_kwargs=ssh_kwargs, timeout=120)
         if not result.success:
-            raise TransferError(
-                "%s copy failed on %s/%s: %s" % (label, host, container_name, result.stderr[:500] if result.stderr else "(no output)")
-            )
+            raise TransferError(_copy_failure_message(label, host, container_name, result))
 
 
 def _run_delegated_copy(

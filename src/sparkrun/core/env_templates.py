@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
+from sparkrun.utils.text import excerpt
 
 LAUNCH_FIELDS = frozenset({"model_path", "model_revision", "num_nodes", "node_rank", "node_host", "cluster_id", "runtime_cache_dir"})
 # Match only our reserved namespaces, not JSON, shell ${VAR}, or other braces.
@@ -138,7 +139,7 @@ def probe_model_path(
     script = "python3 - %s <<'SPARKRUN_MODEL_PROBE'\n%s\nSPARKRUN_MODEL_PROBE\n" % (quote(payload), read_script("resolve_model_path.py"))
     result = run_script_on_host(host, script, ssh_kwargs=ssh_kwargs, timeout=60)
     if not result.success:
-        raise ValueError("cannot resolve prepared model on %s: %s" % (host, (result.stderr or "cache probe failed").strip()[:500]))
+        raise ValueError("cannot resolve prepared model on %s: %s" % (host, excerpt(result.stderr or "cache probe failed", 500)))
     lines = [line.removeprefix("SPARKRUN_MODEL_PATH=") for line in result.stdout.splitlines() if line.startswith("SPARKRUN_MODEL_PATH=")]
     try:
         data = json.loads(lines[-1])
