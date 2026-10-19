@@ -963,7 +963,10 @@ for the wire format, lazy ID creation and migration behavior.
 
 An installed integration can register a `HardwarePlatformPlugin` with
 `register_platform` and extend the target probe through `register_hardware_probe`
-(all from `sparkrun.plugins`). Device-specific shell
+(all from `sparkrun.plugins`). Its abstract `collective_backend()` returns a
+`CollectiveBackend`; the concrete providers (`NcclBackend`, `RcclBackend`,
+`HcclBackend`, and `NoCollectiveBackend` for single-rank platforms) are exported
+from `sparkrun.plugins` too. Device-specific shell
 facts and the hardware enricher stay in the plugin. The normal fingerprint and
 combined accelerator/IB probes include selected providers, and failed installed
 plugin registration rolls back their probe registrations. See
