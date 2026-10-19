@@ -12,8 +12,9 @@ from typing import Any, Iterator, Sequence
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.color import Color
 from textual.geometry import Size
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Button, Input, OptionList, Static
 
 from sparkrun.api._errors import SparkrunError
 from sparkrun.cli._monitor_logs import (
@@ -31,6 +32,7 @@ from sparkrun.cli._monitor_logs import (
     ViewState,
     WorkloadList,
     DumpLogScreen,
+    StopWorkloadScreen,
     canonical_scope,
     default_dump_path,
     distinct_scopes,
@@ -1620,6 +1622,7 @@ class _WorkloadListTestApp(App):
         self.wl = wl
         self.opened_log = None
         self.dump_request = None
+        self.stop_request = None
         self.backed_to_hosts = False
 
     def compose(self) -> ComposeResult:
@@ -1630,6 +1633,9 @@ class _WorkloadListTestApp(App):
 
     def on_workload_list_request_dump(self, event: WorkloadList.RequestDump) -> None:
         self.dump_request = (event.host, event.cluster_id, event.container, event.scope)
+
+    def on_workload_list_request_stop(self, event: WorkloadList.RequestStop) -> None:
+        self.stop_request = (event.host, event.cluster_id, event.container)
 
     def on_workload_list_back_to_hosts(self, event: WorkloadList.BackToHosts) -> None:
         self.backed_to_hosts = True
@@ -2037,6 +2043,42 @@ def test_workload_list_pilot():
             # Old index was 1, nearest selectable is index 1 (c0)
             assert wl.highlighted == 1
             assert wl._rows[1].key == "cid1:c0"
+
+    asyncio.run(_run())
+
+
+def test_workload_list_k_requests_stop():
+    import asyncio
+
+    rows = [
+        WorkloadRow(key="header:cid1", text="cid1", is_header=True, cluster_id="cid1"),
+        WorkloadRow(key="cid1:c1", text="  c1", is_header=False, cluster_id="cid1", container="c1"),
+        WorkloadRow(key="cid1:c2", text="  c2", is_header=False, cluster_id="cid1", container="c2"),
+    ]
+    wl = WorkloadList(host="h1", rows=rows)
+    app = _WorkloadListTestApp(wl)
+
+    async def _run():
+        async with app.run_test() as pilot:
+            assert wl.highlighted == 1  # first container row highlighted by default
+            await pilot.press("down")
+            await pilot.press("k")
+            assert app.stop_request == ("h1", "cid1", "c2")
+
+    asyncio.run(_run())
+
+
+def test_workload_list_k_ignores_header_only_rows():
+    import asyncio
+
+    rows = [WorkloadRow(key="empty", text="No workloads", is_header=True)]
+    wl = WorkloadList(host="h1", rows=rows)
+    app = _WorkloadListTestApp(wl)
+
+    async def _run():
+        async with app.run_test() as pilot:
+            await pilot.press("k")
+            assert app.stop_request is None
 
     asyncio.run(_run())
 
@@ -3113,6 +3155,172 @@ class _DumpModalTestApp(App):
         self.result = res
 
 
+class _StopModalTestApp(App):
+    def __init__(self, screen: StopWorkloadScreen, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.modal = screen
+        self.result = None
+
+    def on_mount(self) -> None:
+        self.push_screen(self.modal, callback=self._on_result)
+
+    def _on_result(self, res: Any) -> None:
+        self.result = res
+
+
+def test_stop_modal_arrow_keys_move_between_buttons():
+    import asyncio
+
+    async def _run():
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            cancel = app.modal.query_one("#stop-cancel")
+            confirm = app.modal.query_one("#stop-confirm")
+            assert app.focused is cancel
+
+            # The y/n shortcuts are gone: the button row is the whole interface.
+            await pilot.press("y")
+            await pilot.pause(0.05)
+            assert app.result is None
+            assert isinstance(app.screen, StopWorkloadScreen)
+
+            await pilot.press("right")
+            await pilot.pause(0.05)
+            assert app.focused is confirm
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert app.result is True
+
+        # Left/up walk back, so the row is navigable in both directions.
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("right")
+            await pilot.pause(0.05)
+            assert app.focused is app.modal.query_one("#stop-confirm")
+            await pilot.press("left")
+            await pilot.pause(0.05)
+            assert app.focused is app.modal.query_one("#stop-cancel")
+
+    asyncio.run(_run())
+
+
+def test_stop_modal_buttons_confirm_and_cancel():
+    import asyncio
+
+    async def _run():
+        # Cancel is focused on open, so a stray enter cancels rather than stops.
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            assert app.focused is app.modal.query_one("#stop-cancel")
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert app.result is False
+
+        # Mouse paths: the buttons dismiss with the same verdict as the keys.
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            await pilot.click("#stop-cancel")
+            await pilot.pause(0.05)
+            assert app.result is False
+
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            await pilot.click("#stop-confirm")
+            await pilot.pause(0.05)
+            assert app.result is True
+
+        # Keyboard activation of the Stop button.
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            app.modal.query_one("#stop-confirm").focus()
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert app.result is True
+
+    asyncio.run(_run())
+
+
+def _relative_luminance(color: Color) -> float:
+    def channel(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+
+
+def _contrast_ratio(a: Color, b: Color) -> float:
+    hi, lo = sorted((_relative_luminance(a), _relative_luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_stop_modal_cancel_button_contrasts_with_the_dialog():
+    import asyncio
+
+    async def _run():
+        app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            dialog = app.modal.query_one("#stop-dialog")
+            cancel = app.modal.query_one("#stop-cancel")
+            background = dialog.styles.background
+            # The dialog sits on a neutral elevated shade: readable against the
+            # theme foreground, and distinct from the buttons' own $surface fill.
+            assert background == Color.parse(app.theme_variables["background-lighten-2"])
+            assert background != Color.parse(app.theme_variables["panel"])
+            assert background != cancel.styles.background
+            assert _contrast_ratio(background, Color.parse(app.theme_variables["foreground"])) >= 7.0
+
+    asyncio.run(_run())
+
+
+def test_stop_modal_buttons_are_centered_in_the_dialog():
+    import asyncio
+
+    async def _run():
+        for size in ((120, 40), (80, 24)):
+            app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause(0.05)
+                dialog = app.modal.query_one("#stop-dialog")
+                row = app.modal.query_one("#stop-buttons")
+                cancel = app.modal.query_one("#stop-cancel")
+                confirm = app.modal.query_one("#stop-confirm")
+
+                for button, label in ((cancel, "Cancel"), (confirm, "Stop")):
+                    assert dialog.region.contains_region(button.region), size
+                    # Wide enough for the whole label, no ellipsis.
+                    assert button.size.width >= len(label), size
+                assert cancel.region.right <= confirm.region.x, size
+
+                left_gap = cancel.region.x - row.region.x
+                right_gap = row.region.right - confirm.region.right
+                assert abs(left_gap - right_gap) <= 2, (size, left_gap, right_gap)
+
+    asyncio.run(_run())
+
+
+def test_stop_modal_cancel_keys():
+    import asyncio
+
+    async def _run():
+        for key in ("escape", "q"):
+            app = _StopModalTestApp(StopWorkloadScreen(host="h1", cluster_id="cid1", container="c1"))
+            async with app.run_test() as pilot:
+                await pilot.pause(0.05)
+                await pilot.press(key)
+                await pilot.pause(0.05)
+                assert app.result is False
+                assert not isinstance(app.screen, StopWorkloadScreen)
+
+    asyncio.run(_run())
+
+
 def test_dump_modal_single_distinct_scope(tmp_path, monkeypatch):
     import asyncio
     import os
@@ -3381,6 +3589,90 @@ def test_dump_modal_directory_error_display():
             assert app.result is None
 
     asyncio.run(_run())
+
+
+def test_dump_modal_ok_reenabled_after_worker_error(tmp_path, monkeypatch):
+    import asyncio
+
+    out_file = tmp_path / "recovered.log"
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="after error")])
+    calls = {"count": 0}
+
+    def _open(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise SparkrunError("transport went away")
+        return target
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", _open)
+    summary = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+
+    async def _run():
+        screen = DumpLogScreen(host="h1", cluster_id="cid1", container="c1", summary=summary)
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            ok = screen.query_one("#dump-ok", Button)
+            screen.query_one("#dump-path-input", Input).value = str(out_file)
+            await pilot.click("#dump-ok")
+            for _ in range(40):
+                if not screen._dumping and "transport went away" in str(screen.query_one("#dump-error", Static).content):
+                    break
+                await pilot.pause(0.05)
+            assert "transport went away" in str(screen.query_one("#dump-error", Static).content)
+            # A failed dump must not leave OK dead: the corrected path starts
+            # through the same button. The short pause lets the re-enable settle
+            # before the click is dispatched.
+            assert ok.disabled is False
+            await pilot.pause(0.15)
+            await pilot.click("#dump-ok")
+            for _ in range(40):
+                if app.result is not None:
+                    break
+                await pilot.pause(0.05)
+            assert app.result == str(out_file)
+            assert "after error" in out_file.read_text()
+
+    asyncio.run(_run())
+
+
+def test_dump_modal_buttons_submit_and_cancel(tmp_path, monkeypatch):
+    import asyncio
+
+    out_file = tmp_path / "button-dump.log"
+    target = FakeLogTarget(lines=[LogLine(host="h1", container="c1", text="button line")])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: target)
+    summary = ScopeSummary(node_containers=1, cluster_containers=1, cluster_hosts=1)
+
+    async def _run():
+        screen = DumpLogScreen(host="h1", cluster_id="cid1", container="c1", summary=summary)
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            assert str(screen.query_one("#dump-cancel", Button).label) == "Cancel"
+            assert str(screen.query_one("#dump-ok", Button).label) == "OK"
+            screen.query_one("#dump-path-input", Input).value = str(out_file)
+            await pilot.click("#dump-ok")
+            for _ in range(40):
+                if app.result is not None:
+                    break
+                await pilot.pause(0.05)
+            assert app.result == str(out_file)
+            assert "button line" in out_file.read_text()
+
+    asyncio.run(_run())
+
+    async def _run_cancel():
+        screen = DumpLogScreen(host="h1", cluster_id="cid1", container="c1", summary=summary)
+        app = _DumpModalTestApp(screen)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+            await pilot.click("#dump-cancel")
+            await pilot.pause(0.05)
+            assert app.result is None
+            assert not isinstance(app.screen, DumpLogScreen)
+
+    asyncio.run(_run_cancel())
 
 
 def test_dump_modal_escape_during_dump_cancels_immediately(tmp_path, monkeypatch):

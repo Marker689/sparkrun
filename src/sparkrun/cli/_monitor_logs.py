@@ -26,13 +26,13 @@ from textual.message import Message
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.actions import SkipAction
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.geometry import Size
 from textual.screen import ModalScreen
 from textual.scrollbar import ScrollTo, ScrollUp
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from sparkrun.api import LogTarget, SparkrunError, open_log_target
@@ -695,12 +695,22 @@ class WorkloadList(OptionList):
             self.container = container
             self.scope = scope
 
+    class RequestStop(Message):
+        """Posted when stopping the highlighted workload is requested."""
+
+        def __init__(self, host: str, cluster_id: str, container: str) -> None:
+            super().__init__()
+            self.host = host
+            self.cluster_id = cluster_id
+            self.container = container
+
     class BackToHosts(Message):
         """Posted when user requests back navigation."""
 
     BINDINGS = [
         Binding("enter", "select_container", "Logs", priority=True),
         Binding("d", "dump_container", "Dump", priority=True),
+        Binding("k", "stop_workload", "Stop", priority=True),
         Binding("escape", "back_to_hosts", "Back", priority=True),
         Binding("q", "back_to_hosts", "Back", show=False, priority=True),
     ]
@@ -770,6 +780,14 @@ class WorkloadList(OptionList):
         if row.is_header or not row.container:
             return
         self.post_message(self.RequestDump(self.host, row.cluster_id, row.container, LogScope.CONTAINER))
+
+    def action_stop_workload(self) -> None:
+        if self.highlighted is None or not (0 <= self.highlighted < len(self._rows)):
+            return
+        row = self._rows[self.highlighted]
+        if row.is_header or not row.container:
+            return
+        self.post_message(self.RequestStop(self.host, row.cluster_id, row.container))
 
     def action_back_to_hosts(self) -> None:
         self.post_message(self.BackToHosts())
@@ -2343,6 +2361,14 @@ class DumpLogScreen(ModalScreen[Any]):
         height: auto;
         color: $error;
     }
+    #dump-buttons {
+        dock: bottom;
+        height: auto;
+        margin-top: 1;
+    }
+    #dump-buttons Button {
+        margin-right: 2;
+    }
     """
 
     BINDINGS = [
@@ -2421,6 +2447,9 @@ class DumpLogScreen(ModalScreen[Any]):
                 id="dump-overwrite-list",
             )
             yield Static(id="dump-error")
+            with Horizontal(id="dump-buttons"):
+                yield Button("Cancel", id="dump-cancel")
+                yield Button("OK", id="dump-ok", variant="primary")
 
     def on_mount(self) -> None:
         if self._has_scope_list:
@@ -2465,25 +2494,39 @@ class DumpLogScreen(ModalScreen[Any]):
                 self.dismiss(None)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "dump-path-input":
+            self._submit_path(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "dump-cancel":
+            self.action_cancel()
+        elif event.button.id == "dump-ok":
+            self._submit_path(self.query_one("#dump-path-input", Input).value)
+
+    def _submit_path(self, value: str) -> None:
+        """Validate the path and start the dump (or ask before overwriting)."""
         if self._dumping:
             return
-        if event.input.id == "dump-path-input":
-            path_str = event.value.strip()
-            if not path_str:
-                self._set_error("File path cannot be empty")
-                return
-            resolved = os.path.abspath(os.path.expanduser(path_str))
-            parent = os.path.dirname(resolved)
-            if not os.path.isdir(parent):
-                self._set_error(f"Directory {parent!r} does not exist")
-                return
-            if not os.access(parent, os.W_OK):
-                self._set_error(f"Directory {parent!r} is not writable")
-                return
-            if os.path.exists(resolved):
-                self._prompt_overwrite(resolved)
-                return
-            self._start_dump(resolved, overwrite=False)
+        path_str = value.strip()
+        if not path_str:
+            self._set_error("File path cannot be empty")
+            return
+        resolved = os.path.abspath(os.path.expanduser(path_str))
+        parent = os.path.dirname(resolved)
+        if not os.path.isdir(parent):
+            self._set_error(f"Directory {parent!r} does not exist")
+            return
+        if not os.access(parent, os.W_OK):
+            self._set_error(f"Directory {parent!r} is not writable")
+            return
+        if self._pending_dump_path == resolved:
+            # A second OK (or Enter) on the overwrite prompt confirms it.
+            self._start_dump(resolved, overwrite=True)
+            return
+        if os.path.exists(resolved):
+            self._prompt_overwrite(resolved)
+            return
+        self._start_dump(resolved, overwrite=False)
 
     def _prompt_overwrite(self, resolved_path: str) -> None:
         self._pending_dump_path = resolved_path
@@ -2523,6 +2566,7 @@ class DumpLogScreen(ModalScreen[Any]):
         self._dumping = True
         try:
             self.query_one("#dump-path-input", Input).disabled = True
+            self.query_one("#dump-ok", Button).disabled = True
             if self._has_scope_list:
                 self.query_one("#dump-scope-list", OptionList).disabled = True
             overwrite_list = self.query_one("#dump-overwrite-list", OptionList)
@@ -2572,6 +2616,7 @@ class DumpLogScreen(ModalScreen[Any]):
                 try:
                     path_input = self.query_one("#dump-path-input", Input)
                     path_input.disabled = False
+                    self.query_one("#dump-ok", Button).disabled = False
                     if self._has_scope_list:
                         self.query_one("#dump-scope-list", OptionList).disabled = False
                     overwrite_list = self.query_one("#dump-overwrite-list", OptionList)
@@ -2583,3 +2628,77 @@ class DumpLogScreen(ModalScreen[Any]):
                 self._set_error(f"[red]{err_msg}[/red]")
 
             self.app.call_from_thread(_on_err, str(e))
+
+
+class StopWorkloadScreen(ModalScreen[bool]):
+    """Modal screen confirming a workload stop; dismisses True to confirm."""
+
+    DEFAULT_CSS = """
+    StopWorkloadScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }
+    # A neutral elevated shade, not $panel: $panel carries the theme's accent
+    # tint and dims the body text. The buttons keep their own $surface fill,
+    # which stays visible against the neutral dialog.
+    #stop-dialog {
+        width: 60;
+        height: auto;
+        border: thick $warning;
+        background: $background-lighten-2;
+        padding: 1 2;
+    }
+    #stop-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #stop-buttons {
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+    #stop-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        # The buttons are the whole interface: left/right (and up/down) move
+        # focus between them and enter/space activates the focused one. Escape
+        # and q still cancel without leaving the button row.
+        Binding("left", "app.focus_previous", "Previous", show=False, priority=True),
+        Binding("up", "app.focus_previous", "Previous", show=False, priority=True),
+        Binding("right", "app.focus_next", "Next", show=False, priority=True),
+        Binding("down", "app.focus_next", "Next", show=False, priority=True),
+        Binding("escape", "cancel", "Cancel", priority=True),
+        Binding("q", "cancel", "Cancel", show=False, priority=True),
+    ]
+
+    def __init__(self, host: str, cluster_id: str, container: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.host = host
+        self.cluster_id = cluster_id
+        self.container = container
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="stop-dialog"):
+            yield Static(f"Stop workload [bold]{self.cluster_id}[/bold]?", id="stop-title")
+            yield Static(f"Every container of the workload will be stopped (highlighted: {self.container} on {self.host}).")
+            with Horizontal(id="stop-buttons"):
+                yield Button("Cancel", id="stop-cancel")
+                yield Button("Stop", id="stop-confirm", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#stop-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "stop-confirm":
+            self.action_confirm()
+        elif event.button.id == "stop-cancel":
+            self.action_cancel()
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)

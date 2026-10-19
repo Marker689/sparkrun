@@ -31,15 +31,11 @@ for a line shape someone has actually read there:
              ``token usage`` and ``accept rate`` are pool fractions (0..1), not
              percents; ``#new-token`` is the uncached portion, so the hit rate is
              ``cached / (new + cached)``.
-             The prefill line's own ``input throughput (token/s)`` field is
-             deliberately not read: the engine divides the batch's tokens by the
-             wall time since the previous prefill *print* (metrics_reporter.py,
-             read in 0.0.0.dev1+gda64c5cbb), so the denominator collapses to
-             milliseconds whenever two prints share a scheduling iteration — the
-             chunked-prefill completion line, or a print on the heels of another
-             — and it reports tens of thousands of t/s. That rate is recomputed
-             here instead, from the line's ``#new-token`` (+ ``#replay-token``)
-             over its own timestamp delta, floored at the stamp resolution.
+             The prefill line's ``input throughput (token/s)`` field is the pp
+             metric: the engine divides the batch's new tokens (``#new-token``,
+             plus ``#replay-token``) by the wall time since the previous prefill
+             print (metrics_reporter.report_prefill_stats), so it is read
+             verbatim.
 * llama-server every era logs behind the same slot-line prefix
              ``slot %12.*s: id %2d | task %d | `` (server-common.h / utils.hpp),
              identical at b4000, b8076/b8094 and master, so the rules below match
@@ -108,7 +104,6 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 import math
 import re
 
@@ -227,22 +222,6 @@ class _MetricRule:
 # group except the ratio rules, which need two.
 _NUM = r"\d+(?:\.\d+)?"
 
-# SGLang's prefill print carries the log timestamp and the batch's token count,
-# and its own ``input throughput`` field is unusable (see the module
-# docstring), so the prompt rate is computed from those two values instead.
-# The ``INFO`` prefix and the period after ``batch`` are older spellings of the
-# same line; a rule that skipped them would drop the metric on those builds.
-_SGLANG_PREFILL_RE = re.compile(
-    r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) TP\d+\](?: INFO)? Prefill batch[,.]"
-    r".*?#new-token: (\d+),"
-    r"(?:.*?#replay-token: (\d+),)?"
-)
-_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
-# Log stamps have one-second resolution, so one second is the smallest interval
-# a rate can be measured over — and it bounds the result, because ``#new-token``
-# is capped by the engine's chunked-prefill size (measured max 4096 t/s).
-_MIN_RATE_INTERVAL_S = 1.0
-
 # TensorFold's per-request completion line (see the module docstring for the
 # field meanings). The order is fixed by the emitter; only the optional
 # ``background preemptions`` field floats, sitting between prefill and rounds.
@@ -276,6 +255,7 @@ _RULES: tuple[_MetricRule, ...] = (
     _MetricRule(re.compile(rf"Avg Draft acceptance rate: ({_NUM})%"), "accept"),
     # SGLang decode/prefill lines
     _MetricRule(re.compile(rf"gen throughput \(token/s\): ({_NUM})"), "gen"),
+    _MetricRule(re.compile(rf"input throughput \(token/s\): ({_NUM})"), "prompt"),
     _MetricRule(re.compile(r"#running-req: (\d+)"), "run"),
     _MetricRule(re.compile(r"#queue-req: (\d+)"), "queue"),
     # KV pool usage, one rule per pool the engine itself reports, all folding
@@ -376,8 +356,6 @@ class RuntimeMetricsScraper:
         self._window: dict[str, dict[tuple[str, str], tuple[float, int]]] = {}
         self._rings: dict[str, dict[tuple[str, str], deque[float]]] = {}
         self._dirty: set[str] = set()
-        # Last prefill timestamp per source, for the recomputed prompt rate.
-        self._prefill_ts: dict[tuple[str, str], datetime] = {}
         # Hashes of the last ingested page per source, for observe_page alignment.
         self._tails: dict[tuple[str, str], list[int]] = {}
 
@@ -389,7 +367,6 @@ class RuntimeMetricsScraper:
         """Scrape one line into *source*'s window; *replace* seeds, else averages."""
         if not any(gate in text for gate in _GATES):
             return
-        self._observe_sglang_prefill(source, text, replace=replace)
         self._observe_tensorfold_done(source, text, replace=replace)
         pooled: dict[str, float] = {}
         for rule in _RULES:
@@ -458,35 +435,6 @@ class RuntimeMetricsScraper:
         for text in texts[skip:]:
             self._observe_line(source, text, replace=seed)
         self._tails[source] = page[-_PAGE_TAIL:]
-
-    def _observe_sglang_prefill(self, source: tuple[str, str], text: str, *, replace: bool) -> None:
-        """Record SGLang's prefill prompt rate from tokens and the log timestamp.
-
-        The engine divides a print's tokens by the wall time since the previous
-        prefill *print* (metrics_reporter.py), which collapses to milliseconds
-        whenever two prints land in one iteration — the chunked-prefill
-        completion line, and any print on the heels of another. Tokens over the
-        log's own timestamp delta cannot collapse: it floors at the log's
-        resolution, and the tokens are capped by the chunk size.
-        """
-        match = _SGLANG_PREFILL_RE.search(text)
-        if match is None:
-            return
-        try:
-            stamp = datetime.strptime(match.group(1), _TS_FORMAT)
-        except ValueError:  # a malformed stamp must not break the stream path
-            return
-        previous = self._prefill_ts.get(source)
-        if previous is not None and stamp <= previous:
-            # Not a new print: a tail-page overlap re-read (the next poll sees
-            # the same last lines again) or a second print in the same second.
-            # Re-measuring either would floor the interval and spike the rate;
-            # skipping keeps re-reads inert.
-            return
-        tokens = int(match.group(2)) + int(match.group(3) or 0)
-        elapsed = max(_MIN_RATE_INTERVAL_S, (stamp - previous).total_seconds()) if previous is not None else _MIN_RATE_INTERVAL_S
-        self._prefill_ts[source] = stamp
-        self._sample("prompt", source, tokens / elapsed, replace=replace)
 
     def _observe_tensorfold_done(self, source: tuple[str, str], text: str, *, replace: bool) -> None:
         """Record TensorFold's completion line: decode rate, prefill rate, cache, spec.
@@ -579,8 +527,6 @@ class RuntimeMetricsScraper:
             rings = self._rings[key]
             for source in [s for s in rings if s not in keep]:
                 del rings[source]
-        for source in [s for s in self._prefill_ts if s not in keep]:
-            del self._prefill_ts[source]
         for source in [s for s in self._tails if s not in keep]:
             del self._tails[source]
 
@@ -589,9 +535,6 @@ class RuntimeMetricsScraper:
         self._window.clear()
         self._rings.clear()
         self._dirty.clear()
-        # A carried stamp would make the next line's delta minutes long and its
-        # rate a spurious near-zero.
-        self._prefill_ts.clear()
         self._tails.clear()
 
 

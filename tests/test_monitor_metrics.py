@@ -69,15 +69,13 @@ _FIXTURES: tuple[tuple[str, str, dict[str, float]], ...] = (
         "gen throughput (token/s): 245.93, #queue-req: 625",
         {"gen": 245.9, "run": 1000.0, "kv": 52.0, "queue": 625.0, "accept": 42.0},
     ),
-    # prefill line: the hit rate is cached / (new + cached) = 2971 / 3292.
-    # The prompt rate is recomputed from #new-token over the log's timestamp
-    # delta (the engine's own "input throughput" field is not read), so a first
-    # line with no earlier stamp floors at the one-second resolution: 321 / 1 s.
+    # prefill line: the hit rate is cached / (new + cached) = 2971 / 3292,
+    # and the pp rate is the engine's own input throughput field, verbatim.
     (
         "sglang-prefill",
         "[2026-10-17 08:12:34 TP0] INFO Prefill batch. #new-seq: 1, #new-token: 321, #cached-token: 2971, "
         "token usage: 0.10, #running-req: 2, #queue-req: 0, cuda graph: True, input throughput (token/s): 536.67",
-        {"hit": 90.2, "prompt": 321.0, "kv": 10.0, "run": 2.0, "queue": 0.0},
+        {"hit": 90.2, "prompt": 536.7, "kv": 10.0, "run": 2.0, "queue": 0.0},
     ),
     # Newer SGLang splits the pool reading into "full token usage" / "swa token
     # usage" on the same line — captured verbatim from a serving container on the
@@ -99,18 +97,17 @@ _FIXTURES: tuple[tuple[str, str, dict[str, float]], ...] = (
         "[2026-10-15 04:26:43 TP0] Prefill batch, #new-seq: 1, #new-token: 4096, #cached-token: 0, "
         "full token usage: 0.00, swa token usage: 0.10, #running-req: 0, #queue-req: 0, "
         "#pending-token: 3856, cuda graph: False, input throughput (token/s): 157.88",
-        {"hit": 0.0, "prompt": 4096.0, "kv": 10.0, "run": 0.0, "queue": 0.0},
+        {"hit": 0.0, "prompt": 157.9, "kv": 10.0, "run": 0.0, "queue": 0.0},
     ),
     # Same build's prefill line, also verbatim from the serving container: the
     # hit rate must show as 0% (not be skipped) when nothing was cached, and
     # "#pending-token" must not reach the queue rule (only "#queue-req" does).
-    # Its prompt rate is the recomputed 193 / 1 s, not the engine's 7.13.
     (
         "sglang-prefill-full-swa",
         "[2026-10-14 22:02:55 TP0] Prefill batch, #new-seq: 1, #new-token: 193, #cached-token: 0, "
         "full token usage: 0.00, swa token usage: 0.00, #running-req: 0, #queue-req: 0, "
         "#pending-token: 0, cuda graph: False, input throughput (token/s): 7.13",
-        {"hit": 0.0, "prompt": 193.0, "kv": 0.0, "run": 0.0, "queue": 0.0},
+        {"hit": 0.0, "prompt": 7.1, "kv": 0.0, "run": 0.0, "queue": 0.0},
     ),
     # real server line (build 10430+, verbatim from a public log); the deployed
     # b809x images have neither this line nor print_timings_pp — see the module
@@ -296,9 +293,9 @@ def _sglang_prefill(stamp: str, new_tokens: int, throughput: float = 1.0) -> str
     )
 
 
-# The reported bug, verbatim: the last two prints of one 25,344-token prompt
-# chunked at 4096.  Both land in the same second, so the engine divides by a
-# millisecond gap and its own field jumps from 10,690 to 88,175 t/s.
+# Verbatim: the last two prints of one 25,344-token prompt chunked at 4096.
+# Both land in the same second, so the engine divides by a millisecond gap; its
+# field is the pp metric, so the footer reports it exactly as printed.
 _SGLANG_PREFILL_SPIKE_PAIR: tuple[str, ...] = (
     "[2026-10-15 00:58:50 TP0] Prefill batch, #new-seq: 1, #new-token: 4096, #cached-token: 0, full token usage: 0.00, "
     "swa token usage: 0.02, #running-req: 0, #queue-req: 0, #pending-token: 603, cuda graph: False, "
@@ -308,81 +305,37 @@ _SGLANG_PREFILL_SPIKE_PAIR: tuple[str, ...] = (
     "input throughput (token/s): 88174.92",
 )
 
-# The whole burst those two lines end: 25,344 tokens over four seconds.
-_SGLANG_PREFILL_BURST: tuple[str, ...] = (
-    _sglang_prefill("2026-10-15 00:58:46", 4096, 229.36),
-    _sglang_prefill("2026-10-15 00:58:47", 4096, 4653.84),
-    _sglang_prefill("2026-10-15 00:58:48", 4096, 4482.37),
-    _sglang_prefill("2026-10-15 00:58:49", 4096, 4607.67),
-    _sglang_prefill("2026-10-15 00:58:50", 4096, 4429.55),
-    _SGLANG_PREFILL_SPIKE_PAIR[0],
-    _SGLANG_PREFILL_SPIKE_PAIR[1],
-)
 
-
-def test_sglang_prefill_prompt_rate_ignores_the_engines_interval_field():
+def test_sglang_prefill_uses_the_engines_input_throughput_field():
     scraper = RuntimeMetricsScraper()
     for line in _SGLANG_PREFILL_SPIKE_PAIR:
         scraper.observe(("h1", "c1"), line)
         scraper.commit()
 
-    # Both prints carry the same stamp, so the second is not a new print and is
-    # skipped rather than measured over a floored one-second interval — the rate
-    # never leaves the chunk-size bound, and never the engine's spike.
-    assert scraper.history("prompt") == [4096.0]
-    assert not {10690.42, 88174.92} & set(scraper.history("prompt"))
-
-
-def test_sglang_prefill_prompt_rate_over_the_live_chunked_burst():
-    scraper = RuntimeMetricsScraper()
-    for line in _SGLANG_PREFILL_BURST:
-        scraper.observe(("h1", "c1"), line)
-        scraper.commit()
-
-    # One point per distinct stamp, bounded by the 4096-token chunk size; the two
-    # trailing prints reuse the last stamp and are skipped.  The engine's own
-    # field on these same lines reaches 10,690 and 88,175 t/s.
-    assert scraper.history("prompt") == [4096.0] * 5
-    assert max(scraper.history("prompt")) == 4096.0
+    # One point per poll, the logged pp value verbatim.
+    assert scraper.history("prompt") == [10690.42, 88174.92]
 
 
 def test_sglang_prefill_prompt_rate_is_per_source():
     scraper = RuntimeMetricsScraper()
     rank0, rank1 = ("h1", "r0"), ("h1", "r1")
-    scraper.observe(rank0, _sglang_prefill("2026-10-15 00:58:46", 1024))
-    scraper.observe(rank0, _sglang_prefill("2026-10-15 00:58:48", 4096))
-    scraper.observe(rank1, _sglang_prefill("2026-10-15 00:58:56", 4096))
+    scraper.observe(rank0, _sglang_prefill("2026-10-15 00:58:46", 1024, 120.0))
+    scraper.observe(rank0, _sglang_prefill("2026-10-15 00:58:48", 4096, 180.0))
+    scraper.observe(rank1, _sglang_prefill("2026-10-15 00:58:56", 4096, 200.0))
     scraper.commit()
 
-    # Each rank carries its own stamp: rank0's prints measure 1024 over a floored
-    # 1 s and 4096 over 2 s, so the window averages 1536; rank1 has no earlier
-    # print and floors at one second.  A stamp shared across sources would have
-    # made rank1 4096 over 10 s instead.
-    assert scraper.latest("prompt", sources={rank0}) == 1536.0
-    assert scraper.latest("prompt", sources={rank1}) == 4096.0
-    assert scraper.latest("prompt") == 1536.0 + 4096.0
+    # Rates add across ranks; each source's window point is its own mean.
+    assert scraper.latest("prompt", sources={rank0}) == 150.0
+    assert scraper.latest("prompt", sources={rank1}) == 200.0
+    assert scraper.latest("prompt") == 350.0
 
 
-def test_sglang_prefill_prompt_rate_floors_after_reset():
-    scraper = RuntimeMetricsScraper()
-    scraper.observe(("h1", "c1"), _sglang_prefill("2026-10-15 00:58:46", 4096))
-    scraper.commit()
-    scraper.reset()
-    scraper.observe(("h1", "c1"), _sglang_prefill("2026-10-15 01:58:46", 4096))
-    scraper.commit()
-
-    # A stamp must not survive a scope switch: the hour-long delta would read as
-    # ~1 t/s, a spurious dip on the new stream's first line.
-    assert scraper.latest("prompt") == 4096.0
-
-
-def test_sglang_prefill_without_timestamp_or_tokens_keeps_other_metrics():
-    # No "[<ts> TPn]" prefix means no interval to measure over, so there is no
-    # prompt rate — and the engine's own field is not used as a fallback.
+def test_sglang_prefill_without_a_timestamp_still_reports_input_throughput():
+    # The field is the only input the pp rule needs: no "[<ts> TPn]" prefix.
     scraped = _scrape(
         "Prefill batch, #new-token: 4096, token usage: 0.10, #running-req: 2, #queue-req: 0, input throughput (token/s): 500.0"
     )
-    assert scraped == {"run": 2.0, "kv": 10.0, "queue": 0.0}
+    assert scraped == {"run": 2.0, "kv": 10.0, "queue": 0.0, "prompt": 500.0}
 
 
 # TensorFold's per-request completion line, verbatim from the deployed
@@ -586,13 +539,13 @@ def test_render_metrics_footer_drops_overflow_items_in_priority_order():
 
 def test_sglang_prefill_reread_page_is_inert():
     scraper = RuntimeMetricsScraper()
-    line = _sglang_prefill("2026-10-15 00:58:46", 4096)
+    page = [_sglang_prefill("2026-10-15 00:58:46", 4096)]
     for _ in range(2):  # the same tail page, polled twice
-        scraper.observe(("h1", "c1"), line)
+        scraper.observe_page(("h1", "c1"), page)
         scraper.commit()
 
-    # Re-observing an unchanged page must not add a point nor change the rate.
-    assert scraper.history("prompt") == [4096.0]
+    # Re-reading an unchanged page must not add a point.
+    assert scraper.history("prompt") == [1.0]
 
 
 def test_observe_page_first_read_seeds_the_last_sample():
@@ -872,16 +825,3 @@ def test_scraper_retain_forgets_dead_sources():
     scraper.observe(rank0, "Avg generation throughput: 120.0 tokens/s")
     scraper.commit()
     assert scraper.latest("gen") == 120.0
-
-
-def test_scraper_retain_drops_prefill_stamps():
-    scraper = RuntimeMetricsScraper()
-    source = ("h1", "r0")
-    scraper.observe(source, _sglang_prefill("2026-10-15 00:58:46", 4096))
-    scraper.commit()
-    scraper.retain({("h1", "r9")})  # the rank's old source is gone
-    scraper.observe(source, _sglang_prefill("2026-10-15 01:58:46", 4096))
-    scraper.commit()
-
-    # A surviving stamp would make the hour-long delta read as ~1 t/s.
-    assert scraper.latest("prompt") == 4096.0

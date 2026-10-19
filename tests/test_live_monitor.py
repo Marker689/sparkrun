@@ -1120,6 +1120,726 @@ def test_cluster_monitor_app_dump_modal(tmp_path, monkeypatch):
     asyncio.run(_run())
 
 
+def test_cluster_monitor_app_stop_modal_cancel(tmp_path):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import StopWorkloadScreen, WorkloadList
+
+    w1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+    act1 = HostActivity(host="h1", workloads=(w1,))
+    frame = MonitorFrame(hosts=(act1,))
+    session = _FakeLiveMonitorSession(frame)
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("enter")  # pin h1, focus the workload list
+            await pilot.pause(0.05)
+            wl = app.query_one("#workload-list", WorkloadList)
+            assert wl.highlighted == 1
+
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, StopWorkloadScreen)
+            assert app.screen.cluster_id == "cid1"
+            assert app.screen.container == "c1"
+
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            assert not isinstance(app.screen, StopWorkloadScreen)
+            assert app.focused is wl
+            assert wl.highlighted == 1
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_stop_modal_confirmed_stops_workload(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import StopResult
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import StopWorkloadScreen
+
+    calls: list[dict] = []
+
+    def _fake_stop(**kwargs):
+        calls.append(kwargs)
+        return StopResult(workload_id=kwargs.get("workload_id", ""), hosts_targeted=("h1",), containers_removed=1)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.stop", _fake_stop)
+
+    w1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+    act1 = HostActivity(host="h1", workloads=(w1,))
+    frame = MonitorFrame(hosts=(act1,))
+    session = _FakeLiveMonitorSession(frame)
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            await pilot.press("right")  # Cancel -> Stop
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            assert not isinstance(app.screen, StopWorkloadScreen)
+
+            for _ in range(40):
+                if calls:
+                    break
+                await pilot.pause(0.05)
+            assert calls == [{"workload_id": "cid1", "cluster": None, "cache_dir": str(tmp_path), "sctx": None}]
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_stop_modal_button_confirms(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import StopResult
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import StopWorkloadScreen
+
+    calls: list[dict] = []
+
+    def _fake_stop(**kwargs):
+        calls.append(kwargs)
+        return StopResult(workload_id=kwargs.get("workload_id", ""), hosts_targeted=("h1",), containers_removed=1)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.stop", _fake_stop)
+
+    w1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w1,)),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            await pilot.click("#stop-confirm")
+            await pilot.pause(0.05)
+            assert not isinstance(app.screen, StopWorkloadScreen)
+
+            for _ in range(40):
+                if calls:
+                    break
+                await pilot.pause(0.05)
+            assert calls and calls[0]["workload_id"] == "cid1"
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_stop_modal_failure_does_not_crash(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import JobNotFound
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import StopWorkloadScreen
+
+    calls: list[dict] = []
+
+    def _fake_stop(**kwargs):
+        calls.append(kwargs)
+        raise JobNotFound("no job metadata")
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.stop", _fake_stop)
+
+    w1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+    act1 = HostActivity(host="h1", workloads=(w1,))
+    frame = MonitorFrame(hosts=(act1,))
+    session = _FakeLiveMonitorSession(frame)
+
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            await pilot.press("enter")  # confirm
+            for _ in range(40):
+                if calls:
+                    break
+                await pilot.pause(0.05)
+            await pilot.pause(0.05)  # let the error notification land on the UI thread
+            assert not isinstance(app.screen, StopWorkloadScreen)
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_r_opens_recipe_picker(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from textual.widgets import DataTable
+    from sparkrun.cli._monitor_recipes import RecipePickerScreen
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.search_recipes", lambda **_kwargs: [])
+
+    act1 = HostActivity(host="h1", telemetry=MonitorSample(hostname="h1", cpu_usage_pct="10"), workloads=())
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(act1,)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            table = app.query_one("#host-table", DataTable)
+            assert table.has_focus  # the initial state is the node selection table
+            await pilot.press("r")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, RecipePickerScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, RecipePickerScreen)
+            assert table.has_focus
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_r_opens_picker_from_workload_list_and_stays_inert_in_modes(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.cli._monitor_recipes import RecipePickerScreen
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import StopWorkloadScreen, WorkloadList
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.search_recipes", lambda **_kwargs: [])
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+
+    w1 = RunningWorkload(
+        cluster_id="cid1",
+        containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+    )
+    act1 = HostActivity(host="h1", workloads=(w1,))
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(act1,)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("enter")  # pin h1, focus the workload list
+            await pilot.pause(0.05)
+            assert app.query_one("#workload-list", WorkloadList).has_focus
+
+            # r is not host-table-only: the workload list routes it too.
+            await pilot.press("r")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, RecipePickerScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, RecipePickerScreen)
+            assert app.query_one("#workload-list", WorkloadList).has_focus
+
+            await pilot.press("escape")  # back to the host table
+            await pilot.pause(0.05)
+            assert app.query_one("#host-table").has_focus
+
+            # A pushed modal owns focus: r must not stack the picker over it.
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, StopWorkloadScreen)
+            await pilot.press("r")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, StopWorkloadScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+
+            # The log pane is a viewing mode: r stays inert there.
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert len(app.query("#log-pane")) == 1
+            await pilot.press("r")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, RecipePickerScreen)
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_recipe_launch_opens_log_pane(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.api import RunOptions, RunResult
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import LogPane
+
+    calls: list[RunOptions] = []
+    launched = RunResult(
+        workload_id="sparkrun_aa_bb",
+        host_list=("h1",),
+        placement=None,
+        scheduler="greedy",
+        runtime="vllm-ray",
+        executor="docker",
+        started_at=_time.time(),
+        dry_run=False,
+        is_solo=True,
+        rc=0,
+    )
+
+    def _fake_run(options, **_kwargs):
+        calls.append(options)
+        return launched
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", _fake_run)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    launch = RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe")
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            for _ in range(40):
+                if calls:
+                    break
+                await pilot.pause(0.05)
+            assert calls and calls[0].recipe == "demo-recipe"
+
+            # api.run returns at containers-up; the occupancy sweep names the workload next tick.
+            w1 = RunningWorkload(
+                cluster_id="sparkrun_aa_bb",
+                containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+            )
+            session.set_frame(MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w1,)),)))
+            for _ in range(40):
+                if app.query("#log-pane") and app.query_one("#log-pane", LogPane).has_focus_within:
+                    break
+                await pilot.pause(0.05)
+
+            pane = app.query_one("#log-pane", LogPane)
+            assert pane.cluster_id == "sparkrun_aa_bb"
+            assert pane.container == "c1"
+            assert pane.has_focus_within  # focus lands in the log view inside the pane
+            assert app._pending_log_open is None
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_recipe_launch_mounts_from_resolved_source(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.api import RunOptions, RunResult
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import LogPane
+
+    launched = RunResult(
+        workload_id="sparkrun_aa_bb",
+        host_list=("h1",),
+        placement=None,
+        scheduler="greedy",
+        runtime="vllm-ray",
+        executor="docker",
+        started_at=_time.time(),
+        dry_run=False,
+        is_solo=True,
+        rc=0,
+    )
+    resolved: list[str] = []
+
+    def _resolve(workload_id, **_kwargs):
+        resolved.append(workload_id)
+        return _DummyLogTarget()
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: launched)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", _resolve)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+
+    # The frame never gains the workload: the pane must open from the resolved source alone.
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    launch = RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe")
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            for _ in range(40):
+                if app.query("#log-pane"):
+                    break
+                await pilot.pause(0.05)
+
+            pane = app.query_one("#log-pane", LogPane)
+            assert pane.cluster_id == "sparkrun_aa_bb"
+            assert pane.container == "c1"
+            assert pane.has_focus_within
+            assert app._pending_log_open is None
+            assert resolved == ["sparkrun_aa_bb"]
+            assert not session.frame().for_host("h1").workloads
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_recipe_launch_falls_back_when_resolve_fails(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.api import RunOptions, RunResult
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+    from sparkrun.cli._monitor_logs import LogPane
+
+    launched = RunResult(
+        workload_id="sparkrun_aa_bb",
+        host_list=("h1",),
+        placement=None,
+        scheduler="greedy",
+        runtime="vllm-ray",
+        executor="docker",
+        started_at=_time.time(),
+        dry_run=False,
+        is_solo=True,
+        rc=0,
+    )
+
+    def _boom(workload_id, **_kwargs):
+        raise RuntimeError("job metadata not written yet")
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: launched)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", _boom)
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    notifications: list[str] = []
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    launch = RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe")
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            for _ in range(40):
+                if app._pending_log_open is not None:
+                    break
+                await pilot.pause(0.05)
+            assert app._pending_log_open is not None
+
+            # The occupancy sweep names the workload on a later tick.
+            w1 = RunningWorkload(
+                cluster_id="sparkrun_aa_bb",
+                containers=(ContainerDetail(name="c1", role="head", status="Up", image="img"),),
+            )
+            session.set_frame(MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w1,)),)))
+            for _ in range(40):
+                if app.query("#log-pane"):
+                    break
+                await pilot.pause(0.05)
+
+            pane = app.query_one("#log-pane", LogPane)
+            assert pane.cluster_id == "sparkrun_aa_bb"
+            assert pane.container == "c1"
+            assert app._pending_log_open is None
+            assert not any("press enter on it" in message for message in notifications)
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_second_log_pane_replaces_the_first(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._mount_log_pane("h1", "webscrape_aa", "c1")
+            await pilot.pause(0.1)
+            assert len(app.query("#log-pane")) == 1
+
+            # A launch's pending auto-open can fire while another pane is up.
+            # It closes the old pane and mounts on the next tick, once Textual
+            # has pruned it — never stacking a second #log-pane.
+            w2 = RunningWorkload(
+                cluster_id="webscrape_bb",
+                containers=(ContainerDetail(name="c9", role="head", status="Up", image="img"),),
+            )
+            session.set_frame(MonitorFrame(hosts=(HostActivity(host="h1", workloads=(w2,)),)))
+            app._pending_log_open = ("webscrape_bb", _time.monotonic() + 15.0, None)
+            app._refresh()
+            await pilot.pause(0.1)
+            app._refresh()
+            await pilot.pause(0.1)
+
+            panes = list(app.query("#log-pane"))
+            assert len(panes) == 1
+            assert panes[0].cluster_id == "webscrape_bb"
+            assert panes[0].has_focus_within
+            assert app._pinned_host == "h1"
+            assert app._pending_log_open is None
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_launch_replaces_an_open_pane_without_the_sweep(tmp_path, monkeypatch):
+    """A launch while another pane is up must not wait for the occupancy sweep.
+
+    The replacement mount cannot happen until Textual prunes the old pane, so
+    the pending entry carries the resolved ``(host, container)`` and retries
+    from it; the frame never lists the new workload here.
+    """
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.api import RunResult
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    monkeypatch.setattr("sparkrun.cli._monitor_logs.open_log_target", lambda *a, **kw: _DummyLogTarget())
+
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    launched = RunResult(
+        workload_id="sparkrun_aa_bb",
+        host_list=("h1",),
+        placement=None,
+        scheduler="greedy",
+        runtime="vllm-ray",
+        executor="docker",
+        started_at=_time.time(),
+        dry_run=False,
+        is_solo=True,
+        rc=0,
+    )
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._mount_log_pane("h1", "old_aa", "c1")
+            await pilot.pause(0.1)
+            app._on_recipe_launched(launched, ("h1", "c7"))
+            for _ in range(20):
+                panes = list(app.query("#log-pane"))
+                if panes and panes[0].cluster_id == "sparkrun_aa_bb":
+                    break
+                app._refresh()
+                await pilot.pause(0.05)
+            panes = list(app.query("#log-pane"))
+            assert len(panes) == 1
+            assert panes[0].cluster_id == "sparkrun_aa_bb"
+            assert panes[0].container == "c7"
+            assert app._pending_log_open is None
+            # The frame never listed the workload: no sweep was involved.
+            assert not session.frame().for_host("h1").workloads
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_keeps_launch_logs_off_the_terminal(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import io
+    import logging
+    import sys
+    import threading
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    stream = io.StringIO()
+    terminal = logging.StreamHandler(stream)  # same shape _setup_logging installs
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    root.handlers[:] = [terminal]
+    root.setLevel(logging.INFO)
+
+    # Library-shaped leak: a handler attached to a named logger before Textual
+    # swapped the streams keeps the real terminal, so root parking alone is not
+    # enough (hf_hub, SAF and plugins do exactly this).
+    library_handler = logging.StreamHandler(sys.__stderr__)
+    library = logging.getLogger("tests.library_shaped")
+    library.addHandler(library_handler)
+    library.setLevel(logging.INFO)
+
+    # A FileHandler is a StreamHandler too, but it does not paint on the
+    # terminal, so it must keep logging while the app is mounted.
+    log_file = tmp_path / "library.log"
+    file_handler = logging.FileHandler(log_file)
+    file_logger = logging.getLogger("tests.file_logged")
+    file_logger.addHandler(file_handler)
+    file_logger.setLevel(logging.INFO)
+
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    notifications: list[str] = []
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            # Root sits at WARNING: line-oriented streaming consumers gate on
+            # isEnabledFor(INFO) and inherit the terminal otherwise.
+            assert root.level == logging.WARNING
+            assert root.isEnabledFor(logging.INFO) is False
+            # The launcher logs its progress through the root logger; while the
+            # TUI owns the screen none of it may reach the terminal handler.
+            logging.getLogger("sparkrun.launcher").info("Pulling image (leak check)")
+            library.info("library leak check")
+            file_logger.info("file leak check")
+            await pilot.pause(0.05)
+            assert "leak check" not in stream.getvalue()
+            assert library_handler not in library.handlers
+            assert file_handler in file_logger.handlers
+            assert "file leak check" in log_file.read_text()
+
+            # Warnings from the launch worker (another thread) become toasts.
+            worker = threading.Thread(target=lambda: logging.getLogger("sparkrun.launcher").warning("disk at 95%"))
+            worker.start()
+            for _ in range(20):
+                if notifications:
+                    break
+                await pilot.pause(0.05)
+            worker.join(timeout=1)
+            assert notifications == ["disk at 95%"]
+
+        # Leaving the app restores the CLI's level and handlers, root and named alike.
+        assert app._saved_root_handlers is None
+        assert root.level == logging.INFO
+        assert library.handlers == [library_handler]
+        logging.getLogger("sparkrun.launcher").info("after the app")
+        library.info("library after the app")
+        assert "after the app" in stream.getvalue()
+
+    try:
+        asyncio.run(_run())
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+        library.removeHandler(library_handler)
+        file_logger.removeHandler(file_handler)
+        file_handler.close()
+
+
+def test_cluster_monitor_app_recipe_launch_failures(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.api import RunOptions, RunResult
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    def _boom(options, **_kwargs):
+        raise RuntimeError("no capacity")
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", _boom)
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    launch = RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe")
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            await pilot.pause(0.3)
+            assert not app.query("#log-pane")
+            assert app._pending_log_open is None
+
+            # A nonzero rc is a failed launch too.
+            bad = RunResult(
+                workload_id="sparkrun_cc_dd",
+                host_list=("h1",),
+                placement=None,
+                scheduler="greedy",
+                runtime="vllm-ray",
+                executor="docker",
+                started_at=_time.time(),
+                dry_run=False,
+                is_solo=True,
+                rc=1,
+            )
+            monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: bad)
+            app._on_recipe_picked(launch)
+            await pilot.pause(0.3)
+            assert not app.query("#log-pane")
+            assert app._pending_log_open is None
+
+            # A launch whose workload never shows up degrades to a notify at the
+            # deadline instead of waiting forever.
+            app._pending_log_open = ("sparkrun_missing", _time.monotonic() - 1.0, None)
+            app._refresh()
+            await pilot.pause(0.05)
+            assert app._pending_log_open is None
+            assert not app.query("#log-pane")
+
+    asyncio.run(_run())
+
+
+def test_cluster_monitor_app_dry_run_arms_no_log_open(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import time as _time
+    from sparkrun.api import RunOptions, RunResult
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    dry = RunResult(
+        workload_id="sparkrun_dry_run",
+        host_list=("h1",),
+        placement=None,
+        scheduler="greedy",
+        runtime="vllm-ray",
+        executor="docker",
+        started_at=_time.time(),
+        dry_run=True,
+        is_solo=True,
+        rc=0,
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: dry)
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    notifications: list[str] = []
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    launch = RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe")
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            await pilot.pause(0.3)
+            assert app._pending_log_open is None
+            assert any("dry run" in message.lower() for message in notifications)
+            assert not any("Launched" in message for message in notifications)
+            app._refresh()
+            await pilot.pause(0.05)
+            assert not app.query("#log-pane")
+
+    asyncio.run(_run())
+
+
 # --------------------------------------------------------------------------
 # ClusterMonitorApp Background Log-Metrics Tracking
 # --------------------------------------------------------------------------

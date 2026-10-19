@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 from collections.abc import Callable, Sequence
 
@@ -18,19 +20,22 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Header, Static
 
-from sparkrun.api import LogTarget, open_log_target
+from sparkrun.api import LogTarget, RunResult, StopResult, open_log_target, run, stop
 from sparkrun.core.application_profile import get_application_profile
 from sparkrun.cli._monitor_metrics import RuntimeMetricsScraper, _at, _spark_palette, _sparkline
 from sparkrun.cli._monitor_logs import (
     DumpLogScreen,
     LogPane,
     LogScope,
+    StopWorkloadScreen,
     WorkloadList,
     entry_plain_text,
     workload_rows,
 )
+from sparkrun.cli._monitor_recipes import RecipeLaunch, RecipePickerScreen
 from sparkrun.core.log_source import SCOPE_ALL, LogLine
 from sparkrun.core.monitoring import HostActivity, MonitorFrame, MonitorSample
 
@@ -38,6 +43,36 @@ if TYPE_CHECKING:
     from sparkrun.api import LiveMonitorSession
 
 logger = logging.getLogger(__name__)
+
+
+class _TuiLogSink(logging.Handler):
+    """Root-logger sink for as long as the app is mounted.
+
+    The CLI installs a ``StreamHandler`` bound to the real stderr *before* the
+    TUI starts, and that handler keeps the terminal stream object; Textual's
+    print capture only swaps ``sys.stderr`` for later lookups, so a launch-time
+    ``logger.info`` would paint over the screen. Progress lines are dropped (the
+    log pane carries the workload's own output) and warnings/errors surface as
+    notifications.
+    """
+
+    def __init__(self, app: "ClusterMonitorApp") -> None:
+        super().__init__()
+        self._app = app
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno < logging.WARNING:
+            return
+        severity = "error" if record.levelno >= logging.ERROR else "warning"
+        try:
+            app = self._app
+            if threading.current_thread() is threading.main_thread():
+                app.notify(record.getMessage(), severity=severity, timeout=8)
+            else:
+                app.call_from_thread(app.notify, record.getMessage(), severity=severity)
+        except Exception:  # noqa: BLE001 - logging must never break the app
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -387,6 +422,7 @@ class ClusterMonitorApp(App):
 
     BINDINGS = [
         Binding("enter", "select_node", "Logs"),
+        Binding("r", "open_recipe_picker", "Recipes"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit", show=False),
     ]
@@ -405,6 +441,9 @@ class ClusterMonitorApp(App):
     # larger tail read per workload, once; later ticks read the cheap tail and
     # ingest only the lines appended since the previous page.
     METRICS_PRIME_LINES: int = 4000
+    # Occupancy sweeps only run every few seconds and can lag a launch further, so
+    # the fallback poll is generous before it degrades to a notification.
+    PENDING_LOG_OPEN_TIMEOUT_S: float = 60.0
 
     def __init__(
         self,
@@ -433,6 +472,17 @@ class ClusterMonitorApp(App):
         self._track_cancel = threading.Event()
         # Whether the first sample has been taken; it must not wait a full interval.
         self._metrics_primed = False
+        # (workload_id, deadline, resolved (host, container)) for the log pane that
+        # opens once a fresh launch shows up in the occupancy sweep; None when
+        # nothing is pending. The source is carried so a mount delayed by an
+        # existing pane's prune never has to wait for the sweep.
+        self._pending_log_open: tuple[str, float, tuple[str, str] | None] | None = None
+        # Root handlers from before the TUI (terminal-bound) parked while mounted.
+        self._saved_root_handlers: list[logging.Handler] | None = None
+        # Root level from before the TUI; restored alongside the handlers.
+        self._saved_root_level: int | None = None
+        # Terminal-bound handlers owned by library/plugin loggers, likewise.
+        self._saved_logger_handlers: list[tuple[logging.Logger, logging.Handler]] = []
 
     # -- layout -------------------------------------------------------------
 
@@ -449,6 +499,7 @@ class ClusterMonitorApp(App):
     # -- lifecycle ----------------------------------------------------------
 
     def on_mount(self) -> None:
+        self._install_log_sink()
         self.title = "%s cluster monitor" % get_application_profile().command
         self.sub_title = "%d host(s) — every %ds" % (len(self._hosts), self._interval)
 
@@ -469,9 +520,74 @@ class ClusterMonitorApp(App):
         self.set_interval(self.METRICS_TRACK_INTERVAL_S, self._metrics_tick)
 
     def on_unmount(self) -> None:
+        self._restore_log_handlers()
         self._track_cancel.set()
         self.workers.cancel_group(self, "metrics-track")
         self._session.close()
+
+    def _install_log_sink(self) -> None:
+        """Park terminal-bound handlers; see :class:`_TuiLogSink`.
+
+        Root is not enough: hf_hub, SAF and plugin loggers can carry their own
+        ``StreamHandler`` created before Textual swapped the streams, and those
+        hold the real stderr, so their records paint straight over the screen.
+        Every terminal-bound stream handler is parked for the app lifetime and
+        put back on unmount.
+        """
+        root = logging.getLogger()
+        self._saved_root_handlers = root.handlers[:]
+        self._saved_root_level = root.level
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+        # The sink drops everything below WARNING anyway, and line-oriented
+        # streaming consumers gate on
+        # ``logging.getLogger().isEnabledFor(logging.INFO)``:
+        # orchestration/distribution.py picks ``run_remote_script_streaming(
+        # quiet=False)`` when root is at INFO, and that subprocess inherits the
+        # terminal fds and paints straight over the TUI.
+        root.setLevel(logging.WARNING)
+        root.addHandler(_TuiLogSink(self))
+        self._park_library_handlers()
+
+    def _park_library_handlers(self) -> None:
+        """Park terminal-bound stream handlers on named loggers; sweep every tick.
+
+        A library imported during a launch (an HF helper, a plugin) attaches its
+        handler *after* mount, and that handler holds the pre-redirect terminal
+        stream. Re-sweeping on the cheap 1 s refresh closes that window.
+
+        Only handlers still bound to the real terminal are parked: a
+        ``FileHandler`` or a handler writing to some other stream logs somewhere
+        harmless and must keep working while the app is mounted.
+        """
+        for logger in list(logging.Logger.manager.loggerDict.values()):
+            if not isinstance(logger, logging.Logger):
+                continue
+            for handler in logger.handlers[:]:
+                if not isinstance(handler, logging.StreamHandler):
+                    continue
+                if handler.stream is not sys.__stdout__ and handler.stream is not sys.__stderr__:
+                    continue
+                logger.removeHandler(handler)
+                self._saved_logger_handlers.append((logger, handler))
+
+    def _restore_log_handlers(self) -> None:
+        saved = self._saved_root_handlers
+        if saved is None:
+            return
+        self._saved_root_handlers = None
+        root = logging.getLogger()
+        for handler in root.handlers[:]:
+            if isinstance(handler, _TuiLogSink) and handler._app is self:
+                root.removeHandler(handler)
+        for handler in saved:
+            root.addHandler(handler)
+        for logger, handler in self._saved_logger_handlers:
+            logger.addHandler(handler)
+        self._saved_logger_handlers = []
+        if self._saved_root_level is not None:
+            root.setLevel(self._saved_root_level)
+            self._saved_root_level = None
 
     # -- events -------------------------------------------------------------
 
@@ -515,13 +631,33 @@ class ClusterMonitorApp(App):
         self.query_one("#host-table", DataTable).focus()
 
     def on_workload_list_open_log(self, event: WorkloadList.OpenLog) -> None:
+        self._mount_log_pane(event.host, event.cluster_id, event.container)
+
+    def _mount_log_pane(self, host: str, cluster_id: str, container: str) -> bool:
+        """Show one container's log pane in the node body (manual and post-launch opens share it).
+
+        Returns False when an existing pane was closed and the caller must retry
+        once Textual has pruned it (see ``_try_pending_log_open``).
+        """
+        if self._is_log_open():
+            # A launch's pending auto-open can fire while the user is already
+            # watching another workload. Mounting a second #log-pane would raise
+            # DuplicateIds, and Textual prunes the old node asynchronously (a
+            # widget mounted before the prune lands is marked _pruning and never
+            # composes its children), so closing and remounting happen apart.
+            self._close_log_pane(refocus_list=False)
+            return False
+        self._mount_pane_now(host, cluster_id, container)
+        return True
+
+    def _mount_pane_now(self, host: str, cluster_id: str, container: str) -> None:
         wl = self.query_one("#workload-list", WorkloadList)
         wl.display = False
 
         pane = LogPane(
-            host=event.host,
-            cluster_id=event.cluster_id,
-            container=event.container,
+            host=host,
+            cluster_id=cluster_id,
+            container=container,
             scope=LogScope.CONTAINER,
             frame=self._frame,
             cluster=self._cluster,
@@ -532,7 +668,13 @@ class ClusterMonitorApp(App):
         self.query_one("#node-body", Vertical).mount(pane)
         self.add_class("-logs-open")
         self.screen.add_class("-logs-open")
-        pane.focus()
+        # Pin the node whose container is being watched, so the detail panel
+        # matches the pane and a background refresh cannot swap it underneath.
+        self._pinned_host = host
+        self._refresh_detail()
+        # The pane container is not focusable; focus its log view so keys land
+        # in the logtail panel (the pane's own bindings still fire by bubbling).
+        pane.log_view.focus()
 
     def on_log_pane_closed(self, event: LogPane.Closed) -> None:
         self._close_log_pane(refocus_list=True)
@@ -578,6 +720,145 @@ class ClusterMonitorApp(App):
             sctx=self._sctx,
         )
         self.push_screen(screen)
+
+    def on_workload_list_request_stop(self, event: WorkloadList.RequestStop) -> None:
+        self._open_stop_screen(event.host, event.cluster_id, event.container)
+
+    def _open_stop_screen(self, host: str, cluster_id: str, container: str) -> None:
+        def _confirmed(confirmed: bool | None) -> None:
+            if confirmed:
+                self._stop_workload_worker(cluster_id)
+
+        self.push_screen(
+            StopWorkloadScreen(host=host, cluster_id=cluster_id, container=container),
+            callback=_confirmed,
+        )
+
+    @work(thread=True, exclusive=False, group="stop")
+    def _stop_workload_worker(self, cluster_id: str) -> None:
+        """Tear the workload down off the UI thread; api.stop does blocking SSH/docker work."""
+        # No hosts=: api.stop must resolve the job's recorded placement (job
+        # metadata, then cluster) — the monitored host list is a view, never a
+        # placement authority, and passing it would override the real TP>1 hosts.
+        try:
+            result = stop(workload_id=cluster_id, cluster=self._cluster, cache_dir=self._cache_dir, sctx=self._sctx)
+        except Exception as error:  # noqa: BLE001 - a stop failure must never break the app
+            logger.debug("Stop of %s failed", cluster_id, exc_info=True)
+            self.call_from_thread(self.notify, f"Stop failed for {cluster_id}: {error}", severity="error")
+            return
+        self.call_from_thread(self._on_stop_finished, cluster_id, result)
+
+    def _on_stop_finished(self, cluster_id: str, result: StopResult) -> None:
+        if result.success:
+            self.notify(f"Stopped {cluster_id} on {len(result.hosts_targeted)} host(s)")
+        else:
+            details = "; ".join(result.errors) or ", ".join(result.hosts_failed) or "unknown error"
+            self.notify(f"Stop failed for {cluster_id}: {details}", severity="error")
+
+    # -- recipe picker ------------------------------------------------------
+
+    def action_open_recipe_picker(self) -> None:
+        """Open the recipe selection panel from the node (host) or workload list.
+
+        Only the base screen routes this binding: a pushed modal or the picker
+        itself must not stack a second picker, and the log pane is a viewing
+        mode of its own. The focus guard keeps ``r`` inert everywhere else
+        (e.g. while the log view holds the keyboard).
+        """
+        if self.screen is not self.screen_stack[0]:
+            return
+        try:
+            table = self.query_one("#host-table", DataTable)
+            workloads = self.query_one("#workload-list", WorkloadList)
+        except Exception:
+            return
+        if not (table.has_focus or workloads.has_focus):
+            return
+        self.push_screen(
+            RecipePickerScreen(cluster=self._cluster, hosts=tuple(self._hosts), sctx=self._sctx),
+            callback=self._on_recipe_picked,
+        )
+
+    def _on_recipe_picked(self, launch: RecipeLaunch | None) -> None:
+        if launch is None:
+            return
+        self.notify(f"Launching {launch.label}…")
+        self._recipe_run_worker(launch)
+
+    @work(thread=True, exclusive=False, group="recipe-run")
+    def _recipe_run_worker(self, launch: RecipeLaunch) -> None:
+        """Launch off the UI thread; api.run does blocking SSH/docker work.
+
+        exclusive=False (like the stop worker): a second launch must never
+        cancel one that is already in flight.
+        """
+        try:
+            result = run(launch.options, sctx=self._sctx)
+        except Exception as error:  # noqa: BLE001 - a launch failure must never break the app
+            logger.debug("Recipe launch of %s failed", launch.label, exc_info=True)
+            self.call_from_thread(self.notify, f"Launch failed: {error}", severity="error")
+            return
+        source: tuple[str, str] | None = None
+        if result.rc == 0 and not result.dry_run:
+            # Resolve the pane's target here: the workstation-side metadata is
+            # written by run(), and the occupancy sweep can be many seconds
+            # behind, so the frame is the slow path, not the source of truth.
+            try:
+                target = open_log_target(result.workload_id, cluster=self._cluster, cache_dir=self._cache_dir, sctx=self._sctx)
+                for candidate in target.sources:
+                    if candidate.container:
+                        source = (candidate.host, candidate.container)
+                        break
+            except Exception:  # noqa: BLE001 - the occupancy poll is the fallback
+                logger.debug("Log source resolve for %s failed", result.workload_id, exc_info=True)
+        self.call_from_thread(self._on_recipe_launched, result, source)
+
+    def _on_recipe_launched(self, result: RunResult, source: tuple[str, str] | None = None) -> None:
+        if result.rc != 0:
+            self.notify(f"Launch failed (rc={result.rc}) for {result.workload_id}", severity="error")
+            return
+        if result.dry_run:
+            self.notify(f"Dry run: nothing to monitor ({result.workload_id})")
+            return
+        if source is not None and self._mount_log_pane(source[0], result.workload_id, source[1]):
+            return
+        # No resolved source (or an existing pane had to close first, so the
+        # mount must wait for its prune). The resolved source is kept: the
+        # occupancy sweep can lag container start by a poll, and the sweep is
+        # only needed when nothing resolved the target.
+        self._pending_log_open = (
+            result.workload_id,
+            time.monotonic() + self.PENDING_LOG_OPEN_TIMEOUT_S,
+            source,
+        )
+        self._try_pending_log_open()
+
+    def _try_pending_log_open(self) -> None:
+        """Open the log pane for a just-launched workload once the frame shows it."""
+        if self._pending_log_open is None:
+            return
+        workload_id, deadline, source = self._pending_log_open
+        if source is not None:
+            if self._mount_log_pane(source[0], workload_id, source[1]):
+                self._pending_log_open = None
+            elif time.monotonic() > deadline:
+                self._pending_log_open = None
+                self.notify(f"Launched {workload_id}; press enter on it to open logs")
+            return
+        frame = getattr(self, "_frame", None)
+        if frame is not None:
+            for host in self._hosts:
+                rows = workload_rows(frame.for_host(host), cache_dir=self._cache_dir)
+                row = next((r for r in rows if r.cluster_id == workload_id and r.container), None)
+                if row is not None:
+                    # Keep the pending entry armed when an existing pane had to
+                    # be closed first: the next tick mounts once the prune lands.
+                    if self._mount_log_pane(host, workload_id, row.container):
+                        self._pending_log_open = None
+                    return
+        if time.monotonic() > deadline:
+            self._pending_log_open = None
+            self.notify(f"Launched {workload_id}; press enter on it to open logs")
 
     # -- background log metrics ---------------------------------------------
 
@@ -671,7 +952,11 @@ class ClusterMonitorApp(App):
                 scraper.observe_page(source, texts)
             scraper.commit()
         for pane in self.query(LogPane):
-            pane._refresh_metrics_footer()
+            try:
+                pane._refresh_metrics_footer()
+            except NoMatches:
+                # A pane mid-prune has lost its children but is still listed.
+                continue
 
     # -- refresh ------------------------------------------------------------
 
@@ -685,6 +970,8 @@ class ClusterMonitorApp(App):
         if not self._metrics_primed and self._frame is not None and any(activity.workloads for activity in self._frame.hosts):
             self._metrics_primed = True
             self._metrics_tick()
+        self._try_pending_log_open()
+        self._park_library_handlers()
 
     def _refresh_table(self) -> None:
         table = self.query_one("#host-table", DataTable)
