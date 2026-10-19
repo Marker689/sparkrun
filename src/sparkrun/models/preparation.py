@@ -445,15 +445,18 @@ def _persist_manifest(io, host, root, request, manifest):
         io.publish(host, root, request.repo, str(path), contents)
 
 
-def validate_preplaced(model: str, hosts, *, model_path=None, ssh_kwargs=None, checksums=False) -> tuple[ValidatedModelBinding, ...]:
+def validate_preplaced(
+    model: str, hosts, *, model_path=None, ssh_kwargs=None, checksums=False, model_format="auto"
+) -> tuple[ValidatedModelBinding, ...]:
     """Observe explicitly imported inventories beside pre-placed model paths.
 
     A directory carries .sparkrun-model-manifest.json; a GGUF file uses
     <filename>.sparkrun-model-manifest.json and paths relative to its parent.
-    Missing metadata is a visible migration state, never a validated binding.
+    Without metadata, check basic format/readability but do not create a
+    validated binding or claim a known revision or complete inventory.
     """
     from pathlib import PurePosixPath
-    from sparkrun.models.observation import observation_script, parse_observations
+    from sparkrun.models.observation import local_model_probe_script, observation_script, parse_observations
     from sparkrun.utils.shell import quote
 
     bindings = []
@@ -468,6 +471,12 @@ def validate_preplaced(model: str, hosts, *, model_path=None, ssh_kwargs=None, c
             metadata = path + "/.sparkrun-model-manifest.json" if directory else path + ".sparkrun-model-manifest.json"
             text = io.read(host, metadata)
             if text is None:
+                result = io.execute(host, local_model_probe_script(path, model_format), timeout=60)
+                if result.returncode:
+                    raise ModelArtifactError(
+                        "local model preflight failed on %s at %s: %s"
+                        % (host, path, result.stderr.decode(errors="replace").strip()[-1500:])
+                    )
                 logger.warning("Pre-placed model %s on %s is unverified: import expected metadata at %s", model, host, metadata)
                 continue
             manifest = ModelArtifactManifest.from_json(text)

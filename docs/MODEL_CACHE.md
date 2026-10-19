@@ -216,6 +216,11 @@ directory. For a pre-placed GGUF file, use
 `weight_path` to that filename. These inventories are checked before launch,
 including under the default policy; missing inventories produce an explicit unverified
 migration warning. Core does not acquire or repair pre-placed paths automatically.
+Without a manifest, local HF directories used by native vLLM, SGLang, Atlas and MAX still undergo
+basic config, index, shard and readability checks on every target. GGUF files use separate checks
+and need no `config.json`. Docker and local executors check the selected files through the workload's
+mounts and execution identity before replacement; images need no Python for that access check.
+These checks do not create a manifest, establish cross-node content identity, or validate weight hashes.
 
 ## Usage, retention and LRU cleanup
 
@@ -603,6 +608,11 @@ remain errors. Env `launch.model_path` and
 `SPARKRUN_MODEL_PATH` (workload path, blank for controller post-commands) and the
 resolved `SPARKRUN_MODEL_REVISION`. Compilation/runtime caches remain separate
 and are not distributed with model payloads.
+
+For a resolved local model with no known revision, env `{launch.model_revision}` renders as `""`.
+Known revisions from validated manifests remain available. Missing model resolution is still an error;
+dry runs retain the explicit `<unresolved:launch.model_revision>` placeholder. An empty revision does
+not provide a distinct cache namespace for locally modified weights.
 
 Docker access checks run the selected image with its final UID and structured
 mounts, without GPU allocation or the image entrypoint. Local checks use the
