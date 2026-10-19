@@ -446,6 +446,13 @@ before workers finish. Core revalidates every target before publishing runtime
 bindings, including aliases. A single large file stays a single transfer;
 this scheduler does not split GGUF files into byte ranges.
 
+After a source or target passes validation, preparation removes its
+`.sparkrun-partial` copies of the verified files under the repository lease.
+This also clears leftovers when a later run finds the snapshot already complete
+or restores it from cached blobs without transferring those files. Incomplete
+snapshots retain their resume data; partials for files outside the selected
+manifest are preserved for their own unfinished transfers.
+
 ### Stall detection, not a deadline
 
 A transfer may take as long as it needs while it is moving. Each rsync is

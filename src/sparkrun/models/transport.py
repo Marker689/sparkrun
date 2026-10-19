@@ -16,6 +16,7 @@ import time
 from sparkrun.core.model_distribution import ModelCopyRequest, ModelTransferResult, transfer_timeouts
 from sparkrun.models.artifacts import ModelArtifactError
 from sparkrun.models.host_io import ModelHostIO
+from sparkrun.models.transfer_cleanup import PARTIAL_DIRECTORY
 from sparkrun.models._copy_progress import CopyProgress
 from sparkrun.models._stream import ModelTransferStalled, ProgressWatch
 from sparkrun.core.operation import CURRENT, submit
@@ -43,7 +44,7 @@ def copy_script(request: ModelCopyRequest, target, ssh_kwargs: dict, *, relaxed:
     local_destination = (
         request.source_host is None and should_run_locally(target.host, ssh_kwargs.get("ssh_user"))
     ) or request.source_host == target.host
-    args = ["rsync", "-r", "--copy-links", "--mkpath", "--protect-args", "--ignore-times", "--from0", "--partial-dir=.sparkrun-partial"]
+    args = ["rsync", "-r", "--copy-links", "--mkpath", "--protect-args", "--ignore-times", "--from0", "--partial-dir=" + PARTIAL_DIRECTORY]
     args += ["--info=progress2", "--outbuf=L", "--no-human-readable", "--omit-dir-times"]
     if request.idle_timeout is not None:
         # rsync's own I/O-idle timeout: the remote end exits by itself too,

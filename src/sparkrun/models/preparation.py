@@ -31,6 +31,7 @@ from sparkrun.models.host_io import ModelHostIO
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
 from sparkrun.models.snapshot_links import link_existing_blobs
 from sparkrun.models.transport import builtin_copy
+from sparkrun.models.transfer_cleanup import cleanup_transfer_partials
 from sparkrun.utils.shell import quote
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ def _acquire(
 ) -> None:
     files = _repair_files(report)
     if not files:
+        cleanup_transfer_partials(io, host, root, manifest, report)
         return
     if offline:
         raise ModelArtifactError("offline: required model files are unavailable: " + _report_error(report))
@@ -137,6 +139,7 @@ def _acquire(
     verified = io.observe(host, manifest, root, checksums=checksums)
     if not verified.complete:
         raise ModelArtifactError("model source still invalid after one repair: " + _report_error(verified))
+    cleanup_transfer_partials(io, host, root, manifest, verified)
     from sparkrun.models.usage import record_use
 
     record_use(io, host, root, manifest, event="acquired", acquired=True)
@@ -388,6 +391,7 @@ def prepare_model(
             report = io.observe(host, manifest, roots[host], checksums=checksums)
             if not report.complete:
                 raise ModelArtifactError("model cache not ready for launch: " + _report_error(report))
+            cleanup_transfer_partials(io, host, roots[host], manifest, report)
             binding = ValidatedModelBinding(model, host, roots[host], manifest, report)
             record_use(io, host, roots[host], manifest, acquired=host in bad)
             bindings.append(binding)
