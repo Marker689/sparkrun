@@ -557,7 +557,20 @@ never deletes a shared canonical blob. Copied files are not skipped based only
 on equal sizes when a checksum repair has identified corruption.
 
 Core holds per-cache/repository `flock` leases across acquisition and provider
-calls. An operation nonce recognizes leases reached through shared-cache aliases;
+calls. Concurrent preparations wait for a busy lease without an overall acquisition
+deadline, reporting the holder's controller, PID and operation every ten seconds.
+Waiting remains cancellable and continues monitoring leases already acquired;
+failure to acquire is reported separately from losing a held lease.
+
+Preparation first locks and checks only its targets, including reuse of existing
+blobs. A warm launch, or a push whose head already holds the model, does not take
+an unused control-cache lease. If a control source is needed, preparation releases
+its target leases, reacquires the full set in order, and repeats validation and
+reuse to account for changes during the gap. Leases remain exclusive: transfers
+sharing a source still serialize, while an independent warm target can launch.
+Metadata writes, repairs, and eviction retain the same locking contract.
+
+An operation nonce recognizes leases reached through shared-cache aliases;
 complete aliases are omitted from transfer after observation. Core monitors the
 holder processes and treats lease loss as terminal: streaming commands are
 cancelled and providers receive cancellation through their request. Local Hub
