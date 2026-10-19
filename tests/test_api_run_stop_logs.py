@@ -684,6 +684,66 @@ def test_filtered_logs_precheck_only_selected_worker(tmp_path, selected_alive):
     assert load_job_metadata(cid, cache_dir=str(tmp_path)) is not None
 
 
+def test_logs_precheck_passes_the_cluster_hardware_inventory(tmp_path):
+    """The liveness precheck queries status with the cluster's saved
+    inventory, as ``api.status`` does."""
+    from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.hardware import AcceleratorSpec, HostHardware
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "sglang", "model": "test/m"})
+    cid = "sparkrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cid, recipe, ["h1"], cache_dir=str(tmp_path))
+    hw = HostHardware([AcceleratorSpec("nvidia", "jetson-orin", memory_gb=61.3)], source="detected")
+    cluster = ClusterDefinition(name="c", hosts=["h1"], hosts_hardware={"h1": hw})
+    snapshot = _make_status({"h1": [(cid, [cid + "_solo"])]})
+
+    with patch.object(DockerExecutor, "query_status", return_value=snapshot) as query:
+        api.open_log_target(cid, cluster=cluster, cache_dir=str(tmp_path))
+
+    assert query.call_args.kwargs["host_hardware"] == {"h1": hw}
+
+
+def test_logs_precheck_runs_under_require_metadata_profile(tmp_path, monkeypatch):
+    """End to end through the real docker executor: under a
+    ``require-metadata`` profile the precheck still reports a dead workload
+    on a cluster whose inventory was probed, instead of the status query
+    raising and the check being skipped silently."""
+    from sparkrun.core.application_profile import ApplicationProfile, select_application_profile
+    from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.hardware import AcceleratorSpec, HostHardware
+    from sparkrun.core.recipe import Recipe
+    from sparkrun.orchestration.job_metadata import save_job_metadata
+
+    select_application_profile(
+        ApplicationProfile(
+            id="jetsonrun",
+            display_name="Jetsonrun",
+            command="jetsonrun",
+            package="jetsonrun",
+            hardware_fallback="require-metadata",
+        )
+    )
+    recipe = Recipe({"sparkrun_version": "2", "runtime": "sglang", "model": "test/m"})
+    cid = "jetsonrun_aaaaaaaaaaaaaaaa_111111111111"
+    save_job_metadata(cid, recipe, ["h1"], cache_dir=str(tmp_path))
+    hw = HostHardware([AcceleratorSpec("nvidia", "jetson-orin", memory_gb=61.3)], source="detected")
+    cluster = ClusterDefinition(name="c", hosts=["h1"], hosts_hardware={"h1": hw})
+
+    # Host reachable, nothing running.
+    monkeypatch.setattr(
+        "sparkrun.orchestration.ssh.run_remote_scripts_parallel",
+        lambda hosts, script, **kw: [RemoteResult(h, 0, "", "") for h in hosts],
+    )
+
+    with (
+        patch.object(DockerExecutor, "describe_terminated", return_value={}),
+        pytest.raises(api.JobNotFound),
+    ):
+        api.open_log_target(cid, cluster=cluster, cache_dir=str(tmp_path))
+
+
 def test_logs_skips_precheck_on_ssh_failure(tmp_path):
     """Host unreachable (in ClusterStatus.errors) → precheck skipped.
 

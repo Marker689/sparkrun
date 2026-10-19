@@ -92,6 +92,7 @@ def check_job_running(
     cache_dir: str | None = None,
     check_http_models: bool = False,
     port: int | None = None,
+    host_hardware: dict | None = None,
 ) -> JobStatus:
     """Check whether a sparkrun job is currently running.
 
@@ -112,6 +113,11 @@ def check_job_running(
             ``/v1/models`` endpoint.
         port: Explicit port for health checks.  Falls back to metadata
             then default 8000.
+        host_hardware: The cluster's saved per-host inventory
+            (``ClusterDefinition.hosts_hardware``), as ``api.status`` passes
+            it.  Without it the executor falls back to
+            ``resolve_hardware()``, which raises under a
+            ``require-metadata`` application profile.
 
     Returns:
         :class:`JobStatus` with liveness and optional health info.
@@ -165,7 +171,7 @@ def check_job_running(
         auto_user=False,
     )
     ssh_kwargs = job_ssh_kwargs(executor.resolve_target(dry_run=True), meta, ssh_kwargs, explicit_user="ssh_user" in (ssh_kwargs or {}))
-    status_snapshot = executor.query_status(hosts, ssh_kwargs=ssh_kwargs)
+    status_snapshot = executor.query_status(hosts, ssh_kwargs=ssh_kwargs, host_hardware=host_hardware)
 
     running = cluster_id in status_snapshot.running_cluster_ids()
 
