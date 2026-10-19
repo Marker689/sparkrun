@@ -107,19 +107,16 @@ RECIPE_HOOK_KINDS = ("pre_exec", "mods", "post_exec", "post_commands")
 def recipe_hook_commands(recipe: Recipe) -> dict[str, tuple[str, ...]]:
     """Return the recipe's hook commands by kind, omitting empty kinds.
 
-    ``pre_exec`` copy entries are rendered as ``copy SRC -> DEST`` so the
-    result is displayable as text.
+    Mapping entries (``copy`` / ``command`` with ``timeout``) are rendered
+    as one line each by :func:`~sparkrun.orchestration.hooks.describe_hook_entry`.
     """
     from sparkrun.utils.text import coerce_command_list
 
+    from sparkrun.orchestration.hooks import describe_hook_entry
+
     hooks: dict[str, tuple[str, ...]] = {}
     for kind in RECIPE_HOOK_KINDS:
-        entries = []
-        for entry in coerce_command_list(getattr(recipe, kind, None)):
-            if isinstance(entry, dict) and "copy" in entry:
-                entries.append("copy %s -> %s" % (entry.get("copy"), entry.get("dest", "<default>")))
-            else:
-                entries.append(str(entry))
+        entries = [describe_hook_entry(entry) for entry in coerce_command_list(getattr(recipe, kind, None))]
         if entries:
             hooks[kind] = tuple(entries)
     return hooks
@@ -1981,7 +1978,13 @@ def launch_inference(
             ib_ip_map=ib_ip_map,
             ib_iface_map=ib_iface_map,
         )
-        with timed(timeline, "execution.prepare_activation", strategy=prepared_execution.strategy):
+        from sparkrun.orchestration.hooks import hook_timeout_scope
+
+        # Strategies may run hooks themselves (run_pre_exec is plugin surface).
+        with (
+            timed(timeline, "execution.prepare_activation", strategy=prepared_execution.strategy),
+            hook_timeout_scope(getattr(config, "hook_timeout_s", None)),
+        ):
             activation_receipt = execution_strategy.prepare_activation(activation_context)
         if not dry_run and prepared_model(recipe.model, host_list[0]) is not None:
             from sparkrun.models.runtime import verify_workload_access
@@ -1999,7 +2002,10 @@ def launch_inference(
         if before_start is not None and not dry_run:
             before_start()
         record_launch_metadata()
-        with timed(timeline, "execution.activate", strategy=prepared_execution.strategy):
+        with (
+            timed(timeline, "execution.activate", strategy=prepared_execution.strategy),
+            hook_timeout_scope(getattr(config, "hook_timeout_s", None)),
+        ):
             activation_result = execution_strategy.activate(activation_context, activation_receipt)
         rc = int(activation_result.rc)
         runtime_info = dict(activation_result.runtime_info)
@@ -2156,9 +2162,13 @@ def launch_inference(
 
     # Capture the runtime's final mount mapping without storing launch state on
     # the reusable runtime plugin or recomputing cache settings for post hooks.
-    from sparkrun.orchestration.hooks import capture_hook_launch_contexts
+    from sparkrun.orchestration.hooks import capture_hook_launch_contexts, hook_timeout_scope
 
-    with capture_hook_launch_contexts() as hook_launch_contexts, env_template_scope(env_template_plan):
+    with (
+        capture_hook_launch_contexts() as hook_launch_contexts,
+        env_template_scope(env_template_plan),
+        hook_timeout_scope(getattr(config, "hook_timeout_s", None)),
+    ):
         rc = runtime.run(
             hosts=host_list,
             image=container_image,
@@ -2710,6 +2720,7 @@ def complete_post_launch(
     config = result.config
 
     _ssh_kw = build_ssh_kwargs(config)
+    hook_timeout_s = getattr(config, "hook_timeout_s", None)
 
     if readiness is None:
         report("Waiting for server to become ready...")
@@ -2777,12 +2788,20 @@ def complete_post_launch(
                 trust=_is_trusted,
                 cache_dir=remote_cache_dir,
                 launch_context=launch_context,
+                default_timeout_s=hook_timeout_s,
             )
 
         # Run post_commands on control machine
         if recipe.post_commands:
             report("Running post_commands on control machine...")
-            run_post_commands(recipe.post_commands, hook_context, dry_run=dry_run, trust=_is_trusted, launch_context=launch_context)
+            run_post_commands(
+                recipe.post_commands,
+                hook_context,
+                dry_run=dry_run,
+                trust=_is_trusted,
+                launch_context=launch_context,
+                default_timeout_s=hook_timeout_s,
+            )
     except RuntimeError as e:
         report("Error in post hooks: %s" % e, err=True)
         raise RuntimeError("Post-launch readiness or hooks failed") from e

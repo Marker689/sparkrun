@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from sparkrun.orchestration.hooks import (
+    DEFAULT_HOOK_TIMEOUT_S,
     build_hook_context,
     render_hook_command,
     render_hook_commands,
@@ -389,18 +390,17 @@ class TestRunPreExec:
         assert expected in script
 
     @mock.patch("sparkrun.orchestration.primitives.run_script_on_host")
-    def test_run_pre_exec_skips_unrecognized_entry(self, mock_run):
-        """Unrecognized entries (not str or dict with 'copy') are skipped."""
+    def test_run_pre_exec_rejects_unrecognized_entry(self, mock_run):
+        """A mapping that is neither copy nor command fails before anything runs."""
         mock_run.return_value = self._make_success()
-        # A dict without a 'copy' key — the code logs a warning and skips it
-        run_pre_exec(
-            hosts_containers=[("spark-01", "sparkrun_abc_solo")],
-            commands=["echo ok", {"unknown_key": "value"}],
-            config_chain={},
-            trust=True,
-        )
-        # Only the string command triggers a call
-        assert mock_run.call_count == 1
+        with pytest.raises(RuntimeError, match=r"pre_exec\[2\] is not a valid hook entry"):
+            run_pre_exec(
+                hosts_containers=[("spark-01", "sparkrun_abc_solo")],
+                commands=["echo ok", {"unknown_key": "value"}],
+                config_chain={},
+                trust=True,
+            )
+        mock_run.assert_not_called()
 
     @mock.patch("sys.stdin")
     @mock.patch("sparkrun.orchestration.primitives.run_script_on_host")
@@ -635,10 +635,10 @@ class TestRunPostExec:
 class TestRunPostCommands:
     """Tests for run_post_commands()."""
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_success(self, mock_subproc):
-        """subprocess.run is called with rendered commands."""
-        mock_subproc.return_value = mock.Mock(returncode=0, stdout="done\n")
+        """Each rendered command runs once, under the default hook timeout."""
+        mock_subproc.return_value = (0, "done\n")
         run_post_commands(
             commands=["echo hello"],
             context={"model": "llama-7b"},
@@ -647,12 +647,12 @@ class TestRunPostCommands:
         mock_subproc.assert_called_once()
         call_kwargs = mock_subproc.call_args
         assert call_kwargs[0][0] == "echo hello"
-        assert call_kwargs[1]["shell"] is True
+        assert call_kwargs[1]["timeout_s"] == DEFAULT_HOOK_TIMEOUT_S
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_renders_context(self, mock_subproc):
         """Commands have context values substituted before execution."""
-        mock_subproc.return_value = mock.Mock(returncode=0, stdout="")
+        mock_subproc.return_value = (0, "")
         run_post_commands(
             commands=["curl {base_url}/health"],
             context={"base_url": "http://10.0.0.1:8000/v1"},
@@ -661,10 +661,10 @@ class TestRunPostCommands:
         mock_subproc.assert_called_once()
         assert mock_subproc.call_args[0][0] == "curl http://10.0.0.1:8000/v1/health"
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_fail_fast(self, mock_subproc):
         """RuntimeError raised when subprocess exits with non-zero status."""
-        mock_subproc.return_value = mock.Mock(returncode=1, stdout="error\n")
+        mock_subproc.return_value = (1, "error\n")
         with pytest.raises(RuntimeError, match="post_commands"):
             run_post_commands(
                 commands=["bad-command"],
@@ -672,7 +672,7 @@ class TestRunPostCommands:
                 trust=True,
             )
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_dry_run(self, mock_subproc):
         """In dry_run mode no subprocess calls are made."""
         run_post_commands(
@@ -683,16 +683,16 @@ class TestRunPostCommands:
         )
         mock_subproc.assert_not_called()
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_empty(self, mock_subproc):
         """No-op when commands list is empty."""
         run_post_commands(commands=[], context={})
         mock_subproc.assert_not_called()
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_multiple(self, mock_subproc):
         """Each command produces one subprocess.run call in order."""
-        mock_subproc.return_value = mock.Mock(returncode=0, stdout="")
+        mock_subproc.return_value = (0, "")
         run_post_commands(
             commands=["echo step1", "echo step2"],
             context={},
@@ -704,10 +704,10 @@ class TestRunPostCommands:
         assert first_cmd == "echo step1"
         assert second_cmd == "echo step2"
 
-    @mock.patch("subprocess.run")
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
     def test_run_post_commands_fail_fast_stops_after_first_failure(self, mock_subproc):
         """On failure of first command, subsequent commands are not executed."""
-        mock_subproc.return_value = mock.Mock(returncode=1, stdout="")
+        mock_subproc.return_value = (1, "")
         with pytest.raises(RuntimeError):
             run_post_commands(
                 commands=["bad-command", "echo should-not-run"],
@@ -717,18 +717,17 @@ class TestRunPostCommands:
         # Only one call made before fail-fast
         assert mock_subproc.call_count == 1
 
-    @mock.patch("subprocess.run")
-    def test_run_post_commands_skips_non_string(self, mock_subproc):
-        """Non-string entries in commands list are skipped (logged as warning)."""
-        mock_subproc.return_value = mock.Mock(returncode=0, stdout="")
-        run_post_commands(
-            commands=["echo valid", {"not": "a string"}],
-            context={},
-            trust=True,
-        )
-        # Only the string command runs
-        assert mock_subproc.call_count == 1
-        assert mock_subproc.call_args[0][0] == "echo valid"
+    @mock.patch("sparkrun.orchestration.hooks._run_control_command")
+    def test_run_post_commands_rejects_malformed_entry(self, mock_subproc):
+        """A mapping without 'command' fails before any command runs."""
+        mock_subproc.return_value = (0, "")
+        with pytest.raises(RuntimeError, match=r"post_commands\[2\] is not a valid hook entry"):
+            run_post_commands(
+                commands=["echo valid", {"not": "a string"}],
+                context={},
+                trust=True,
+            )
+        mock_subproc.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

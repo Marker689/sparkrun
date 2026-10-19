@@ -421,9 +421,9 @@ def _script_texts(recipe: Recipe) -> list[tuple[str, str]]:
     """``(where, text)`` for every shell snippet a recipe carries.
 
     ``command:`` plus the three hook lists — the places a recipe supplies code
-    rather than configuration.  ``pre_exec`` entries may be a plain string or a
-    ``{host: cmd}`` mapping; both are flattened, since every consumer here is
-    asking about the text.
+    rather than configuration.  Entries may be a plain string or a mapping
+    (``{command, timeout}``, ``{copy, dest}``); string values are flattened,
+    since every consumer here is asking about the text.
 
     Read *before* ``mods.resolve_and_inject_mods`` runs (that happens inside
     ``launch_inference``, well after validation), so these are the author's own
@@ -435,10 +435,36 @@ def _script_texts(recipe: Recipe) -> list[tuple[str, str]]:
     for where in ("pre_exec", "post_exec", "post_commands"):
         for entry in getattr(recipe, where, None) or ():
             if isinstance(entry, Mapping):
-                out.extend((where, str(val)) for val in entry.values())
+                out.extend((where, val) for val in entry.values() if isinstance(val, str))
             elif entry:
                 out.append((where, str(entry)))
     return out
+
+
+def check_hook_entries(recipe: Recipe) -> list[RecipeIssue]:
+    """Hook entries a launch would refuse: bad shapes, keys or timeouts.
+
+    Uses the same predicate the hook runner applies before executing
+    anything, so this reports exactly the entries a launch would reject.
+    Mapping entries used to be skipped with a log line instead, which is how a
+    misspelt key (``timeout_s:``) would otherwise go unnoticed.
+    """
+    from sparkrun.orchestration.hooks import hook_entry_problems
+
+    issues: list[RecipeIssue] = []
+    for name in ("pre_exec", "post_exec", "post_commands"):
+        for i, entry in enumerate(getattr(recipe, name, None) or (), 1):
+            for problem in hook_entry_problems(entry, allow_copy=name == "pre_exec"):
+                issues.append(
+                    RecipeIssue(
+                        ERROR,
+                        "invalid-hook-entry",
+                        "%s[%d]: %s." % (name, i, problem),
+                        "Use a command string, {command: ..., timeout: <seconds>}"
+                        + (", or {copy: ..., dest: ..., source_host: ...}." if name == "pre_exec" else "."),
+                    )
+                )
+    return issues
 
 
 def check_forgiven_command_shapes(recipe: Recipe) -> list[RecipeIssue]:
@@ -459,12 +485,14 @@ def check_forgiven_command_shapes(recipe: Recipe) -> list[RecipeIssue]:
     # The effective attributes have already been normalized into lists. Keep
     # looking at the author's input, including after a serialization round trip.
     for name in ("pre_exec", "post_exec", "post_commands"):
-        if isinstance(recipe._raw.get(name), str):
+        raw = recipe._raw.get(name)
+        if isinstance(raw, (str, Mapping)):
             issues.append(
                 RecipeIssue(
                     SUGGESTION,
                     "scalar-hook-command-list",
-                    "%s is a string instead of a command list; sparkrun tolerates it as one command." % name,
+                    "%s is a %s instead of a command list; sparkrun tolerates it as one command."
+                    % (name, "string" if isinstance(raw, str) else "single mapping"),
                     "Wrap the whole %s block in a one-item list (%s: followed by an indented '- |'); "
                     "keep its lines together so they share shell state." % (name, name),
                 )
@@ -1802,6 +1830,7 @@ def validate_recipe(
     issues.extend(_safe("internal-config-key", lambda: check_internal_config_keys(recipe)))
     issues.extend(_safe("inline-script", lambda: check_inline_scripting(recipe)))
     issues.extend(_safe("forgiven-command-shape", lambda: check_forgiven_command_shapes(recipe)))
+    issues.extend(_safe("invalid-hook-entry", lambda: check_hook_entries(recipe)))
     issues.extend(_safe("hardcoded-rendezvous-flag", lambda: check_hardcoded_rendezvous_flags(recipe, runtime)))
     issues.extend(_safe("unpinned-model-revision", lambda: check_unpinned_model_revision(recipe, runtime)))
     issues.extend(_safe("hardcoded-serve-flag", lambda: check_hardcoded_serve_flags(recipe, runtime)))

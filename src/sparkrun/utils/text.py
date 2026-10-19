@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from vpd.legacy.arguments import arg_substitute
@@ -98,7 +98,7 @@ def strip_dangling_line_continuations(command: str) -> str:
     return command
 
 
-def coerce_command_list[T](commands: str | Sequence[T] | None) -> list[str | T]:
+def coerce_command_list[T](commands: str | Mapping | Sequence[T] | None) -> list[str | Mapping | T]:
     """Tolerate a scalar hook as one command; recipe authors should use lists.
 
     Preserve the whole block so shell variables and multiline constructs stay
@@ -107,7 +107,10 @@ def coerce_command_list[T](commands: str | Sequence[T] | None) -> list[str | T]:
     """
     if commands is None:
         return []
-    if isinstance(commands, str):
+    if isinstance(commands, (str, Mapping)):
+        # A lone mapping (``post_exec: {command: ..., timeout: N}``) is one
+        # entry; ``list()`` would turn it into its key names, which then run
+        # as shell commands (``command`` is a no-op builtin).
         return [commands]
     return list(commands)
 

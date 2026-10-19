@@ -28,6 +28,15 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Changed
 
+- Recipe hooks are no longer cut off at a hardcoded 600 seconds (#326). The default is now
+  one hour, set by `hooks.timeout_s` in `config.yaml`. Any `pre_exec` / `post_exec` /
+  `post_commands` entry can set its own limit as `{command: ..., timeout: <seconds>}`,
+  where `timeout: 0` means that command has no limit. The configured default cannot be
+  unbounded. A timed-out hook's whole process tree is now killed
+  inside the container. Previously the hook kept running after sparkrun gave up on it.
+  `post_commands` were previously unbounded and now share the same limit. Malformed hook
+  mappings are now an `invalid-hook-entry` validation error; before, they were skipped
+  with a log line.
 - `export systemd --install` needs `--trust` for an untrusted recipe with hooks or
   container-isolation overrides: on the head node the service recipe is a local file,
   which `run` trusts without asking. Previewing and `--uninstall` never need it.

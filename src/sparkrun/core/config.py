@@ -416,6 +416,31 @@ class SparkrunConfig:
         return val if val > 0 else DEFAULT_HUB_TIMEOUT_S
 
     @property
+    def hook_timeout_s(self) -> float:
+        """Default wall-clock limit for one recipe hook command.
+
+        Set via ``hooks.timeout_s`` in ``config.yaml``; applies to each
+        ``pre_exec`` / ``post_exec`` / ``post_commands`` command whose entry
+        does not set its own ``timeout:``.  Like ``hub.timeout_s`` there is no
+        "unbounded" spelling: a non-positive or unparsable value falls back to
+        the default, since a hook that hangs would otherwise hold the launch
+        forever (issue #326).
+        """
+        import math
+
+        from sparkrun.orchestration.hooks import DEFAULT_HOOK_TIMEOUT_S
+
+        section = self.effective_data.get("hooks", {})
+        raw = section.get("timeout_s") if isinstance(section, dict) else None
+        if raw is None or isinstance(raw, bool):
+            return DEFAULT_HOOK_TIMEOUT_S
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_HOOK_TIMEOUT_S
+        return val if math.isfinite(val) and val > 0 else DEFAULT_HOOK_TIMEOUT_S
+
+    @property
     def hub_metadata_budget_s(self) -> float:
         """Wall-clock budget for the whole advisory Hub-metadata phase.
 

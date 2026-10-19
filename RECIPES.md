@@ -1128,9 +1128,50 @@ pre_exec:
   - copy: /path/on/remote/host
     dest: /workspace/patches
     source_host: 10.0.0.5          # rsync from source_host → target, then docker cp
+
+  # Shell command with its own time limit (seconds)
+  - command: "python3 /workspace/fetch_tables.py"
+    timeout: 7200
 ```
 
 `{key}` placeholders in string commands are resolved from the config chain.
+
+#### Hook timeouts
+
+Every hook command (`pre_exec`, `post_exec`, `post_commands`) runs with a wall-clock limit.
+The default is one hour, set by `hooks.timeout_s` in `~/.config/sparkrun/config.yaml`:
+
+```yaml
+hooks:
+  timeout_s: 3600
+```
+
+A command that needs longer can set its own limit by using the mapping form
+`{command: ..., timeout: <seconds>}`, which works in all three hook lists. A plain string
+is the same as `{command: ...}`. A timeout must be a positive number, or `0` for no
+timeout at all:
+
+```yaml
+post_commands:
+  - command: "./scripts/watch_and_report.sh {base_url}"
+    timeout: 0        # runs until it exits; sparkrun waits for it
+```
+
+`0` only works on an individual entry. `hooks.timeout_s` has no unbounded setting (`0`
+or a negative value falls back to the default), because a default applies to every hook,
+and a hung hook would hold the launch, or a systemd unit's start, forever. An
+unbounded entry gets no watchdog, so Ctrl-C on the control machine stops sparkrun
+waiting but does not stop a `pre_exec` / `post_exec` command inside the container.
+
+When the limit is reached, sparkrun terminates the hook's whole process tree inside the
+container (TERM, then KILL 10s later) and fails the launch with
+`pre_exec[N] timed out after …`. `post_commands` get the same treatment on the control
+machine. A hook that finishes in time keeps anything it deliberately started in the
+background.
+
+A malformed entry, such as an unknown key (`timeout_s:`), a non-numeric timeout, or a
+`copy` entry outside `pre_exec`, is an `invalid-hook-entry` error in
+`sparkrun recipe validate`, and the launch refuses it before any hook runs.
 
 ### post_exec
 
@@ -1141,11 +1182,14 @@ fail-fast.
 post_exec:
   - "curl -s http://localhost:{port}/v1/models | python3 -m json.tool"
   - "echo 'Server ready: {model}'"
+  - command: "python3 /workspace/warm_cache.py"
+    timeout: 1800
 ```
 
 ### post_commands
 
-Runs on the **control machine** (where sparkrun runs) via `subprocess.run(shell=True)`. Sequential, fail-fast.
+Runs on the **control machine** (where sparkrun runs) in a shell, in its own process group. Sequential, fail-fast.
+Entries take the same `{command, timeout}` form as `pre_exec`.
 
 ```yaml
 post_commands:

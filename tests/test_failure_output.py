@@ -186,8 +186,8 @@ def test_old_failure_logs_are_pruned():
 
 
 def test_post_commands_failure_carries_its_output():
-    with mock.patch("sparkrun.orchestration.hooks.subprocess.run") as run:
-        run.return_value = mock.Mock(returncode=2, stdout=TRACEBACK)
+    with mock.patch("sparkrun.orchestration.hooks._run_control_command") as run:
+        run.return_value = (2, TRACEBACK)
         with pytest.raises(RuntimeError) as excinfo:
             hooks.run_post_commands(["./notify.sh"], {"cluster_id": "sparkrun_abc123"}, trust=True)
     message = str(excinfo.value)

@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 
 HookPhase = Literal["pre_exec", "post_exec", "post_commands"]
+#: A recipe hook entry: a command string, ``{command, timeout?}``, or (pre_exec
+#: only) ``{copy, dest?, source_host?}``.
+HookEntry = str | Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,154 @@ def current_hook_launch_context() -> HookLaunchContext | None:
     return _PRE_SERVE_CONTEXT.get()
 
 
+# ---------------------------------------------------------------------------
+# Hook timeouts and entry shapes
+# ---------------------------------------------------------------------------
+
+#: Wall-clock ceiling for one hook command when neither its entry
+#: (``{command: ..., timeout: N}``) nor ``hooks.timeout_s`` in config.yaml
+#: names one.  Was a hardcoded 600s, which killed legitimate first-run
+#: downloads (issue #326).  The default has no "unbounded" spelling: a hook
+#: that hangs would otherwise hold the launch (and, under systemd, the unit's
+#: start) forever.  A hook that needs longer says so per entry, where
+#: ``timeout: 0`` opts that one command out of any limit.
+DEFAULT_HOOK_TIMEOUT_S = 3600.0
+#: Grace a timed-out hook gets between TERM and KILL.
+_HOOK_KILL_AFTER_S = 10
+#: How much longer the control side waits than the hook's own deadline, so the
+#: in-container watchdog fires first and takes the hook's process group with
+#: it.  Killing only the ssh / ``docker exec`` client leaves the hook running.
+_HOOK_TIMEOUT_GRACE_S = 30
+
+COMMAND_ENTRY_KEYS = frozenset({"command", "timeout"})
+COPY_ENTRY_KEYS = frozenset({"copy", "dest", "source_host"})
+
+_HOOK_TIMEOUT: ContextVar[float | None] = ContextVar("sparkrun_hook_timeout", default=None)
+
+
+@contextmanager
+def hook_timeout_scope(seconds: float | None) -> Iterator[None]:
+    """Set the default hook timeout for hooks run within this scope.
+
+    The launcher sets it from ``SparkrunConfig.hook_timeout_s``; a contextvar
+    because ``pre_exec`` runs from inside runtime plugins whose ``_pre_serve``
+    signature carries no config.
+    """
+    token = _HOOK_TIMEOUT.set(seconds)
+    try:
+        yield
+    finally:
+        _HOOK_TIMEOUT.reset(token)
+
+
+def resolve_hook_timeout(default_timeout_s: float | None = None) -> float:
+    """Default hook timeout: explicit argument → launch scope → built-in default.
+
+    Always finite: ``0`` is accepted only on an entry (``timeout: 0``), as a
+    deliberate per-command opt-out, never as the default for every hook.
+    """
+    for candidate in (default_timeout_s, _HOOK_TIMEOUT.get()):
+        try:
+            return parse_hook_timeout(candidate)
+        except ValueError:
+            continue
+    return DEFAULT_HOOK_TIMEOUT_S
+
+
+def parse_hook_timeout(value: object, *, allow_unbounded: bool = False) -> float:
+    """Validate a ``timeout`` (seconds); raises ``ValueError``.
+
+    Numbers only: a positive int or float.  Booleans are rejected (YAML
+    ``timeout: yes`` is not a duration), and so are strings, which would
+    otherwise read differently before and after placeholder rendering.  With
+    *allow_unbounded* (an entry's own ``timeout:``), ``0`` means no timeout
+    and returns ``math.inf``; ``.inf`` itself is not a spelling of it.
+    """
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("timeout must be a number of seconds, got %r" % (value,))
+    if allow_unbounded and value == 0:
+        return math.inf
+    if not math.isfinite(value) or value <= 0:
+        expected = "a positive, finite number of seconds" + (", or 0 for no timeout" if allow_unbounded else "")
+        raise ValueError("timeout must be %s, got %r" % (expected, value))
+    return float(value)
+
+
+def hook_entry_problems(entry: object, *, allow_copy: bool) -> list[str]:
+    """Why *entry* is not a runnable hook entry; empty when it is.
+
+    One answer shared by ``recipe validate`` and execution, so validation
+    refuses exactly what a launch would.  Shapes: a string, a
+    ``{command, timeout?}`` mapping, or (``pre_exec`` only) a
+    ``{copy, dest?, source_host?}`` mapping.
+    """
+    if isinstance(entry, str):
+        return []
+    if not isinstance(entry, Mapping):
+        return ["entry must be a string or a mapping, got %s" % type(entry).__name__]
+    keys = set(entry)
+    if "copy" in keys and "command" in keys:
+        return ["entry sets both 'copy' and 'command'; split it into two entries"]
+    if "copy" in keys:
+        if not allow_copy:
+            return ["'copy' entries are only supported in pre_exec"]
+        unknown = keys - COPY_ENTRY_KEYS
+        return ["unknown key(s) %s for a copy entry (allowed: %s)" % (sorted(unknown), sorted(COPY_ENTRY_KEYS))] if unknown else []
+    if "command" not in keys:
+        expected = "'command' or 'copy'" if allow_copy else "'command'"
+        return ["mapping entry has no %s key (keys: %s)" % (expected, sorted(keys))]
+    problems: list[str] = []
+    if not isinstance(entry["command"], str) or not entry["command"].strip():
+        problems.append("'command' must be a non-empty string")
+    if keys - COMMAND_ENTRY_KEYS:
+        problems.append(
+            "unknown key(s) %s for a command entry (allowed: %s)" % (sorted(keys - COMMAND_ENTRY_KEYS), sorted(COMMAND_ENTRY_KEYS))
+        )
+    if "timeout" in keys:
+        try:
+            parse_hook_timeout(entry["timeout"], allow_unbounded=True)
+        except ValueError as e:
+            problems.append(str(e))
+    return problems
+
+
+def describe_hook_entry(entry: object) -> str:
+    """One-line text of a hook entry, for trust prompts and listings."""
+    if isinstance(entry, Mapping):
+        if "copy" in entry:
+            return "copy %s -> %s" % (entry.get("copy"), entry.get("dest", "<default>"))
+        if "command" in entry:
+            text = str(entry.get("command"))
+            if "timeout" not in entry:
+                return text
+            return "%s  (%s)" % (text, "no timeout" if entry["timeout"] == 0 else "timeout %ss" % entry["timeout"])
+    return str(entry)
+
+
+def _hook_steps(entries: Sequence[object], phase: HookPhase) -> list[Mapping[str, object] | tuple[str, float | None]]:
+    """Validate rendered entries up front: a copy mapping, or ``(command, timeout_s)``.
+
+    Raises ``RuntimeError`` for a malformed entry before anything runs.  Hooks
+    are fail-fast, and silently skipping a step the recipe asked for (what
+    happened to these before) launches something other than the recipe.
+    """
+    steps: list[Mapping[str, object] | tuple[str, float | None]] = []
+    for i, entry in enumerate(entries, 1):
+        problems = hook_entry_problems(entry, allow_copy=phase == "pre_exec")
+        if problems:
+            raise RuntimeError("%s[%d] is not a valid hook entry: %s" % (phase, i, "; ".join(problems)))
+        if isinstance(entry, str):
+            steps.append((entry, None))
+        elif "copy" in entry:
+            steps.append(entry)
+        else:
+            timeout = entry.get("timeout")
+            steps.append((entry["command"], parse_hook_timeout(timeout, allow_unbounded=True) if timeout is not None else None))
+    return steps
+
+
 def _log_hook_target(env: Mapping[str, str]) -> None:
     logger.info(
         "  %s context: host=%s rank=%s/%s role=%s runtime_cache=%s (host=%s:%s)",
@@ -292,9 +443,9 @@ def render_hook_command(cmd: str, context: dict[str, str]) -> str:
 
 
 def render_hook_commands(
-    commands: Sequence[str | dict[str, str]],
+    commands: Sequence[HookEntry],
     context: dict[str, str],
-) -> list[str | dict[str, str]]:
+) -> list[HookEntry]:
     """Render ``{key}`` placeholders in a list of hook commands.
 
     String entries are rendered directly.  Dict entries (e.g. copy
@@ -309,7 +460,7 @@ def render_hook_commands(
     """
     commands = coerce_command_list(commands)
 
-    rendered: list[str | dict[str, str]] = []
+    rendered: list[HookEntry] = []
     for cmd in commands:
         if isinstance(cmd, str):
             rendered.append(render_hook_command(cmd, context))
@@ -320,7 +471,14 @@ def render_hook_commands(
     return rendered
 
 
-def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, str]], trust: bool, *, dry_run: bool = False) -> None:
+def _confirm_hook_execution(
+    hook_label: str,
+    commands: Sequence[HookEntry],
+    trust: bool,
+    *,
+    dry_run: bool = False,
+    where: str = "inside containers",
+) -> None:
     """Shared trust-gating prompt for hook commands.
 
     When *trust* is True, returns immediately (no prompt).
@@ -337,6 +495,7 @@ def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, 
             entries are summarized).
         trust: When True, bypass confirmation entirely.
         dry_run: Report instead of prompting.
+        where: Where the commands run, for the prompt ("on this machine").
 
     Raises:
         RuntimeError: If *trust* is False, this is not a dry run, and either
@@ -350,17 +509,12 @@ def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, 
     if dry_run:
         logger.warning("Recipe %s would require authorization (--trust) to run:", hook_label)
         for i, cmd in enumerate(commands, 1):
-            logger.warning("  [%d] %s", i, cmd)
+            logger.warning("  [%d] %s", i, describe_hook_entry(cmd))
         return
 
-    logger.warning("Recipe %s will execute inside containers:", hook_label)
+    logger.warning("Recipe %s will execute %s:", hook_label, where)
     for i, cmd in enumerate(commands, 1):
-        if isinstance(cmd, str):
-            logger.warning("  [%d] %s", i, cmd)
-        elif isinstance(cmd, dict) and "copy" in cmd:
-            logger.warning("  [%d] copy %s -> %s", i, cmd.get("copy"), cmd.get("dest", "<default>"))
-        else:
-            logger.warning("  [%d] %r", i, cmd)
+        logger.warning("  [%d] %s", i, describe_hook_entry(cmd))
 
     if not sys.stdin.isatty():
         raise RuntimeError(
@@ -369,13 +523,13 @@ def _confirm_hook_execution(hook_label: str, commands: Sequence[str | dict[str, 
         )
     import click
 
-    if not click.confirm("Allow these %s to run inside containers?" % hook_label, default=False):
+    if not click.confirm("Allow these %s to run %s?" % (hook_label, where), default=False):
         raise RuntimeError("%s execution cancelled by user." % hook_label)
 
 
 def run_pre_exec(
     hosts_containers: list[tuple[str, str]],
-    commands: Sequence[str | dict[str, str]],
+    commands: Sequence[HookEntry],
     config_chain,
     ssh_kwargs: dict | None = None,
     dry_run: bool = False,
@@ -383,6 +537,7 @@ def run_pre_exec(
     cache_dir: str | None = None,
     *,
     launch_context: HookLaunchContext | None = None,
+    default_timeout_s: float | None = None,
 ) -> None:
     """Execute pre_exec commands inside containers.
 
@@ -391,6 +546,7 @@ def run_pre_exec(
 
     Each command entry can be:
     - A string: executed as ``docker exec <container> bash -c '<cmd>'``
+    - A dict with ``command`` and optional ``timeout`` (seconds)
     - A dict with ``copy`` key: file injection via ``docker cp``
 
     When *trust* is False (the default), commands from third-party
@@ -411,6 +567,9 @@ def run_pre_exec(
             show the correct path rather than the ``$HOME/.cache/huggingface``
             fallback.
         launch_context: Full resolved launch metadata for the hook environment.
+        default_timeout_s: Per-command timeout for entries that name none;
+            ``None`` uses the launch's ``hooks.timeout_s`` (see
+            :func:`resolve_hook_timeout`).
 
     Raises:
         RuntimeError: If any command fails (fail-fast), or if *trust*
@@ -420,6 +579,7 @@ def run_pre_exec(
         return
 
     commands = coerce_command_list(commands)
+    _hook_steps(commands, "pre_exec")  # refuse a malformed entry before asking about it
 
     _confirm_hook_execution("pre_exec", commands, trust, dry_run=dry_run)
 
@@ -433,25 +593,35 @@ def run_pre_exec(
 
     rendered = render_hook_commands(commands, ctx)
     launch_context = launch_context or build_hook_launch_context([host for host, _ in hosts_containers], config_chain)
+    default_timeout = resolve_hook_timeout(default_timeout_s)
+    steps = _hook_steps(rendered, "pre_exec")
 
     logger.info("Running %d pre_exec command(s) on %d container(s)...", len(rendered), len(hosts_containers))
 
     for host, container_name in hosts_containers:
         hook_env = build_hook_env(launch_context, "pre_exec", host=host, container_name=container_name)
         _log_hook_target(hook_env)
-        for i, cmd in enumerate(rendered, 1):
-            if isinstance(cmd, dict) and "copy" in cmd:
-                _run_copy_command(host, container_name, cmd, ssh_kwargs, dry_run, label="pre_exec[%d]" % i, cache_dir=cache_dir)
-            elif isinstance(cmd, str):
-                _run_exec_command(host, container_name, cmd, ssh_kwargs, dry_run, label="pre_exec[%d]" % i, env=hook_env)
+        for i, step in enumerate(steps, 1):
+            if isinstance(step, Mapping):
+                _run_copy_command(host, container_name, step, ssh_kwargs, dry_run, label="pre_exec[%d]" % i, cache_dir=cache_dir)
             else:
-                logger.warning("Skipping unrecognized pre_exec entry: %r", cmd)
+                cmd, timeout_s = step
+                _run_exec_command(
+                    host,
+                    container_name,
+                    cmd,
+                    ssh_kwargs,
+                    dry_run,
+                    label="pre_exec[%d]" % i,
+                    env=hook_env,
+                    timeout_s=timeout_s or default_timeout,
+                )
 
 
 def run_post_exec(
     head_host: str,
     container_name: str,
-    commands: str | Sequence[str],
+    commands: str | Sequence[HookEntry],
     context: dict[str, str],
     ssh_kwargs: dict | None = None,
     dry_run: bool = False,
@@ -459,6 +629,7 @@ def run_post_exec(
     cache_dir: str | None = None,  # noqa: ARG001 — reserved for future copy-type post_exec entries
     *,
     launch_context: HookLaunchContext | None = None,
+    default_timeout_s: float | None = None,
 ) -> None:
     """Execute post_exec commands inside the head container.
 
@@ -479,6 +650,7 @@ def run_post_exec(
         dry_run: Show what would be done without executing.
         trust: Skip confirmation prompt (auto-trust the commands).
         launch_context: Full launch metadata, including all participating nodes.
+        default_timeout_s: Per-command timeout for entries that name none.
 
     Raises:
         RuntimeError: If any command fails (fail-fast), or if *trust*
@@ -488,6 +660,7 @@ def run_post_exec(
         return
 
     commands = coerce_command_list(commands)
+    _hook_steps(commands, "post_exec")
 
     _confirm_hook_execution("post_exec", commands, trust, dry_run=dry_run)
 
@@ -496,27 +669,38 @@ def run_post_exec(
     hook_env = build_hook_env(launch_context, "post_exec", host=head_host, container_name=container_name)
     _log_hook_target(hook_env)
 
+    default_timeout = resolve_hook_timeout(default_timeout_s)
+    steps = _hook_steps(rendered, "post_exec")
+
     logger.info("Running %d post_exec command(s) on %s...", len(rendered), container_name)
 
-    for i, cmd in enumerate(rendered, 1):
-        if isinstance(cmd, str):
-            _run_exec_command(head_host, container_name, cmd, ssh_kwargs, dry_run, label="post_exec[%d]" % i, env=hook_env)
-        else:
-            logger.warning("Skipping non-string post_exec entry: %r", cmd)
+    for i, (cmd, timeout_s) in enumerate(steps, 1):
+        _run_exec_command(
+            head_host,
+            container_name,
+            cmd,
+            ssh_kwargs,
+            dry_run,
+            label="post_exec[%d]" % i,
+            env=hook_env,
+            timeout_s=timeout_s or default_timeout,
+        )
 
 
 def run_post_commands(
-    commands: str | Sequence[str],
+    commands: str | Sequence[HookEntry],
     context: dict[str, str],
     dry_run: bool = False,
     trust: bool = False,
     *,
     launch_context: HookLaunchContext | None = None,
+    default_timeout_s: float | None = None,
 ) -> None:
     """Execute post_commands on the control machine.
 
     Runs via ``subprocess`` on the machine where sparkrun is running.
-    Sequential, fail-fast.  Stdout/stderr are streamed to terminal.
+    Sequential, fail-fast.  Output is logged once each command finishes.
+    Each command runs in its own process group, which a timeout kills whole.
 
     When *trust* is False (the default), commands from third-party
     registries require explicit user confirmation before executing.
@@ -530,71 +714,58 @@ def run_post_commands(
         dry_run: Show what would be done without executing.
         trust: Skip confirmation prompt (auto-trust the commands).
         launch_context: Full launch metadata; this shell has no workload rank.
+        default_timeout_s: Per-command timeout for entries that name none.
 
     Raises:
         RuntimeError: If any command fails (fail-fast), or if *trust*
             is False and stdin is not a TTY.
     """
-    import sys
-
     if not commands:
         return
 
     commands = coerce_command_list(commands)
+    _hook_steps(commands, "post_commands")
 
-    if not trust and dry_run:
-        _confirm_hook_execution("post_commands", commands, trust, dry_run=True)
-    elif not trust:
-        logger.warning("Recipe post_commands will execute on this machine:")
-        for i, cmd in enumerate(commands, 1):
-            if isinstance(cmd, str):
-                logger.warning("  [%d] %s", i, cmd)
-        if not sys.stdin.isatty():
-            raise RuntimeError(
-                "post_commands require confirmation but stdin is not a TTY. Use --trust to allow post_commands from third-party registries."
-            )
-        import click
-
-        if not click.confirm("Allow these post_commands to run on this machine?", default=False):
-            raise RuntimeError("post_commands execution cancelled by user.")
+    _confirm_hook_execution("post_commands", commands, trust, dry_run=dry_run, where="on this machine")
 
     rendered = render_hook_commands(commands, context)
     hook_env = build_hook_env(launch_context or _post_launch_context(context), "post_commands")
     _log_hook_target(hook_env)
+    default_timeout = resolve_hook_timeout(default_timeout_s)
+    steps = _hook_steps(rendered, "post_commands")
 
     logger.info("Running %d post_command(s) on control machine...", len(rendered))
 
-    for i, cmd in enumerate(rendered, 1):
-        if not isinstance(cmd, str):
-            logger.warning("Skipping non-string post_commands entry: %r", cmd)
-            continue
-
-        logger.info("  post_commands[%d]: %s", i, cmd)
+    for i, (cmd, timeout_s) in enumerate(steps, 1):
+        timeout_s = timeout_s or default_timeout
+        logger.info("  post_commands[%d] (%s): %s", i, _describe_limit(None if timeout_s == float("inf") else timeout_s), cmd)
 
         if dry_run:
             logger.info("  [dry-run] Would execute: %s", cmd)
             continue
 
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env={**os.environ, **hook_env},
-        )
+        returncode, stdout = _run_control_command(cmd, env={**os.environ, **hook_env}, timeout_s=timeout_s)
 
-        # Stream output
-        if result.stdout:
-            for line in result.stdout.rstrip().splitlines():
+        if stdout:
+            for line in stdout.rstrip().splitlines():
                 logger.info("  | %s", line)
 
-        if result.returncode != 0:
+        if returncode is None:
             raise RuntimeError(
                 _hook_failure_message(
-                    "post_commands[%d] failed (exit %d): %s" % (i, result.returncode, cmd),
+                    "post_commands[%d] timed out after %s: %s" % (i, _format_timeout(timeout_s), cmd),
                     cmd=cmd,
-                    stdout=result.stdout,
+                    stdout=stdout,
+                    stderr="",
+                    log_key="%s-control" % (hook_env.get("SPARKRUN_CLUSTER_ID") or "unscoped"),
+                )
+            )
+        if returncode != 0:
+            raise RuntimeError(
+                _hook_failure_message(
+                    "post_commands[%d] failed (exit %d): %s" % (i, returncode, cmd),
+                    cmd=cmd,
+                    stdout=stdout,
                     stderr="",
                     log_key="%s-control" % (hook_env.get("SPARKRUN_CLUSTER_ID") or "unscoped"),
                 )
@@ -727,8 +898,15 @@ def _run_exec_command(
     label: str = "hook",
     *,
     env: Mapping[str, str] | None = None,
+    timeout_s: float = DEFAULT_HOOK_TIMEOUT_S,
 ) -> None:
     """Execute a single command inside a container via docker exec.
+
+    The deadline is enforced twice.  Inside the container a watchdog kills
+    the hook's whole process group (:func:`timed_hook_script`); killing only
+    the ``docker exec`` (or ssh) client would leave the hook running in the
+    container.  The control side waits a grace period longer, as the
+    backstop for a hung connection.
 
     Args:
         host: Target host.
@@ -738,32 +916,264 @@ def _run_exec_command(
         dry_run: Show what would be done without executing.
         label: Human-readable label for log messages.
         env: Hook-only metadata exported to this exec and its child processes.
+        timeout_s: Wall-clock limit for the command; ``math.inf`` for none.
 
     Raises:
-        RuntimeError: If the command exits with non-zero status.
+        RuntimeError: If the command exits with non-zero status or times out.
     """
-    # Use base64 encoding to safely pass the command through bash -c
+    import math
+
     from sparkrun.orchestration.primitives import run_script_on_host
     from sparkrun.utils.shell import b64_wrap_bash, quote
 
     # TODO: this should delegate via executor implementation; this should allow control over user
     env_args = "".join(" --env %s" % quote("%s=%s" % (key, value)) for key, value in sorted((env or {}).items()))
-    script = "docker exec --user root%s %s bash -c %s" % (env_args, quote(container_name), b64_wrap_bash(cmd))
+    if math.isinf(timeout_s):
+        # ``timeout: 0`` on the entry: no watchdog, and no control-side limit.
+        seconds = None
+        payload = b64_wrap_bash(cmd, quoted=False)
+    else:
+        seconds = _whole_seconds(timeout_s)
+        payload = timed_hook_script(cmd, seconds)
+    script = "docker exec --user root%s %s bash -c %s" % (env_args, quote(container_name), quote(payload))
 
-    logger.info("  %s on %s/%s: %s", label, host, container_name, cmd)
+    logger.info("  %s on %s/%s (%s): %s", label, host, container_name, _describe_limit(seconds), cmd)
 
-    result = run_script_on_host(host, script, ssh_kwargs=ssh_kwargs, timeout=600, dry_run=dry_run)
+    result = run_script_on_host(
+        host,
+        script,
+        ssh_kwargs=ssh_kwargs,
+        timeout=None if seconds is None else seconds + _HOOK_KILL_AFTER_S + _HOOK_TIMEOUT_GRACE_S,
+        dry_run=dry_run,
+    )
 
     if not dry_run and not result.success:
+        if result.returncode == 124 and seconds is not None:
+            summary = "%s timed out after %s on %s/%s (raise it with a per-entry 'timeout:' or hooks.timeout_s in config.yaml)" % (
+                label,
+                _format_timeout(seconds),
+                host,
+                container_name,
+            )
+        elif result.returncode == -1 and seconds is not None and "timed out" in (result.stderr or ""):
+            summary = "%s on %s/%s did not return within %ds of its %s deadline; the connection or docker exec hung" % (
+                label,
+                host,
+                container_name,
+                _HOOK_KILL_AFTER_S + _HOOK_TIMEOUT_GRACE_S,
+                _format_timeout(seconds),
+            )
+        else:
+            summary = "%s failed (exit %d) on %s/%s" % (label, result.returncode, host, container_name)
         raise RuntimeError(
             _hook_failure_message(
-                "%s failed (exit %d) on %s/%s" % (label, result.returncode, host, container_name),
+                summary,
                 cmd=cmd,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 log_key="%s-%s" % ((env or {}).get("SPARKRUN_CLUSTER_ID") or "unscoped", host),
             )
         )
+
+
+def timed_hook_script(cmd: str, seconds: int) -> str:
+    """Bash text that runs *cmd* with a deadline enforced where it runs.
+
+    The hook runs as a job in its own process group (``set -m``, turned off
+    again inside so jobs it backgrounds stay in that group) and a watchdog,
+    also in its own group, TERMs the hook's group at the deadline and KILLs
+    whatever is left after ``_HOOK_KILL_AFTER_S``.  The watchdog tells the
+    shell it fired (USR1, which also interrupts ``wait``, hence the loop), so
+    the verdict is not inferred from the exit code; on a timeout the shell
+    waits for the escalation, since TERM usually ends the job's subshell
+    while a child ignoring it lives on.  A timed-out hook exits 124, like
+    ``timeout(1)``.  Pure bash rather than
+    ``timeout(1)`` because busybox's (Alpine images) signals only its direct
+    child, which leaves a hook's children running; the hook already requires
+    bash.  A hook that finishes in time stops the watchdog, so a daemon it
+    deliberately started keeps running, as before.  Brace-free.
+    """
+    from sparkrun.utils.shell import b64_wrap_bash
+
+    return _HOOK_DEADLINE_SCRIPT % {
+        "payload": b64_wrap_bash(cmd, quoted=False),
+        "seconds": seconds,
+        "kill_after": _HOOK_KILL_AFTER_S,
+    }
+
+
+_HOOK_DEADLINE_SCRIPT = """__sr_timed_out=0
+trap '__sr_timed_out=1' USR1
+set -m
+( set +m
+%(payload)s ) &
+__sr_hook=$!
+( sleep %(seconds)d
+  kill -USR1 $$
+  kill -TERM -$__sr_hook 2>/dev/null || exit 0
+  __sr_i=0
+  while [ $__sr_i -lt %(kill_after)d ] && kill -0 -$__sr_hook 2>/dev/null; do sleep 1; __sr_i=$((__sr_i + 1)); done
+  kill -KILL -$__sr_hook 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+__sr_watchdog=$!
+set +m
+while :; do
+  wait $__sr_hook
+  __sr_rc=$?
+  kill -0 $__sr_hook 2>/dev/null || break
+done
+if [ $__sr_timed_out = 1 ]; then
+  wait $__sr_watchdog
+  exit 124
+fi
+kill -KILL -$__sr_watchdog 2>/dev/null
+exit $__sr_rc
+"""
+
+
+def _whole_seconds(timeout_s: float) -> int:
+    import math
+
+    return max(1, math.ceil(timeout_s))
+
+
+def _describe_limit(seconds: float | None) -> str:
+    return "no timeout" if seconds is None else "timeout %s" % _format_timeout(seconds)
+
+
+def _format_timeout(seconds: float) -> str:
+    seconds = _whole_seconds(seconds)
+    if seconds % 3600 == 0:
+        return "%dh" % (seconds // 3600)
+    if seconds % 60 == 0:
+        return "%dm" % (seconds // 60)
+    return "%ds" % seconds
+
+
+def _run_control_command(cmd: str, *, env: Mapping[str, str], timeout_s: float) -> tuple[int | None, str]:
+    """Run a ``post_commands`` shell command; ``(returncode, output)``.
+
+    ``returncode`` is ``None`` when *timeout_s* expired; ``math.inf`` waits
+    for the command however long it takes (an entry's ``timeout: 0``).  The command runs in
+    its own process group so expiry (or an exception here, Ctrl-C included)
+    kills the whole group: ``subprocess.run(timeout=)`` kills only the shell
+    and leaves a backgrounded child running.  A group, not a session: with
+    a controlling terminal the group is made the foreground one for the
+    command's lifetime, as a shell does, so a ``sudo`` password prompt keeps
+    working (``setsid`` would detach it from the terminal entirely).
+    """
+    import signal
+
+    posix = hasattr(os, "killpg")
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=dict(env),
+        **({"process_group": 0} if posix else {}),
+    )
+    terminal = _hand_terminal_to(proc) if posix else None
+    try:
+        stdout, _ = proc.communicate(timeout=None if timeout_s == float("inf") else timeout_s)
+        return proc.returncode, stdout or ""
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc, signal.SIGTERM)
+        try:
+            stdout, _ = proc.communicate(timeout=_HOOK_KILL_AFTER_S)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc, signal.SIGKILL)
+            stdout = _drain_after_kill(proc)
+        return None, stdout or ""
+    except BaseException:
+        _kill_process_group(proc, signal.SIGKILL)
+        _drain_after_kill(proc)
+        raise
+    finally:
+        if terminal is not None:
+            _reclaim_terminal(terminal)
+
+
+def _hand_terminal_to(proc: subprocess.Popen) -> int | None:
+    """Make *proc*'s group the terminal's foreground group; the tty fd, or None.
+
+    Only when this process is itself in the foreground (a backgrounded
+    sparkrun has no business taking the terminal).  The group is SIGCONTed
+    afterwards in case the command reached the tty first and was stopped.
+    """
+    import signal
+    import sys
+
+    try:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd) or os.tcgetpgrp(fd) != os.getpgrp():
+            return None
+        _without_sigttou(lambda: os.tcsetpgrp(fd, proc.pid))
+        os.killpg(proc.pid, signal.SIGCONT)
+    except (OSError, ValueError, AttributeError) as e:
+        logger.debug("post_commands keep the terminal in sparkrun's process group: %s", e)
+        return None
+    return fd
+
+
+def _reclaim_terminal(fd: int) -> None:
+    try:
+        _without_sigttou(lambda: os.tcsetpgrp(fd, os.getpgrp()))
+    except OSError as e:
+        logger.warning("Could not take the terminal back after post_commands: %s", e)
+
+
+def _without_sigttou(action) -> None:
+    """Run *action* with SIGTTOU ignored (``tcsetpgrp`` from a background group raises it)."""
+    import signal
+
+    previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    try:
+        action()
+    finally:
+        signal.signal(signal.SIGTTOU, previous)
+
+
+def _drain_after_kill(proc: subprocess.Popen) -> str:
+    """Collect output after a KILL without waiting on an escaped holder of the pipe.
+
+    A descendant outside the group (``setsid``, or any child on Windows where
+    there is no group) can keep stdout open forever; give it a bounded
+    moment, then close our end and stop waiting.
+    """
+    try:
+        stdout, _ = proc.communicate(timeout=_HOOK_KILL_AFTER_S)
+        return stdout or ""
+    except subprocess.TimeoutExpired:
+        logger.warning("A killed post_command left a process holding its output open; not waiting for it")
+        if proc.stdout is not None:
+            proc.stdout.close()
+        try:
+            proc.wait(timeout=_HOOK_KILL_AFTER_S)
+        except subprocess.TimeoutExpired:
+            logger.warning("post_command shell (pid %s) did not exit after SIGKILL", proc.pid)
+        return ""
+
+
+def _kill_process_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal *proc*'s process group (POSIX) or its process tree (Windows)."""
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except ProcessLookupError:
+            return  # the whole group is already gone
+        except OSError as e:
+            logger.debug("Signalling post_command group %s failed (%s); killing the shell only", proc.pid, e)
+    elif os.name == "nt":
+        result = subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
+        if result.returncode == 0:
+            return
+        logger.debug("taskkill of post_command tree %s failed (rc %s)", proc.pid, result.returncode)
+    try:
+        proc.kill()
+    except OSError as e:
+        logger.debug("post_command shell %s already gone: %s", proc.pid, e)
 
 
 def _run_copy_command(

@@ -67,14 +67,14 @@ def test_pre_exec_copy_entries_and_readonly_sequences_are_preserved():
 
 
 def test_scalar_post_commands_keeps_one_shell_invocation():
-    with mock.patch("sparkrun.orchestration.hooks.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
+    with mock.patch("sparkrun.orchestration.hooks._run_control_command", return_value=(0, "")) as run:
         run_post_commands(BLOCK, {}, trust=True)
     run.assert_called_once()
     assert run.call_args.args[0] == BLOCK
 
 
 def test_scalar_post_commands_still_requires_trust():
-    with mock.patch("sys.stdin.isatty", return_value=False), mock.patch("sparkrun.orchestration.hooks.subprocess.run") as run:
+    with mock.patch("sys.stdin.isatty", return_value=False), mock.patch("sparkrun.orchestration.hooks._run_control_command") as run:
         with pytest.raises(RuntimeError, match="--trust"):
             run_post_commands(BLOCK, {})
     run.assert_not_called()

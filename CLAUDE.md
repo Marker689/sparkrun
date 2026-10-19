@@ -3287,6 +3287,19 @@ Timing above.
 The live-monitor history window is `monitor.history_points` (default 120
 samples per host; a non-positive value falls back to the default).
 
+Recipe hook commands are bounded by `hooks.timeout_s` (default 3600, no
+unbounded spelling: a non-positive value falls back to the default). An
+entry may set its own as `{command: ..., timeout: N}`; `timeout: 0` there,
+and only there, means no limit (no watchdog, no control-side timeout), so
+unbounded is always a per-command decision written in the recipe. The deadline is
+enforced **inside the container** (`hooks.timed_hook_script`: the hook in
+its own process group, a bash watchdog that TERMs then KILLs it), because
+killing the ssh / `docker exec` client leaves the hook running. Pure bash
+on purpose: busybox `timeout` signals only its direct child. `post_commands`
+run in their own session and are killed as a group. Entry shapes are
+checked by one predicate (`hook_entry_problems`), shared by `recipe
+validate` and the runner.
+
 HuggingFace Hub budgets live under `hub:` (`timeout_s` per request,
 `metadata_budget_s` for the whole advisory phase, `0` = unbounded — see Hub
 Metadata Budget above). Note the asymmetry with `readiness.*`: a non-positive
