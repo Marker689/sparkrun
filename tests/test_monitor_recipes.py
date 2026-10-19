@@ -636,7 +636,7 @@ def test_preflight_returns_to_settings_when_host_becomes_unavailable(monkeypatch
         index = len(capacity_calls)
         capacity_calls.append(index)
         if index == 1:
-            return _capacity({"h1": (True, 2), "h2": (True, 0), "h3": (False, None)})
+            return _capacity({"h1": (True, 2), "h2": (False, None), "h3": (False, None)})
         return _capacity({"h1": (True, 2), "h2": (True, 2), "h3": (True, 2)})
 
     plan_calls: list[Any] = []
@@ -673,7 +673,7 @@ def test_preflight_returns_to_settings_when_host_becomes_unavailable(monkeypatch
             assert modal.checks.ok is True
             states = {host: (box.value, box.disabled, str(box.label)) for host, box in modal._host_boxes()}
             assert states["h1"] == (True, False, "h1")
-            assert states["h2"] == (False, True, "h2 (no free slots)")
+            assert states["h2"] == (False, True, "h2 (unavailable)")
             assert states["h3"] == (False, True, "h3 (unavailable)")
             error = str(modal.query_one("#param-error", Static).content)
             assert "No longer available" in error
@@ -843,10 +843,11 @@ def test_checks_capacity_failure_disables_and_unchecks_hosts(monkeypatch, tmp_pa
             # The capacity error itself stays visible in the hosts note.
             assert "no free capacity" in str(modal.query_one("#param-hosts-note", Static).content)
 
-            # With no selectable host the modal cannot collect a host set.
+            # Run retries the scheduler even when every previous row was disabled.
             await pilot.click("#param-run")
-            await pilot.pause(0.1)
-            assert "No host can take this launch" in str(modal.query_one("#param-error", Static).content)
+            await _wait_until(pilot, lambda: app.screen is modal and modal._pending_options is None)
+            assert "no free capacity" in str(modal.query_one("#param-error", Static).content)
+            assert app.result == "unset"
 
             # Without per-host attribution the whole candidate set is dead.
             checks = RuntimeChecksScreen(recipe=None, summary=None, cluster="lab", hosts=("h1", "h2"))
@@ -915,12 +916,12 @@ def test_params_host_rows_disable_hosts_that_exceed_memory(monkeypatch, tmp_path
     asyncio.run(_run())
 
 
-def test_checks_disable_unavailable_and_full_hosts(monkeypatch, tmp_path):
+def test_checks_disable_unreachable_hosts_but_leave_capacity_to_scheduler(monkeypatch, tmp_path):
     app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
     app.picker.hosts = ("h1", "h2", "h3")
     cluster = SimpleNamespace(hosts=("h1", "h2", "h3"))
     monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _fake_plan(("h1",), "greedy", (), cluster=cluster))
-    # Memory is fine everywhere; availability and free slots decide.
+    # Memory is fine everywhere. Unused slots alone cannot decide admission.
     monkeypatch.setattr(Recipe, "estimate_vram", lambda self, **_kwargs: SimpleNamespace(total_per_gpu_gb=10.0))
     monkeypatch.setattr(
         "sparkrun.cli._monitor_recipes.check_fit",
@@ -934,13 +935,13 @@ def test_checks_disable_unavailable_and_full_hosts(monkeypatch, tmp_path):
     async def _run():
         async with app.run_test(size=(120, 60)) as pilot:
             modal = await _open_modal(pilot, app.picker)
-            assert modal.checks.selectable == ("h1",)
-            assert dict(modal.checks.reasons) == {"h2": "unavailable", "h3": "no free slots"}
+            assert modal.checks.selectable == ("h1", "h3")
+            assert dict(modal.checks.reasons) == {"h2": "unavailable"}
             states = {host: (box.value, box.disabled, str(box.label)) for host, box in modal._host_boxes()}
-            # Unavailable and at-capacity hosts render disabled and unchecked.
+            # A reachable host may accept sharing or reuse with no unused slots.
             assert states["h1"] == (True, False, "h1")
             assert states["h2"] == (False, True, "h2 (unavailable)")
-            assert states["h3"] == (False, True, "h3 (no free slots)")
+            assert states["h3"] == (False, False, "h3")
 
     asyncio.run(_run())
 
@@ -1131,5 +1132,206 @@ def test_params_dialog_background_is_neutral_and_readable(monkeypatch, tmp_path)
             assert background != Color.parse(variables["panel"])
             ratio = _contrast_ratio(Color.parse(variables["foreground"]), background)
             assert ratio >= 7.0, f"contrast {ratio:.2f}:1"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("ensure", [False, True])
+def test_scheduler_approved_shared_host_can_launch_without_unused_slots(monkeypatch, tmp_path, ensure):
+    from sparkrun.core.cluster_status import ClusterStatus, GpuOccupancy, HostOccupancy
+    from sparkrun.core.hardware import AcceleratorSpec, HostHardware
+    from sparkrun.core.parallelism import ParallelismConfig
+    from sparkrun.core.scheduler import ResourceRequest, SchedulingRequest
+    from sparkrun.schedulers.dense_pack import DensePackScheduler
+
+    app = _open(monkeypatch, [_summary("@community/shared")], tmp_path)
+    hardware = HostHardware(accelerators=[AcceleratorSpec("nvidia", "gb10", memory_gb=121)])
+    occupancy = HostOccupancy("h1", used_slots=1, free_slots=0, gpus=(GpuOccupancy(0, used_memory_gb=30, used_util_fraction=0.3),))
+    placement = (
+        DensePackScheduler()
+        .schedule(
+            SchedulingRequest(
+                ParallelismConfig(),
+                ("h1",),
+                host_hardware={"h1": hardware},
+                status=ClusterStatus((occupancy,)),
+                resources=ResourceRequest(util_fraction=0.3, memory_gb=30),
+            )
+        )
+        .assignment
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _fake_plan(placement.hosts_used, "dense-pack"))
+    monkeypatch.setattr(
+        "sparkrun.cli._monitor_recipes.catalog_cluster_capacity",
+        lambda *_args, **_kwargs: _capacity({"h1": (True, occupancy.free_slots), "h2": (True, 0)}),
+    )
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            assert modal.query_one("#param-host-0", Checkbox).value
+            assert not modal.query_one("#param-host-0", Checkbox).disabled
+            if ensure:
+                modal.query_one("#param-advanced-toggle", Checkbox).value = True
+                await pilot.pause()
+                modal.query_one("#param-knob-ensure", Checkbox).value = True
+            await pilot.click("#param-run")
+            launch = await _wait_result(pilot, app)
+            assert launch.options.hosts == ("h1",)
+            assert launch.options.ensure is ensure
+
+    asyncio.run(_run())
+
+
+def test_run_rechecks_all_rejected_hosts_with_edited_parameters(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    calls: list[Any] = []
+
+    def _plan(options, **_kwargs):
+        calls.append(options)
+        if options.overrides.get("tensor_parallel") != 1:
+            raise InsufficientCapacity("requested parallelism does not fit")
+        return _fake_plan(("h1",))(options)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _plan)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            assert not modal.checks.selectable
+            modal.query_one("#param-tp", Input).value = "1"
+            await pilot.click("#param-run")
+            await _wait_until(pilot, lambda: app.screen is modal and modal.checks.ok)
+            assert len(calls) == 2
+            assert calls[1].hosts == ("h1", "h2")
+            assert modal.query_one("#param-host-0", Checkbox).value
+            assert not modal.query_one("#param-host-0", Checkbox).disabled
+            assert app.result == "unset"  # recovered host choices remain reviewable
+            await _wait_until(
+                pilot, lambda: not app.query(RuntimeChecksScreen) and not modal.query_one("#param-run", Button).has_class("-active")
+            )
+            await pilot.click("#param-run")
+            launch = await _wait_result(pilot, app)
+            assert launch.options.hosts == ("h1",)
+            assert launch.options.overrides["tensor_parallel"] == 1
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("width", [60, 120])
+def test_recheck_restores_a_recovered_host_without_changing_parameters(monkeypatch, tmp_path, width):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    probes = iter([_capacity({"h1": (True, 1), "h2": (False, None)}), _capacity({"h1": (True, 1), "h2": (True, 1)})])
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.catalog_cluster_capacity", lambda *_a, **_kw: next(probes))
+
+    async def _run():
+        async with app.run_test(size=(width, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            for button in modal.query("#param-buttons Button"):
+                assert button.region.right <= modal.query_one("#params-dialog").content_region.right
+            assert modal.query_one("#param-host-1", Checkbox).disabled
+            await pilot.click("#param-recheck")
+            await _wait_until(pilot, lambda: app.screen is modal and not modal.query_one("#param-host-1", Checkbox).disabled)
+            assert modal.query_one("#param-host-0", Checkbox).value
+            assert not modal.query_one("#param-host-1", Checkbox).value
+            assert app.result == "unset"
+
+    asyncio.run(_run())
+
+
+def test_clearing_overrides_after_failed_validation_restores_recipe(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            image = modal.recipe.container
+            env = dict(modal.recipe.env)
+            modal.query_one("#param-advanced-toggle", Checkbox).value = True
+            await pilot.pause()
+            modal.query_one("#param-knob-image", Input).value = "custom/wrong-image:latest"
+            modal.query_one("#param-advanced", Input).value = "env.VLLM_USE_V1=0 env.EXTRA=temporary"
+            for _host, box in modal._host_boxes():
+                box.value = False
+            await pilot.click("#param-run")
+            assert "Select at least one host" in str(modal.query_one("#param-error", Static).content)
+            assert modal.recipe.container == image
+            assert modal.recipe.env == env
+
+            modal.query_one("#param-knob-image", Input).value = ""
+            modal.query_one("#param-advanced", Input).value = ""
+            modal.query_one("#param-host-0", Checkbox).value = True
+            await _wait_until(pilot, lambda: not modal.query_one("#param-run", Button).has_class("-active"))
+            await pilot.click("#param-run")
+            launch = await _wait_result(pilot, app)
+            assert launch.options.recipe.container == image
+            assert launch.options.recipe.env == env
+            assert launch.options.recipe is not modal.recipe
+
+    asyncio.run(_run())
+
+
+def test_initial_planning_does_not_mutate_parameter_defaults(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+
+    def _mutating_plan(options, **_kwargs):
+        options.recipe.container = "planned/image"
+        options.recipe.env["VLLM_USE_V1"] = "changed"
+        return _fake_plan()(options)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _mutating_plan)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            assert modal.recipe.container == "test/image:latest"
+            assert modal.recipe.env["VLLM_USE_V1"] == "1"
+
+    asyncio.run(_run())
+
+
+def test_cancelled_preflight_cannot_leak_overrides_into_next_launch(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow_plan(options, **_kwargs):
+        entered.set()
+        assert release.wait(5), "test did not release cancelled preflight"
+        options.recipe.env["LATE_RESULT"] = "discard"
+        finished.set()
+        return _fake_plan()(options)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            image, env = modal.recipe.container, dict(modal.recipe.env)
+            modal.query_one("#param-advanced-toggle", Checkbox).value = True
+            await pilot.pause()
+            modal.query_one("#param-knob-image", Input).value = "temporary/image"
+            modal.query_one("#param-advanced", Input).value = "env.EXTRA=temporary"
+            monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _slow_plan)
+            try:
+                await pilot.click("#param-run")
+                assert await asyncio.to_thread(entered.wait, 3)
+                await pilot.press("escape")
+                await _wait_until(pilot, lambda: app.screen is modal)
+                assert modal._pending_options is None
+                assert app.result == "unset"
+            finally:
+                release.set()
+            assert await asyncio.to_thread(finished.wait, 3)
+            # Hiding Advanced also discards its entered overrides for the retry.
+            modal.query_one("#param-advanced-toggle", Checkbox).value = False
+            monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _fake_plan())
+            await pilot.pause()  # finish the collapse layout before clicking the moved button
+            await _wait_until(
+                pilot, lambda: not app.query(RuntimeChecksScreen) and not modal.query_one("#param-run", Button).has_class("-active")
+            )
+            await pilot.click("#param-run")
+            launch = await _wait_result(pilot, app)
+            assert launch.options.recipe.container == image
+            assert launch.options.recipe.env == env
 
     asyncio.run(_run())

@@ -12,6 +12,14 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Fixed
 
+- `cluster monitor` respects scheduler-approved shared GPU placements and workload
+  reuse even when no GPU is wholly unused. The run dialog can recheck rejected hosts
+  after parameter edits or capacity recovery, and cleared image/environment overrides
+  no longer survive a failed or cancelled launch attempt.
+- Monitor log-metric polls finish across slow reads and publish completed workloads
+  without waiting for other workloads. Missing samples no longer shift a source's
+  history into later polling windows, and TensorFold's speculative acceptance rate
+  uses accepted tokens divided by total drafted tokens.
 - On a controller with no `ssh.key`, the setup wizard now verifies key-based SSH with
   the key it just generated and installed. It re-probed without it, reported every host
   as "Still failing", and skipped all later setup steps as unreachable.

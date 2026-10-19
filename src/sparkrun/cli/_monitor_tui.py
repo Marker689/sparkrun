@@ -470,6 +470,7 @@ class ClusterMonitorApp(App):
         # Committed scrapers, created and fed only on the UI thread.
         self._metrics_scrapers: dict[str, RuntimeMetricsScraper] = {}
         self._track_cancel = threading.Event()
+        self._metrics_lock = threading.Lock()
         # Whether the first sample has been taken; it must not wait a full interval.
         self._metrics_primed = False
         # (workload_id, deadline, resolved (host, container)) for the log pane that
@@ -866,17 +867,28 @@ class ClusterMonitorApp(App):
         """Committed log metrics for *cluster_id*, or None before the first sample."""
         return self._metrics_scrapers.get(cluster_id)
 
-    @work(thread=True, exclusive=True, group="metrics-track")
+    @work(thread=True, exclusive=False, group="metrics-track")
     def _metrics_tick(self) -> None:
+        # Reads have their own timeout. A slow poll must finish instead of
+        # being cancelled and restarted at the same source every interval.
+        # Only one worker owns the target cache; overlapping ticks are skipped.
+        if not self._metrics_lock.acquire(blocking=False):
+            return
+        try:
+            self._collect_metrics()
+        finally:
+            self._metrics_lock.release()
+
+    def _collect_metrics(self) -> None:
         """Read every tracked workload's log tail and hand the lines to the UI thread.
 
         Runs off the UI thread: each source costs one bounded SSH read. Targets
         are cached across ticks and re-resolved only when a workload appears or
         a read fails, so steady state is one tail page per source per tick.
         """
-        previous, self._track_cancel = self._track_cancel, threading.Event()
-        previous.set()  # an overran tick aborts its in-flight reads
         cancel = self._track_cancel
+        if cancel.is_set():
+            return
         frame = self._frame
         if frame is None:
             return
@@ -886,7 +898,7 @@ class ClusterMonitorApp(App):
                 wanted.setdefault(workload.cluster_id, []).append(activity.host)
         for gone in [cid for cid in self._metrics_targets if cid not in wanted]:
             self._metrics_targets.pop(gone, None)
-        collected: dict[str, list[LogLine]] = {}
+        self.call_from_thread(self._on_metrics_collected, set(wanted), {}, {})
         # The workload's authoritative source set right now: a re-resolved
         # target names a restarted rank's new container, so the scraper can
         # forget the old one instead of summing both forever.
@@ -931,10 +943,10 @@ class ClusterMonitorApp(App):
                     logger.debug("Metrics tracking read failed for %s", cluster_id, exc_info=True)
                     self._metrics_targets.pop(cluster_id, None)
                     break
-            if lines:
-                collected[cluster_id] = lines
-        if not cancel.is_set():
-            self.call_from_thread(self._on_metrics_collected, set(wanted), collected, live)
+            if lines and not cancel.is_set():
+                # Publish completed workloads before reading the next one, so
+                # a stalled source cannot hold back already collected samples.
+                self.call_from_thread(self._on_metrics_collected, set(wanted), {cluster_id: lines}, live)
 
     def _on_metrics_collected(self, wanted: set[str], collected: dict[str, list[LogLine]], live: dict[str, set[tuple[str, str]]]) -> None:
         """UI thread: commit this poll's samples and repaint open pane footers."""

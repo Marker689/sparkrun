@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -104,7 +105,7 @@ class RuntimeChecks:
     selected: tuple[str, ...]
     """Hosts the scheduler placed the workload on (``RunPlan.host_list``)."""
     selectable: tuple[str, ...]
-    """Candidate hosts that are available, have a free slot, and fit in memory."""
+    """Candidates not rejected by the scheduler, reachability, or memory checks."""
     notes: tuple[str, ...] = ()
     """Placement notes from the plan, rendered verbatim."""
     warnings: tuple[str, ...] = ()
@@ -532,10 +533,8 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
     def _checks_worker(self) -> None:
         """Plan the launch, then check each candidate host's availability and memory fit off the UI thread."""
         try:
-            run_plan = plan(
-                self.options or RunOptions(recipe=self.recipe, cluster=self.cluster, hosts=self.hosts or None),
-                sctx=self.sctx,
-            )
+            options = self.options or RunOptions(recipe=deepcopy(self.recipe), cluster=self.cluster, hosts=self.hosts or None)
+            run_plan = plan(options, sctx=self.sctx)
         except (InsufficientCapacity, HostsUnreachable) as error:
             # The plan failed on capacity, not on an unknown: the scheduler's
             # own per-host rejections say which rows are dead ends.
@@ -552,8 +551,9 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
         reasons: dict[str, str] = {}
         cluster = getattr(run_plan, "cluster", None)
 
-        # Availability first: an unreachable host, or one whose free slots are
-        # already taken, cannot run a new workload whatever its memory says.
+        # The scheduler owns capacity admission, including fractional GPU
+        # allocations and reuse of the same intent. Zero *unused* slots does
+        # not invalidate its placement. This probe only checks reachability.
         if self.cluster:
             try:
                 capacity = catalog_cluster_capacity(self.cluster, sctx=self.sctx)
@@ -567,9 +567,6 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
                         if entry is not None:
                             reasons[host] = "unavailable"
                         continue
-                    free = entry["free_slots"]
-                    if free is not None and free <= 0:
-                        reasons[host] = "no free slots"
 
         if cluster is not None:
             try:
@@ -577,8 +574,8 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
                 # use that recipe and its overrides, not the picker's defaults.
                 # (Options may carry a recipe *name*; only a loaded Recipe can
                 # answer estimate_vram, and the preflight always passes one.)
-                recipe = self.options.recipe if self.options and not isinstance(self.options.recipe, str) else self.recipe
-                overrides = self.options.overrides if self.options else {}
+                recipe = options.recipe if not isinstance(options.recipe, str) else deepcopy(self.recipe)
+                overrides = options.overrides
                 estimate = recipe.estimate_vram(
                     cli_overrides=overrides,
                     auto_detect=not is_local_model_path(recipe.model),
@@ -794,12 +791,15 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         height: auto;
     }
     #param-buttons Button {
-        margin-right: 2;
+        width: auto;
+        min-width: 0;
+        padding: 0 1;
+        margin-right: 1;
     }
-    # The Advanced toggle shares the action row, left of Cancel; like the
+    # The Advanced toggle shares the action row with the buttons; like the
     # buttons it gets a gap so the row does not read as one control.
     #param-buttons Checkbox {
-        margin-right: 2;
+        margin-right: 1;
     }
     """
 
@@ -836,6 +836,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         # The options a Run press built; the preflight's callback launches them
         # only if the scheduler still accepts every selected host.
         self._pending_options: RunOptions | None = None
+        self._refreshing_hosts = False
 
     # -- layout -------------------------------------------------------------
 
@@ -918,6 +919,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                 yield Static(id="param-error")
                 with Horizontal(id="param-buttons"):
                     yield Checkbox("Advanced", id="param-advanced-toggle")
+                    yield Button("Check hosts", id="param-recheck")
                     yield Button("Cancel", id="param-cancel")
                     yield Button("Run", id="param-run", variant="primary")
 
@@ -986,6 +988,8 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
             self.dismiss(None)
         elif event.button.id == "param-run":
             self._try_launch()
+        elif event.button.id == "param-recheck":
+            self._try_launch(refresh_hosts=True)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1074,7 +1078,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                 tokens.append(f"env.{key}={text}")
         return tokens
 
-    def _try_launch(self) -> None:
+    def _try_launch(self, *, refresh_hosts: bool = False) -> None:
         try:
             tp = self._int_field("param-tp", "Tensor parallel")
             gpu_mem = self._float_field("param-gpu-mem", "GPU memory utilization")
@@ -1092,7 +1096,9 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                 gpu_mem=gpu_mem,
                 max_model_len=max_model_len,
                 image=knobs.get("image"),
-                recipe=self.recipe,
+                # Overrides and planning mutate recipes. A failed or cancelled
+                # attempt must not change the defaults for the next attempt.
+                recipe=deepcopy(self.recipe),
                 port=port,
                 served_model_name=knobs.get("served_model_name"),
             )
@@ -1117,28 +1123,24 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
             self._set_error(f"Cannot prepare launch: {error}")
             return
         trust = bool(self.pending_hooks) and self.query_one("#param-trust", Checkbox).value
-        if self.pending_hooks and not trust:
+        if self.pending_hooks and not trust and not refresh_hosts:
             # Without authorization api.run refuses asynchronously and the typed
             # parameters would be lost; keep the dialog open instead.
             self._set_error("Authorize the hooks to run this recipe")
             return
         if self.hosts:
-            if not self.checks.selectable:
-                self._set_error("No host can take this launch; free capacity or adjust the recipe")
-                return
             # The checked hosts are the candidate list: the scheduler still places
             # within them, exactly as the CLI does with its resolved host_list.
             selected = tuple(host for host, box in self._host_boxes() if box.value)
+            # A stale rejection must not prevent checking new parameters or
+            # recovered capacity. Recheck the full candidate set, then return
+            # to the host choices before launching. Explicitly unchecking all
+            # otherwise eligible hosts still requires a selection.
+            refresh_hosts = refresh_hosts or (not selected and not self.checks.selectable)
+            if refresh_hosts:
+                selected = self.hosts
             if not selected:
                 self._set_error("Select at least one host")
-                return
-            over_capacity = [host for host in selected if host not in self.checks.selectable]
-            if over_capacity:
-                # A disabled row cannot be unchecked by hand, so a plan that
-                # pre-selected a non-selectable host must be refused outright.
-                reasons = dict(self.checks.reasons)
-                detail = ", ".join(f"{host} ({reasons.get(host, 'insufficient resources')})" for host in over_capacity)
-                self._set_error(f"Unavailable: {detail}")
                 return
         else:
             selected = ()
@@ -1161,6 +1163,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
             auto_port=bool(knobs.get("auto_port")),
         )
         self._pending_options = options
+        self._refreshing_hosts = refresh_hosts
         # Placement from the picker's check is a snapshot: re-query the
         # scheduler with the final options, so a host that filled up while the
         # knobs were edited cannot launch a workload that no longer fits.
@@ -1187,13 +1190,17 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         if not self.is_attached:
             return
         options = self._pending_options
+        self._pending_options = None
         if checks is None or options is None:
             return
         selected = tuple(host for host, box in self._host_boxes() if box.value)
+        if self._refreshing_hosts:
+            self._apply_checks(checks, selected or checks.selected)
+            self._set_error("" if checks.ok else "; ".join(checks.warnings) or "Scheduler check failed")
+            return
         reasons = dict(checks.reasons)
         bad = [host for host in selected if host not in checks.selectable]
         if checks.ok and not bad:
-            self._pending_options = None
             self.dismiss(RecipeLaunch(options=options, label=self.summary.name))
             return
         self._apply_checks(checks, selected)

@@ -365,8 +365,8 @@ def test_tensorfold_done_reports_decode_prefill_cache_and_spec():
     # Prompt rate is fresh tokens over pure prefill time: 43 / 0.17 s.
     assert scraper.latest("prompt") == pytest.approx(252.9, abs=0.05)
     assert scraper.latest("hit") == 0.0
-    # accepted / (accepted + drafted): 11 / 34.
-    assert scraper.latest("accept") == pytest.approx(32.4, abs=0.05)
+    # The denominator includes all drafted tokens, including accepted ones.
+    assert scraper.latest("accept") == pytest.approx(11 / 23 * 100)
 
 
 def test_tensorfold_one_token_request_skips_acceptance():
@@ -410,7 +410,7 @@ def test_tensorfold_cached_prefix_is_not_counted_as_computed_prompt():
 
     assert scraper.latest("prompt") == 120.0  # (100 - 40) / 0.5, not 200
     assert scraper.latest("hit") == 40.0
-    assert scraper.latest("accept") == 25.0
+    assert scraper.latest("accept") == pytest.approx(100 / 3)
 
 
 def test_tensorfold_done_without_thinking_field_still_scrapes():
@@ -429,7 +429,7 @@ def test_tensorfold_done_without_thinking_field_still_scrapes():
 
     assert scraper.latest("gen") == 50.0
     assert scraper.latest("prompt") == 400.0  # 100 / 0.25
-    assert scraper.latest("accept") == pytest.approx(37.5)  # 6 / 16
+    assert scraper.latest("accept") == 60.0  # 6 / 10
 
 
 def test_tensorfold_seed_page_takes_the_last_line_not_the_mean():
@@ -679,7 +679,7 @@ def test_window_without_samples_adds_no_point():
     assert scraper.history("gen") == [10.0]
 
 
-def test_scraper_history_aggregates_sources_right_aligned():
+def test_scraper_history_aligns_a_late_source_with_its_first_poll():
     scraper = RuntimeMetricsScraper()
     scraper.observe(("h1", "r0"), "Avg generation throughput: 10.0 tokens/s")
     scraper.commit()
@@ -825,3 +825,40 @@ def test_scraper_retain_forgets_dead_sources():
     scraper.observe(rank0, "Avg generation throughput: 120.0 tokens/s")
     scraper.commit()
     assert scraper.latest("gen") == 120.0
+
+
+@pytest.mark.parametrize("accepted,drafted,expected", [(10, 10, 100.0), (0, 10, 0.0), (3, 4, 75.0)])
+def test_tensorfold_acceptance_uses_total_drafts(accepted, drafted, expected):
+    scraper = RuntimeMetricsScraper()
+    scraper.observe(("h1", "c1"), _TENSORFOLD_DONE.replace("accepted=11/23", f"accepted={accepted}/{drafted}"))
+    scraper.commit()
+    assert scraper.latest("accept") == expected
+
+
+def test_stalled_source_does_not_shift_its_old_samples_into_new_windows():
+    scraper = RuntimeMetricsScraper()
+    first, second = ("h1", "r0"), ("h2", "r1")
+    scraper.observe(first, "Avg generation throughput: 10.0 tokens/s, GPU KV cache usage: 10.0%")
+    scraper.observe(second, "Avg generation throughput: 20.0 tokens/s, GPU KV cache usage: 80.0%")
+    scraper.commit()
+    assert scraper.history("gen") == [30.0]
+    scraper.observe(first, "Avg generation throughput: 30.0 tokens/s, GPU KV cache usage: 30.0%")
+    scraper.commit()
+    assert scraper.history("gen") == [30.0, 30.0]
+    assert scraper.history("kv") == [80.0, 30.0]
+    assert scraper.history("gen", sources={second}) == [20.0]
+    scraper.commit()  # a completely idle poll adds no point
+    scraper.observe(second, "Avg generation throughput: 40.0 tokens/s, GPU KV cache usage: 40.0%")
+    scraper.commit()
+    assert scraper.history("gen") == [30.0, 30.0, 40.0]
+    assert scraper.history("kv") == [80.0, 30.0, 40.0]
+    assert scraper.history("gen", sources={second}) == [20.0, 40.0]
+
+
+def test_alternating_sources_keep_aggregate_history_bounded():
+    scraper = RuntimeMetricsScraper(history_points=3)
+    for value in range(6):
+        scraper.observe(("h1", f"r{value % 2}"), f"Avg generation throughput: {value}.0 tokens/s")
+        scraper.commit()
+    assert scraper.history("gen") == [3.0, 4.0, 5.0]
+    assert scraper.history("gen", sources={("h1", "r0")}) == [0.0, 2.0, 4.0]

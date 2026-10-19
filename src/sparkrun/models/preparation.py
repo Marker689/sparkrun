@@ -238,7 +238,7 @@ def prepare_model(
 
         # Most launches need only their target caches. Do not serialize a warm
         # launch behind an unrelated control-cache download or multi-minute copy.
-        locations = dict.fromkeys(roots.items())
+        locations: dict[tuple[str | None, str], None] = dict.fromkeys(roots.items())
         auto_prune(io, locations, config=config, exclude_repos=(request.repo,))
         _prepare_locations(io, locations, request, manifest, checksums=checksums)
         reports = {host: io.observe(host, manifest, root, checksums=checksums) for host, root in roots.items()}

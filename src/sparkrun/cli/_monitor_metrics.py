@@ -354,7 +354,8 @@ class RuntimeMetricsScraper:
     def __init__(self, history_points: int = 120) -> None:
         self._history_points = history_points
         self._window: dict[str, dict[tuple[str, str], tuple[float, int]]] = {}
-        self._rings: dict[str, dict[tuple[str, str], deque[float]]] = {}
+        self._rings: dict[str, dict[tuple[str, str], deque[tuple[int, float]]]] = {}
+        self._poll = 0
         self._dirty: set[str] = set()
         # Hashes of the last ingested page per source, for observe_page alignment.
         self._tails: dict[tuple[str, str], list[int]] = {}
@@ -457,8 +458,8 @@ class RuntimeMetricsScraper:
             self._sample("hit", source, cached / prompt * 100.0, replace=replace)
         accepted = int(match.group("accepted"))
         drafted = int(match.group("drafted"))
-        if accepted + drafted > 0:
-            self._sample("accept", source, accepted / (accepted + drafted) * 100.0, replace=replace)
+        if drafted > 0:
+            self._sample("accept", source, accepted / drafted * 100.0, replace=replace)
 
     def commit(self) -> None:
         """Close the window: one ring point per source per metric.
@@ -471,6 +472,7 @@ class RuntimeMetricsScraper:
         and its number holds: a quiet window is a non-report, never a repeated
         value.
         """
+        self._poll += 1
         for spec in _METRICS:
             if spec.key not in self._dirty:
                 continue
@@ -480,17 +482,17 @@ class RuntimeMetricsScraper:
             rings = self._rings.setdefault(spec.key, {})
             for source, (total, count) in window.items():
                 if count:
-                    rings.setdefault(source, deque(maxlen=self._history_points)).append(total / count)
+                    rings.setdefault(source, deque(maxlen=self._history_points)).append((self._poll, total / count))
             window.clear()
         self._dirty.clear()
 
     def history(self, key: str, sources: Collection[tuple[str, str]] | None = None) -> list[float]:
         """Committed aggregate series for *key*, oldest first.
 
-        Sources are aggregated pointwise, newest-right-aligned: a source that
-        joined late (or stalled) contributes only to the points it has, so a gap
-        in one rank does not truncate the others. *sources* restricts the
-        aggregation to that subset (None means every source).
+        Sources are aligned by poll identity, so a late or stalled source
+        contributes only to the windows in which it reported. Empty windows
+        are omitted. *sources* restricts the aggregation to that subset
+        (None means every source).
         """
         rings = self._rings.get(key)
         if not rings:
@@ -498,14 +500,13 @@ class RuntimeMetricsScraper:
         keys = sorted(source for source in rings if sources is None or source in sources)
         if not keys:
             return []
-        series = [rings[source] for source in keys]
-        newest = max(len(points) for points in series)
         pct = _KINDS.get(key) == "pct"
-        out: list[float] = []
-        for i in range(newest):
-            values = [points[len(points) - newest + i] for points in series if len(points) - newest + i >= 0]
-            out.append(max(values) if pct else sum(values))
-        return out
+        windows: dict[int, float] = {}
+        for source in keys:
+            for poll, value in rings[source]:
+                windows[poll] = max(windows.get(poll, value), value) if pct else windows.get(poll, 0.0) + value
+        polls = sorted(windows)[-self._history_points :]
+        return [windows[poll] for poll in polls]
 
     def latest(self, key: str, sources: Collection[tuple[str, str]] | None = None) -> float | None:
         """Last committed aggregate for *key* (over *sources*), or None before the first commit."""
@@ -534,6 +535,7 @@ class RuntimeMetricsScraper:
         """Drop every sample — two workloads' streams must not blend."""
         self._window.clear()
         self._rings.clear()
+        self._poll = 0
         self._dirty.clear()
         self._tails.clear()
 

@@ -2283,3 +2283,47 @@ def test_monitor_sample_wire_allowlist_covers_every_field():
     from sparkrun.api._wire_fields import DTO_FIELDS
 
     assert DTO_FIELDS["sparkrun.core.monitoring.MonitorSample"] == [f.name for f in dataclasses.fields(MonitorSample)]
+
+
+@pytest.mark.parametrize("slow_first", [False, True])
+def test_metrics_poll_finishes_and_publishes_healthy_workloads_despite_slow_source(tmp_path, monkeypatch, slow_first):
+    import asyncio
+    import threading
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    entered = threading.Event()
+    release = threading.Event()
+    reads: list[threading.Event] = []
+
+    class _SlowTarget(_MetricsLogTarget):
+        def page(self, source, *, cancel, **kwargs):
+            reads.append(cancel)
+            entered.set()
+            assert release.wait(5), "test did not release slow log read"
+            return []
+
+    fast_id, slow_id = ("z-fast", "a-slow") if slow_first else ("a-fast", "z-slow")
+    fast = _MetricsLogTarget([LogLine(host="h1", container="c1", text=_VLLM_STAT_LINE)])
+    slow = _SlowTarget([])
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", lambda cid, **kw: fast if cid == fast_id else slow)
+    frame = MonitorFrame(hosts=(HostActivity(host="h1", workloads=(RunningWorkload(fast_id), RunningWorkload(slow_id))),))
+    app = ClusterMonitorApp(_FakeLiveMonitorSession(frame), ["h1"], cache_dir=str(tmp_path))
+
+    async def _run():
+        async with app.run_test(size=(100, 30)):
+            try:
+                assert await asyncio.to_thread(entered.wait, 3)
+                if not slow_first:
+                    scraper = app.metrics_scraper_for(fast_id)
+                    assert scraper is not None and scraper.latest("gen") == 45.6
+                for _ in range(3):
+                    await _run_metrics_tick(app)
+                assert len(reads) == 1  # ticks neither cancel nor overlap the in-flight read
+                assert not reads[0].is_set()
+            finally:
+                release.set()
+            scraper = await _wait_for_scraper(app, fast_id)
+            assert scraper is not None and scraper.latest("gen") == 45.6
+
+    asyncio.run(_run())
+    assert reads[0].is_set()  # app shutdown still cancels its readers
