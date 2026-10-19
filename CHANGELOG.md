@@ -18,6 +18,9 @@ first tagged release containing them, regardless of their original commit date.
 - `uvx sparkrun setup install` writes tab-completion for the installed tool instead of
   the first `sparkrun` on PATH, which under uvx is uvx's throwaway copy in the uv cache.
   After `uv cache clean`, that broke every new shell.
+- Re-running `setup install` also repairs existing generated completion entries in
+  Bash, Zsh, and Fish to point at the installed tool, including stale uvx cache paths.
+  Surrounding shell settings and custom completion commands are preserved.
 
 ## [0.4.1] — 2026-10-19
 
