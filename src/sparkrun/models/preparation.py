@@ -11,6 +11,7 @@ import uuid
 
 from sparkrun.core.model_distribution import (
     ModelCopyRequest,
+    ModelDistributionFailed,
     ModelPullRequest,
     ModelTarget,
     record_binding,
@@ -28,6 +29,7 @@ from sparkrun.models.artifacts import (
     normalize_file_patterns,
 )
 from sparkrun.models.host_io import ModelHostIO
+from sparkrun.models.disk_space import ModelDiskSpaceError, disk_failure, require_model_space
 from sparkrun.models.manifest import check_request, fetch_inventory, manifest_path, select_manifest
 from sparkrun.models.snapshot_links import link_existing_blobs
 from sparkrun.models.transport import builtin_copy
@@ -63,6 +65,19 @@ def _repair_files(report: CacheValidationReport) -> tuple[str, ...]:
     return tuple(f.path for f in report.failures)
 
 
+def _transfer(request: ModelCopyRequest, *, pull=False):
+    try:
+        return try_model_transfer(request, pull=True) if pull else try_model_transfer(request)
+    except ModelDistributionFailed as exc:
+        for target in request.targets:
+            reason = disk_failure(exc.failures.get(target.host, ""))
+            if reason is None and len(request.targets) == 1:
+                reason = disk_failure(exc)
+            if reason is not None:
+                raise ModelDiskSpaceError(target.host, target.cache_root, reason=reason, action="model transfer") from exc
+        raise
+
+
 def _saved_manifest(
     io: ModelHostIO, request: ModelArtifactRequest, locations: list[tuple[str | None, str]]
 ) -> ModelArtifactManifest | None:
@@ -95,6 +110,7 @@ def _acquire(
         return
     if offline:
         raise ModelArtifactError("offline: required model files are unavailable: " + _report_error(report))
+    require_model_space(io, manifest, [(host, root, files)])
     result = None
     if host is not None:
         pull = ModelPullRequest(
@@ -109,7 +125,7 @@ def _acquire(
             token=lambda: token,
             **_transfer_limits(config),
         )
-        result = try_model_transfer(pull, pull=True)
+        result = _transfer(pull, pull=True)
     if result is None:
         if host is None:
             from sparkrun.models.acquisition import RepairProgress, repair_snapshot_files
@@ -130,8 +146,10 @@ def _acquire(
                     sizes={f.path: f.size for f in manifest.files if f.path in wanted},
                     progress=progress.update,
                 )
-            except BaseException:
+            except BaseException as exc:
                 progress.finish(False)
+                if reason := disk_failure(exc):
+                    raise ModelDiskSpaceError(host, root, reason=reason, action="model download") from exc
                 raise
             progress.finish(True)
         else:
@@ -276,6 +294,7 @@ def prepare_model(
             for host, root in sorted(locations, key=lambda item: (item[0] or "", item[1])):
                 io.lock(host, root, request.repo)
             if transfer_mode == "pull":
+                require_model_space(io, manifest, [(host, roots[host], _repair_files(reports[host])) for host in bad])
                 for host in bad:
                     current = io.observe(host, manifest, roots[host], checksums=checksums)
                     _acquire(
@@ -306,6 +325,12 @@ def prepare_model(
                         io.lock(source_host, source_root, request.repo)
                         source_report = io.observe(source_host, manifest, source_root, checksums=checksums)
                         transfer_mode = "local"  # Copy to the complete target set, including a missing head.
+                require_model_space(
+                    io,
+                    manifest,
+                    [(source_host, source_root, _repair_files(source_report))]
+                    + [(host, roots[host], _repair_files(reports[host])) for host in bad],
+                )
                 _acquire(
                     io,
                     source_host,
@@ -342,6 +367,7 @@ def prepare_model(
                     source_check = io.observe(source_host, manifest, source_root, checksums=checksums)
                     if not source_check.complete:
                         raise ModelArtifactError("model source changed before fan-out: " + _report_error(source_check))
+                    require_model_space(io, manifest, [(t.host, t.cache_root, t.required_files) for t in needed])
                     record_use(io, source_host, source_root, manifest, event="distributed")
                     copy = ModelCopyRequest(
                         manifest,
@@ -355,7 +381,7 @@ def prepare_model(
                         cancelled=io.cancelled,
                         **_transfer_limits(config),
                     )
-                    outcome = try_model_transfer(copy)
+                    outcome = _transfer(copy)
                     if outcome is None:
                         # Concurrent rsync --mkpath receivers can race on mkdir,
                         # including implied parent directories. Prepare them once
@@ -371,6 +397,9 @@ def prepare_model(
                             )
                         outcome = builtin_copy(copy, io, ssh)
                     if any(state == "failed" for state in outcome.outcomes.values()):
+                        for host, error in outcome.errors.items():
+                            if reason := disk_failure(error):
+                                raise ModelDiskSpaceError(host, roots[host], reason=reason, action="model transfer")
                         raise ModelArtifactError(
                             "model transfer failed: " + "; ".join(h + ": " + reason for h, reason in outcome.errors.items())
                         )

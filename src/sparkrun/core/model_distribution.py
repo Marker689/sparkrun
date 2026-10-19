@@ -109,6 +109,10 @@ class ModelDistributionUnsupported(ModelArtifactError):
 class ModelDistributionFailed(ModelArtifactError):
     """A provider failed or violated its contract; automatic fallback is unsafe."""
 
+    def __init__(self, message: str, *, failures: dict[str, str] | None = None):
+        super().__init__(message)
+        self.failures = failures or {}
+
 
 class ModelDistributionProvider(Protocol):
     def copy(self, request: ModelCopyRequest) -> ModelTransferResult: ...
@@ -309,7 +313,8 @@ def try_model_transfer(request: ModelCopyRequest, *, pull: bool = False) -> Mode
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:
-        raise ModelDistributionFailed("model provider failed; no fallback after transfer starts") from exc
+        failures = {request.targets[0].host: str(exc)} if len(request.targets) == 1 else {}
+        raise ModelDistributionFailed("model provider failed; no fallback after transfer starts", failures=failures) from exc
     if request.cancelled():
         raise ModelDistributionFailed("model transfer cancelled")
     hosts = {target.host for target in request.targets}
@@ -328,8 +333,8 @@ def try_model_transfer(request: ModelCopyRequest, *, pull: bool = False) -> Mode
     if any(result.outcomes[h] != "failed" for h in result.errors):
         raise ModelDistributionFailed("model provider returned conflicting success/error evidence")
     if any(state == "failed" for state in result.outcomes.values()):
+        failures = {h: result.errors.get(h, "transfer failed") for h, state in result.outcomes.items() if state == "failed"}
         raise ModelDistributionFailed(
-            "model provider failed: "
-            + "; ".join(h + ": " + result.errors.get(h, "transfer failed") for h, state in result.outcomes.items() if state == "failed")
+            "model provider failed: " + "; ".join(h + ": " + reason for h, reason in failures.items()), failures=failures
         )
     return result

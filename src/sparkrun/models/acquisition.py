@@ -11,6 +11,7 @@ from sparkrun.core.model_distribution import operation_config, transfer_timeouts
 from sparkrun.models._stream import ModelTransferStalled, ProgressWatch
 from sparkrun.models.artifacts import ModelArtifactError, ModelArtifactManifest, ModelArtifactRequest, ModelInventoryUnavailable
 from sparkrun.models.host_io import ModelHostIO
+from sparkrun.models.disk_space import ModelDiskSpaceError, disk_failure
 from sparkrun.models.manifest import HUB_ADAPTER_VERSION, read_weight_index
 from sparkrun.utils.shell import quote
 
@@ -313,6 +314,8 @@ def run_adapter(
         detail = result.stderr.decode(errors="replace")[-1500:]
         if token:
             detail = detail.replace(token, "<redacted>")
+        if manifest is not None and (reason := disk_failure(detail)):
+            raise ModelDiskSpaceError(host, cache, reason=reason, action="model download")
         lines = result.stdout.splitlines()
         unavailable = b"SPARKRUN_MODEL_ERROR=unavailable" in lines or b"SPARKRUN_MODEL_ADAPTER_READY" not in lines
         error_type = (

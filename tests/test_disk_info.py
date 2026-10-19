@@ -96,6 +96,44 @@ def test_probe_cache_status_empty_hosts_returns_empty():
     mock_run.assert_not_called()
 
 
+def test_remote_capacity_table_uses_cache_filesystem(tmp_path):
+    import subprocess
+
+    from sparkrun.orchestration.disk_info import _CACHE_STATUS_PROBE
+    from sparkrun.utils.shell import quote
+
+    missing = tmp_path / "cache" / "not-created"
+    # Execute the generated probe: df must target the cache's existing parent,
+    # even when the cache itself has not been created yet.
+    script = (
+        'df() { [ "$2" = '
+        + str(quote(str(tmp_path)))
+        + " ] || return 1; printf 'Filesystem Size Used Avail Use Mounted\\ndisk 10G 1G 9G 10%% /cache\\n'; }\n"
+        + _CACHE_STATUS_PROBE.format(sr_dir=missing, hf_dir=missing)
+    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+    assert result.returncode == 0
+    assert _parse_probe_output("host", result.stdout).free_space == "9G"
+    assert not missing.parent.exists()
+
+
+def test_local_capacity_table_uses_cache_filesystem(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from sparkrun.orchestration.disk_info import probe_local_cache_status
+
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="Filesystem Size Used Avail Use Mounted\ndisk 10G 1G 9G 10% /cache\n")
+
+    monkeypatch.setattr("sparkrun.orchestration.disk_info.subprocess.run", run)
+    result = probe_local_cache_status(str(tmp_path / "missing-hf"), str(tmp_path / "missing-sr"))
+    assert calls == [["df", "-h", str(tmp_path)]]
+    assert result.free_space == "9G"
+
+
 def test_probe_cache_status_dry_run_returns_placeholders():
     with patch("sparkrun.orchestration.ssh.run_remote_scripts_parallel") as mock_run:
         info = probe_cache_status(["h1", "h2"], hf_cache_dir="/h", dry_run=True)

@@ -839,7 +839,7 @@ def distribute_resources(
                 cache_status_hosts=host_list,
                 cache_dir=cache_dir,
                 ssh_kwargs=ssh_kwargs,
-                label="rsync",
+                label="model preparation",
                 exc_class=DistributionError,
             )
 
@@ -1164,7 +1164,7 @@ def distribute_from_config(
                     cache_status_hosts=targets,
                     cache_dir=cache_dir,
                     ssh_kwargs=ssh_kwargs,
-                    label="rsync",
+                    label="model preparation",
                     exc_class=DistributionError,
                 )
 
@@ -1417,6 +1417,7 @@ def _prepare_manifest_model(
     from sparkrun.core.model_distribution import operation_config, validation_policy
     from sparkrun.models.preparation import prepare_model
     from sparkrun.models.artifacts import ModelArtifactError, ModelInventoryUnavailable
+    from sparkrun.models.disk_space import ModelDiskSpaceError
     from sparkrun.orchestration.transfer import TransferFailure
 
     policy = validation_policy()
@@ -1459,6 +1460,8 @@ def _prepare_manifest_model(
         if allow_patterns is not None or ignore_patterns:
             detail += "; filtered model requests require an authoritative inventory and cannot use an unfiltered fallback"
         return [TransferFailure(host, "model inventory unavailable", detail) for host in targets]
+    except ModelDiskSpaceError as exc:
+        return [TransferFailure(exc.host, exc.reason, str(exc))]
     except ModelArtifactError as exc:
         return [TransferFailure(host, "model preparation failed", str(exc)) for host in targets]
     return []

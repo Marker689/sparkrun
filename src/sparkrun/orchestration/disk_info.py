@@ -3,7 +3,7 @@
 Shared between ``sparkrun cluster inspect`` (full directory status display)
 and the model-distribution error path (show disk-space table when rsync fails
 with "no space left").  The remote probe gathers sparkrun cache existence/size,
-HF cache existence/size, and root-FS free space in a single SSH round-trip;
+HF cache existence/size, and cache-filesystem free space in a single SSH round-trip;
 the table formatter renders them in the same layout used by ``cluster inspect``
 for consistency.
 """
@@ -37,13 +37,14 @@ class CacheStatus:
 
 
 # Single shell command that captures everything we care about in one round trip.
-# `du -sh` is portable; `df -h /` + awk handles busybox + GNU coreutils equally.
+# `du -sh` and `df -h` + awk handle busybox + GNU coreutils equally.
 _CACHE_STATUS_PROBE = (
     'sr_dir="{sr_dir}"; hf_dir="{hf_dir}"; '
     'sr_exists="no"; hf_exists="no"; sr_du="-"; hf_du="-"; '
     'if [ -d "$sr_dir" ]; then sr_exists="yes"; sr_du=$(du -sh "$sr_dir" 2>/dev/null | cut -f1); fi; '
     'if [ -d "$hf_dir" ]; then hf_exists="yes"; hf_du=$(du -sh "$hf_dir" 2>/dev/null | cut -f1); fi; '
-    'free_space=$(df -h / 2>/dev/null | awk "NR==2{{print \\$4}}"); '
+    'probe="$hf_dir"; while [ ! -e "$probe" ]; do probe=$(dirname -- "$probe"); done; '
+    'free_space=$(df -h "$probe" 2>/dev/null | awk "NR==2{{print \\$4}}"); '
     'echo "sr_exists=$sr_exists|sr_du=$sr_du|hf_exists=$hf_exists|hf_du=$hf_du'
     '|sr_dir=$sr_dir|hf_dir=$hf_dir|free_space=${{free_space:--}}"'
 )
@@ -76,7 +77,7 @@ def probe_cache_status(
     ssh_kwargs: dict | None = None,
     dry_run: bool = False,
 ) -> dict[str, CacheStatus]:
-    """Probe each host for cache directory status and root-FS free space.
+    """Probe each host for cache directory status and cache-filesystem free space.
 
     Args:
         hosts: Remote hostnames (management IPs).
@@ -156,7 +157,10 @@ def probe_local_cache_status(
     hf_exists, hf_du = _dir_info(hf_cache_dir)
 
     free_space = "-"
-    df = subprocess.run(["df", "-h", "/"], capture_output=True, text=True)
+    probe = os.path.abspath(os.path.expanduser(os.path.expandvars(hf_cache_dir)))
+    while not os.path.exists(probe):
+        probe = os.path.dirname(probe)
+    df = subprocess.run(["df", "-h", probe], capture_output=True, text=True)
     if df.returncode == 0 and df.stdout.strip():
         lines = df.stdout.strip().splitlines()
         if len(lines) >= 2:

@@ -419,6 +419,29 @@ the model/revision selection at execution time.
   repository is running and honors sparkrun's claims and publication lock, and
   it needs no `huggingface_hub` on the hosts.
 
+## Model disk-space checks
+
+Manifest preparation checks the source and every destination before starting
+payload downloads or copies, after reusing any files already cached on each
+host. It compares the sizes of the remaining selected files with the available
+space on the model cache's filesystem. Shared-cache aliases count once;
+separate caches on the same host filesystem share a capacity budget.
+
+An insufficient-space error identifies the host and cache path and reports
+required bytes, available bytes, and the shortfall. No payload transfer starts
+when this preflight fails. Saved inventory and completed files remain available
+for a retry after space is freed. Capacity is checked again before acquisition
+and each copy leg, because a source download or another process can consume
+space after the initial check.
+
+The budget includes the full size of missing or damaged files: replacement
+keeps the old entry until the new file is ready. Existing partial copies are
+not credited, since transfer providers may stage a fresh copy. The check does
+not reserve space or predict filesystem quotas; disk-full and quota failures
+during a transfer still stop the operation with the affected host identified.
+Legacy transfers without an authoritative inventory retain their existing
+behavior.
+
 ## Parallel model copies
 
 The builtin manifest transport copies to multiple destinations concurrently.
