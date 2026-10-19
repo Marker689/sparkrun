@@ -282,6 +282,8 @@ implementations.
 
 1. Subclass `HardwarePlatformPlugin` in `platforms/<name>.py`:
    ```python
+   from sparkrun.plugins import HardwarePlatformPlugin, RcclBackend
+
    class MyAmdPlatform(HardwarePlatformPlugin):
        platform_name = "amd-mi300x"
        vendors = frozenset({"amd"})

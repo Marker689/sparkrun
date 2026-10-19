@@ -31,6 +31,30 @@ def test_introspection_and_core_only_aliases_are_not_exported():
         assert name not in surface.__all__
 
 
+def test_a_platform_plugin_can_return_a_collective_backend_from_the_surface():
+    """``HardwarePlatformPlugin.collective_backend()`` is abstract; what it returns must be importable too."""
+    from sparkrun.orchestration.collectives.base import CollectiveBackend
+
+    assert surface.CollectiveBackend is CollectiveBackend
+    for name in ("NcclBackend", "RcclBackend", "HcclBackend", "NoCollectiveBackend"):
+        assert issubclass(getattr(surface, name), CollectiveBackend)
+
+    class _Platform(surface.HardwarePlatformPlugin):
+        platform_name = "test-single-rank"
+        vendors = frozenset({"nvidia"})
+
+        def matches(self, hw):
+            return False
+
+        def accelerator_vendor(self):
+            return "nvidia"
+
+        def collective_backend(self):
+            return surface.NoCollectiveBackend("nvidia")
+
+    assert _Platform().collective_backend().vendor == "nvidia"
+
+
 def test_every_documented_plugin_import_is_exported():
     for doc in sorted(DOCS.glob("*.md")):
         for module, names in _documented_imports(doc.read_text(encoding="utf-8")):

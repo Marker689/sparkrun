@@ -94,6 +94,8 @@ from sparkrun.diagnostics.plugin import (
 from sparkrun.feedback import FEEDBACK_API_VERSION, FeedbackEvent, FeedbackReporter, get_feedback
 from sparkrun.models.artifacts import ModelArtifactFile, ModelArtifactManifest
 from sparkrun.models.kv import KVCacheStrategy, register_kv_strategy
+from sparkrun.orchestration.collectives import CollectiveBackend, HcclBackend, NcclBackend, RcclBackend
+from sparkrun.orchestration.collectives.base import NoCollectiveBackend
 from sparkrun.orchestration.executor import Executor, ExecutorConfig, ExecutorTarget
 from sparkrun.orchestration.hooks import HookLaunchContext, run_pre_exec
 from sparkrun.orchestration.job_metadata import save_job_metadata
@@ -150,6 +152,7 @@ __all__ = [
     "BuildContext",
     "BuilderPlugin",
     "CliOptionSpec",
+    "CollectiveBackend",
     "DEFAULT_MASTER_KEY",
     "DEFAULT_PROXY_HOST",
     "DEFAULT_PROXY_PORT",
@@ -174,6 +177,7 @@ __all__ = [
     "GatewayQueryError",
     "GatewaySupervisor",
     "HardwarePlatformPlugin",
+    "HcclBackend",
     "HookLaunchContext",
     "HostCommandResult",
     "HostHardware",
@@ -202,12 +206,15 @@ __all__ = [
     "ModelPullRequest",
     "ModelTarget",
     "ModelTransferResult",
+    "NcclBackend",
+    "NoCollectiveBackend",
     "PLUGIN_LIFECYCLE_API_VERSION",
     "PluginConflictError",
     "PluginDiagnostics",
     "PreparationStep",
     "PreparedExecution",
     "ProxyModel",
+    "RcclBackend",
     "Recipe",
     "RecipeFormat",
     "RecipeItemHandler",
