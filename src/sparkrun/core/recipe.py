@@ -2928,6 +2928,12 @@ def recipe_summary_from_data(data: dict[str, Any], path: Path, *, name: str, reg
     """
     stem = name
     defaults = data.get("defaults", {})
+    # Match Recipe's metadata fallback, including descriptions inherited from
+    # a sibling include, without constructing or resolving a full recipe.
+    description = data.get("description") or ""
+    metadata = data.get("metadata")
+    if not description and isinstance(metadata, dict):
+        description = str(metadata.get("description") or "")
     qualified = ("@%s/%s" % (registry_name, stem)) if registry_name else stem
     try:
         builder = resolve_builder(data)
@@ -2940,7 +2946,7 @@ def recipe_summary_from_data(data: dict[str, Any], path: Path, *, name: str, reg
         "file": stem,
         "path": str(path),
         "model": data.get("model", ""),
-        "description": data.get("description", ""),
+        "description": description,
         "runtime": runtime,
         "min_nodes": data.get("min_nodes", 1),
         "tp": defaults.get("tensor_parallel", "") if isinstance(defaults, dict) else "",

@@ -10,8 +10,17 @@ first tagged release containing them, regardless of their original commit date.
 
 ## [Unreleased]
 
+### Added
+
+- The `cluster monitor` recipe picker groups runtime variants into families (such
+  as `vllm`) and offers an opt-in **All registries** toggle. Enabled registries with
+  `Stemless: no` then appear in recipe searches and registry filter choices.
+
 ### Fixed
 
+- Recipe listings and search read `metadata.description`, including inherited
+  multiline descriptions, so the monitor picker no longer shows "no description"
+  for those recipes.
 - `cluster monitor` respects scheduler-approved shared GPU placements and workload
   reuse even when no GPU is wholly unused. The run dialog can recheck rejected hosts
   after parameter edits or capacity recovery, and cleared image/environment overrides

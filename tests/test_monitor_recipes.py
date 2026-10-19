@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 from textual.app import App
 from textual.color import Color
 from textual.containers import ItemGrid, Vertical
@@ -16,6 +17,7 @@ from textual.widgets import Button, Checkbox, Input, OptionList, ProgressBar, Se
 from sparkrun.api import HostsUnreachable, InsufficientCapacity, RecipeSummary, SparkrunError
 from sparkrun.cli._monitor_recipes import RecipeLaunch, RecipePickerScreen, RunParamsScreen, RuntimeChecks, RuntimeChecksScreen
 from sparkrun.core.recipe import Recipe
+from sparkrun.core.registry import RegistryManager
 from sparkrun.core.scheduler import CapacityRejection
 from sparkrun.models.fit import FitResult, HostFitDetail
 
@@ -207,8 +209,20 @@ def test_picker_search_filters_live(monkeypatch, tmp_path):
     asyncio.run(_run())
 
 
-def test_picker_facet_filters_by_runtime(monkeypatch, tmp_path):
-    summaries = [_summary("@community/alpha"), _summary("@atlas/gamma", runtime="sglang", registry="atlas")]
+@pytest.mark.parametrize(
+    "family, expected",
+    [("vllm", ["base", "ray", "distributed", "eugr"]), ("sglang", ["sglang"]), ("llama-cpp", ["llama"]), ("custom-engine", ["unknown"])],
+)
+def test_picker_facet_filters_by_runtime_family(monkeypatch, tmp_path, family, expected):
+    summaries = [
+        _summary("@community/base", runtime="vllm"),
+        _summary("@community/ray", runtime="VLLM-Ray"),
+        _summary("@community/distributed", runtime="vllm-distributed"),
+        _summary("@community/eugr", runtime="eugr-vllm"),
+        _summary("@community/sglang", runtime="sglang"),
+        _summary("@community/llama", runtime="llama-cpp"),
+        _summary("@community/unknown", runtime="custom-engine"),
+    ]
     app = _open(monkeypatch, summaries, tmp_path)
 
     async def _run():
@@ -217,11 +231,152 @@ def test_picker_facet_filters_by_runtime(monkeypatch, tmp_path):
             await _wait_loaded(pilot, picker)
             await pilot.pause(0.05)
             filters = picker.query_one("#recipe-filters", OptionList)
-            runtime_idx = next(i for i, opt in enumerate(filters.options) if str(opt.id) == "runtime:sglang")
+            assert [opt.id for opt in filters.options if (opt.id or "").startswith("runtime:")] == [
+                "runtime:custom-engine",
+                "runtime:llama-cpp",
+                "runtime:sglang",
+                "runtime:vllm",
+            ]
+            runtime_idx = next(i for i, opt in enumerate(filters.options) if opt.id == f"runtime:{family}")
             filters.highlighted = runtime_idx
             await pilot.pause(0.1)
-            assert picker._filter == "runtime:sglang"
-            assert [s.name for s in picker._shown] == ["@atlas/gamma"]
+            assert picker._filter == f"runtime:{family}"
+            assert [s.name for s in picker._shown] == [f"@community/{stem}" for stem in expected]
+
+    asyncio.run(_run())
+
+
+def test_picker_uses_runtime_family_from_shared_plugin_context(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/plugin", runtime="my-plugin")], tmp_path)
+    variables = object()
+    app.picker.sctx = SimpleNamespace(variables=variables)
+
+    def runtime(name, *, v):
+        assert name == "my-plugin"
+        assert v is variables
+        return SimpleNamespace(get_family=lambda: "sglang")
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.get_runtime", runtime)
+
+    async def _run():
+        async with app.run_test(size=(120, 32)) as pilot:
+            picker = app.picker
+            await _wait_loaded(pilot, picker)
+            await pilot.pause()
+            filters = picker.query_one("#recipe-filters", OptionList)
+            assert "runtime:my-plugin" not in [opt.id for opt in filters.options]
+            filters.highlighted = next(i for i, opt in enumerate(filters.options) if opt.id == "runtime:sglang")
+            await pilot.pause()
+            assert [s.name for s in picker._shown] == ["@community/plugin"]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("width", [60, 120])
+def test_picker_all_registries_toggle_searches_hidden_enabled_catalog(monkeypatch, tmp_path, width, v):
+    """Use the real catalog: hidden is opt-in, disabled is always excluded."""
+    manager = RegistryManager(tmp_path / "config", tmp_path / "cache")
+    registries = [
+        {"name": "community", "visible": True, "enabled": True},
+        {"name": "archive", "visible": False, "enabled": True},
+        {"name": "retired", "visible": False, "enabled": False},
+    ]
+    for entry in registries:
+        entry.update(url=f"https://example.com/{entry['name']}", subpath="recipes")
+        cache = manager.cache_root / entry["name"]
+        (cache / ".git").mkdir(parents=True)
+        recipes = cache / "recipes"
+        recipes.mkdir()
+        (recipes / "qwen.yaml").write_text(
+            'recipe_version: "2"\nmodel: Qwen/Qwen3\nruntime: vllm-distributed\ncontainer: test/image:latest\n'
+        )
+    (manager.config_root / "registries.yaml").write_text(yaml.safe_dump({"registries": registries}))
+    monkeypatch.chdir(tmp_path)
+    app = _PickerTestApp(RecipePickerScreen(cluster="lab", hosts=("h1",), sctx=SimpleNamespace(registry_manager=manager, variables=v)))
+
+    async def _run():
+        async with app.run_test(size=(width, 32)) as pilot:
+            picker = app.picker
+            await _wait_loaded(pilot, picker)
+            await pilot.pause()
+            toggle = picker.query_one("#recipe-all-registries", Checkbox)
+            assert not toggle.value
+            assert 0 <= toggle.region.x < toggle.region.right <= width
+            assert [s.name for s in picker._shown] == ["@community/qwen"]
+            filters = picker.query_one("#recipe-filters", OptionList)
+            assert "registry:archive" not in [opt.id for opt in filters.options]
+            search = picker.query_one("#recipe-search", Input)
+            search.value = "qwen"
+            filters.highlighted = next(i for i, opt in enumerate(filters.options) if opt.id == "runtime:vllm")
+            await pilot.pause()
+
+            await pilot.click("#recipe-all-registries")
+            await _wait_until(pilot, lambda: picker._loaded and len(picker._shown) == 2)
+            assert picker._filter == "runtime:vllm"
+            assert search.value == "qwen"
+            assert [s.name for s in picker._shown] == ["@community/qwen", "@archive/qwen"]
+            assert "registry:archive" in [opt.id for opt in filters.options]
+            assert "registry:retired" not in [opt.id for opt in filters.options]
+
+            filters.highlighted = next(i for i, opt in enumerate(filters.options) if opt.id == "registry:archive")
+            await pilot.pause()
+            assert [s.name for s in picker._shown] == ["@archive/qwen"]
+            await pilot.click("#recipe-all-registries")
+            await _wait_until(pilot, lambda: picker._loaded and picker._filter == "all")
+            assert search.value == "qwen"
+            assert [s.name for s in picker._shown] == ["@community/qwen"]
+            assert "registry:archive" not in [opt.id for opt in filters.options]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("stale_failure", [False, True])
+def test_picker_registry_toggle_ignores_obsolete_loads(monkeypatch, tmp_path, stale_failure):
+    """An old default-scope request cannot overwrite a newer one after two toggles."""
+    app = _open(monkeypatch, [], tmp_path)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+
+    def search(*, include_hidden, **_kwargs):
+        first = not calls
+        calls.append(include_hidden)
+        if first:
+            started.set()
+            try:
+                assert release.wait(10)
+                if stale_failure:
+                    raise RuntimeError("obsolete catalog failure")
+                return [_summary("@community/stale")]
+            finally:
+                finished.set()
+        return (
+            [_summary("@community/fresh"), _summary("@archive/hidden", registry="archive")]
+            if include_hidden
+            else [_summary("@community/fresh")]
+        )
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.search_recipes", search)
+    notifications = []
+    monkeypatch.setattr(app, "notify", lambda message, **_kwargs: notifications.append(message))
+
+    async def _run():
+        async with app.run_test(size=(120, 32)) as pilot:
+            try:
+                picker = app.picker
+                await _wait_until(pilot, started.is_set)
+                await pilot.click("#recipe-all-registries")
+                await _wait_until(pilot, lambda: picker._loaded and len(picker._shown) == 2)
+                await pilot.click("#recipe-all-registries")
+                await _wait_until(pilot, lambda: picker._loaded and len(picker._shown) == 1)
+                release.set()
+                await _wait_until(pilot, finished.is_set)
+                await pilot.pause()
+                assert calls == [False, True, False]
+                assert [s.name for s in picker._shown] == ["@community/fresh"]
+                assert "registry:archive" not in [opt.id for opt in picker.query_one("#recipe-filters", OptionList).options]
+                assert not notifications
+            finally:
+                release.set()
 
     asyncio.run(_run())
 
@@ -375,7 +530,7 @@ def test_picker_late_catalog_callback_after_dismiss_is_ignored(monkeypatch, tmp_
             assert not picker.is_attached
             # The loader thread's queued call_from_thread still lands here after
             # the screen is gone; it must not touch unmounted widgets.
-            picker._on_loaded([_summary("@community/late")])
+            picker._on_loaded([_summary("@community/late")], picker._catalog_request, {"vllm-ray": "vllm"})
 
     asyncio.run(_run())
 

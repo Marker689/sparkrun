@@ -40,9 +40,11 @@ from sparkrun.api import (
     untrusted_hooks,
 )
 from sparkrun.api._resolve import resolve_recipe  # private-module import; CLI precedent: cli/_run.py resolve_operation_target
+from sparkrun.core.bootstrap import get_runtime
 from sparkrun.core.recipe import is_local_model_path, recipe_matches_query
 from sparkrun.core.resolve import apply_recipe_overrides
 from sparkrun.models.fit import check_fit
+from sparkrun.utils.runtime_display import RUNTIME_DISPLAY
 
 if TYPE_CHECKING:
     from sparkrun.core.recipe import Recipe
@@ -96,6 +98,14 @@ def _default_text(value: Any) -> str:
     return str(value)
 
 
+def _runtime_family(runtime: str, sctx: Any = None) -> str:
+    name = runtime.lower()
+    try:
+        return get_runtime(name, v=sctx.variables if sctx is not None else None).get_family().lower() or name
+    except Exception:  # noqa: BLE001 - recipes for unavailable runtimes must remain browsable
+        return RUNTIME_DISPLAY.get(name, name)
+
+
 @dataclass(frozen=True)
 class RuntimeChecks:
     """Pre-flight result the checks interstitial hands to the parameter modal."""
@@ -141,7 +151,10 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
     # away. Three rows is the widget's own default (tall border + text line).
     #recipe-search {
         height: 3;
-        margin: 1 1 0 1;
+        margin: 0 1;
+    }
+    #recipe-all-registries {
+        margin: 0 1;
     }
     # The filter and metadata boxes share one row, so they share one height:
     # both stretch to the row, and the row scales with the terminal.
@@ -205,9 +218,11 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
         self.hosts: tuple[str, ...] = tuple(hosts)
         self.sctx: Any = sctx
         self._recipes: list[RecipeSummary] = []
+        self._runtime_families: dict[str, str] = {}
         self._shown: list[RecipeSummary] = []
         self._filter: str = "all"
         self._loaded: bool = False
+        self._catalog_request = 0
 
     # -- layout -------------------------------------------------------------
 
@@ -221,54 +236,80 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
                 yield Static(id="recipe-meta-stats", markup=True)
                 # Last field by requirement: the prose closes the box.
                 yield Static(id="recipe-meta-desc", markup=True)
+        yield Checkbox(
+            "All registries",
+            id="recipe-all-registries",
+            tooltip="Include enabled registries hidden from default searches (Stemless: no).",
+        )
         yield Input(id="recipe-search", placeholder="Search recipes (name, model, description)…")
         yield _RecipeList(id="recipe-list")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#recipe-meta-head", Static).update("[dim]Select a recipe to see details[/dim]")
-        self.query_one("#recipe-meta-stats", Static).update("")
-        self.query_one("#recipe-list", OptionList).add_option(Option("Loading recipes…", id="loading", disabled=True))
         self.query_one("#recipe-search", Input).focus()
-        self._load_worker()
+        self._reload_catalog()
 
     # -- catalog loading ----------------------------------------------------
 
-    @work(thread=True, exclusive=True, group="recipes")
-    def _load_worker(self) -> None:
-        """Fetch the catalog off the UI thread; first use may clone registries."""
-        try:
-            recipes = search_recipes(sctx=self.sctx)
-        except Exception as error:  # noqa: BLE001 - a catalog failure must not break the app
-            self.app.call_from_thread(self.app.notify, f"Recipe search failed: {error}", severity="error")
-            recipes = []
-        self.app.call_from_thread(self._on_loaded, recipes)
+    def _reload_catalog(self) -> None:
+        self._catalog_request += 1
+        self._loaded = False
+        self._shown = []
+        self.query_one("#recipe-filters", OptionList).disabled = True
+        self.query_one("#recipe-meta-head", Static).update("[dim]Select a recipe to see details[/dim]")
+        self.query_one("#recipe-meta-stats", Static).update("")
+        self.query_one("#recipe-meta-desc", Static).update("")
+        listed = self.query_one("#recipe-list", OptionList)
+        listed.clear_options()
+        listed.add_option(Option("Loading recipes…", id="loading", disabled=True))
+        self._load_worker(self._catalog_request, self.query_one("#recipe-all-registries", Checkbox).value)
 
-    def _on_loaded(self, recipes: list[RecipeSummary]) -> None:
+    @work(thread=True, exclusive=True, group="recipes")
+    def _load_worker(self, request: int, include_hidden: bool) -> None:
+        """Fetch the catalog off the UI thread; first use may clone registries."""
+        failure = None
+        try:
+            recipes = search_recipes(include_hidden=include_hidden, sctx=self.sctx)
+        except Exception as error:  # noqa: BLE001 - a catalog failure must not break the app
+            failure = str(error)
+            recipes = []
+        families = {name: _runtime_family(name, self.sctx) for name in {s.runtime.lower() for s in recipes if s.runtime}}
+        self.app.call_from_thread(self._on_loaded, recipes, request, families, failure)
+
+    def _on_loaded(self, recipes: list[RecipeSummary], request: int, families: dict[str, str], failure: str | None = None) -> None:
         # The screen can be dismissed while the catalog is still loading (the
         # first search may clone registries for minutes); the worker's callback
         # is already queued and still runs after the pop, where querying the
         # widgets would raise NoMatches on the UI thread. A popped Screen keeps
         # is_mounted True, so is_attached is the state that goes false.
-        if not self.is_attached:
+        # Cancelling a threaded worker does not stop its catalog call. A late
+        # result from an earlier toggle must not replace the requested scope.
+        if not self.is_attached or request != self._catalog_request:
             return
         self._recipes = list(recipes)
+        self._runtime_families = families
         self._loaded = True
         self._rebuild_filters()
+        self.query_one("#recipe-filters", OptionList).disabled = False
         self._rebuild_list()
+        if failure is not None:
+            self.app.notify(f"Recipe search failed: {failure}", severity="error")
 
     def _rebuild_filters(self) -> None:
         filters = self.query_one("#recipe-filters", OptionList)
-        filters.clear_options()
-        filters.add_option(Option("All recipes", id="all"))
-        for runtime in sorted({s.runtime for s in self._recipes if s.runtime}):
-            filters.add_option(Option(f"Runtime: {runtime}", id=f"runtime:{runtime}"))
+        options = [Option("All recipes", id="all")]
+        for runtime in sorted(set(self._runtime_families.values())):
+            options.append(Option(f"Runtime: {runtime}", id=f"runtime:{runtime}"))
         if any(s.registry is None for s in self._recipes):
-            filters.add_option(Option("Local recipes", id="registry:"))
+            options.append(Option("Local recipes", id="registry:"))
         for registry in sorted({s.registry for s in self._recipes if s.registry}):
-            filters.add_option(Option(f"@{registry}", id=f"registry:{registry}"))
-        self._filter = "all"
-        filters.highlighted = 0
+            options.append(Option(f"@{registry}", id=f"registry:{registry}"))
+        selected = next((i for i, option in enumerate(options) if option.id == self._filter), 0)
+        self._filter = options[selected].id or "all"
+        with self.prevent(OptionList.OptionHighlighted):
+            filters.clear_options()
+            filters.add_options(options)
+            filters.highlighted = selected
 
     # -- list rebuilding ----------------------------------------------------
 
@@ -278,7 +319,7 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
             return True
         kind, _, value = facet.partition(":")
         if kind == "runtime":
-            return summary.runtime.lower() == value.lower()
+            return self._runtime_families.get(summary.runtime.lower(), summary.runtime.lower()) == value
         if kind == "registry":
             return (summary.registry or "") == value
         return True
@@ -343,6 +384,10 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
         return head, stats, summary.description or "[dim]no description[/dim]"
 
     # -- events -------------------------------------------------------------
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "recipe-all-registries":
+            self._reload_catalog()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "recipe-search":
