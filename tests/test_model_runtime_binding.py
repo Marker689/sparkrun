@@ -1,5 +1,6 @@
 """The command, env, and workload access probe consume one prepared artifact."""
 
+import logging
 import shlex
 import subprocess
 from unittest.mock import Mock
@@ -15,6 +16,7 @@ from sparkrun.models.observation import observation_script, parse_observations
 from sparkrun.orchestration.executors.docker import DockerExecutor
 from sparkrun.orchestration.executors._base import ExecutorConfig
 from sparkrun.runtimes.sglang import SglangRuntime
+from sparkrun.runtimes.trtllm import TrtllmRuntime
 from sparkrun.runtimes.vllm_distributed import VllmDistributedRuntime
 from test_model_artifacts import artifact, cache, SHA
 
@@ -73,6 +75,110 @@ def test_custom_command_cannot_load_unvalidated_revision(binding_scope, tmp_path
     bind_runtime_models(recipe, overrides, runtime, ["localhost"], {"localhost": DockerExecutor()}, {str(tmp_path): "/cache/huggingface"})
     with pytest.raises(ValueError, match="validated model"):
         validate_runtime_command(recipe, overrides, runtime, recipe.command)
+
+
+@pytest.fixture
+def prepared_command(binding_scope, tmp_path):
+    bind(tmp_path)
+
+    def prepare(command, *, runtime_class=VllmDistributedRuntime, recipe_version="2", model_revision=None):
+        runtime = runtime_class()
+        recipe = Recipe.from_dict(
+            {
+                "recipe_version": recipe_version,
+                "model": "org/model",
+                "model_revision": model_revision,
+                "runtime": runtime.runtime_name,
+                "container": "test",
+                "command": command,
+            }
+        )
+        overrides = {}
+        bind_runtime_models(
+            recipe, overrides, runtime, ["localhost"], {"localhost": DockerExecutor()}, {str(tmp_path): "/cache/huggingface"}
+        )
+        rendered = runtime.generate_command(recipe, overrides=overrides, is_cluster=False)
+        return recipe, overrides, runtime, rendered
+
+    return prepare
+
+
+@pytest.mark.parametrize("recipe_version", ["1", "2"])
+@pytest.mark.parametrize("model_revision", [None, SHA])
+@pytest.mark.parametrize(
+    "runtime_class, command",
+    [
+        (VllmDistributedRuntime, "vllm serve org/model"),
+        (VllmDistributedRuntime, "vllm serve 'org/model'"),
+        (VllmDistributedRuntime, "python -m vllm.entrypoints.openai.api_server --model org/model"),
+        (SglangRuntime, "sglang serve org/model"),
+        (SglangRuntime, 'python -m sglang.launch_server --model-path="org/model"'),
+        (TrtllmRuntime, "trtllm-serve org/model"),
+    ],
+)
+def test_matching_literal_model_warns_and_allows_launch(prepared_command, caplog, recipe_version, model_revision, runtime_class, command):
+    args = prepared_command(command, runtime_class=runtime_class, recipe_version=recipe_version, model_revision=model_revision)
+    with caplog.at_level(logging.WARNING, logger="sparkrun.models.runtime"):
+        validate_runtime_command(*args)
+    warnings = [record for record in caplog.records if record.name == "sparkrun.models.runtime"]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert "org/model" in warnings[0].message
+    assert SHA in warnings[0].message
+    assert "{model}" in warnings[0].message
+    assert "allowing launch" in warnings[0].message
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "vllm serve {model}",
+        "vllm serve org/model --revision {model_revision}",
+        'vllm serve org/model --revision="{model_revision}"',
+    ],
+)
+def test_bound_custom_command_still_passes_without_warning(prepared_command, caplog, command):
+    args = prepared_command(command)
+    with caplog.at_level(logging.WARNING, logger="sparkrun.models.runtime"):
+        validate_runtime_command(*args)
+    assert not [record for record in caplog.records if record.name == "sparkrun.models.runtime"]
+
+
+@pytest.mark.parametrize(
+    "revision_args",
+    [
+        "--revision main",
+        "--revision=other-sha",
+        "--revision",
+        "--revision=",
+        "--revision {model_revision} --revision main",
+        "--revision main --revision {model_revision}",
+    ],
+)
+def test_literal_model_with_explicit_conflicting_revision_still_fails(prepared_command, caplog, revision_args):
+    args = prepared_command("vllm serve org/model " + revision_args)
+    with pytest.raises(ValueError, match="validated model"):
+        validate_runtime_command(*args)
+    assert not [record for record in caplog.records if record.name == "sparkrun.models.runtime"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "vllm serve org/other",
+        "vllm serve org/model-extra",
+        "vllm serve org/other --served-model-name org/model",
+        "python -m vllm.entrypoints.openai.api_server --model org/other --served-model-name=org/model",
+        "vllm serve org/other --tokenizer org/model",
+        "vllm serve org/other --chat-template 'vllm serve org/model'",
+        "vllm serve org/other --chat-template '--model org/model'",
+    ],
+)
+def test_other_model_or_incidental_literal_is_not_downgraded_to_warning(prepared_command, caplog, command):
+    args = prepared_command(command)
+    with pytest.raises(ValueError, match="validated model"):
+        validate_runtime_command(*args)
+    assert not [record for record in caplog.records if record.name == "sparkrun.models.runtime"]
 
 
 def test_workload_visibility_detects_deleted_file(tmp_path, binding_scope):

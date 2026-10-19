@@ -526,8 +526,12 @@ not import that PR's observed-file verifier or repo-wide success marker.
 
 Standard vLLM and SGLang commands consume the prepared snapshot while retaining
 the recipe's served model name and immutable revision. Draft revision pins remain
-independent. Custom commands must consume `{model}` or the validated revision;
-a literal mutable ref cannot bypass the binding. Env `launch.model_path` and
+independent. Custom commands should consume `{model}` or the validated revision.
+For compatibility with existing v1 and v2 recipes, a literal model argument that
+exactly matches the recipe's `model` and omits a revision is allowed with a warning:
+the engine may load a different cached revision. A matching served-model alias or
+tokenizer argument does not qualify for this exception. Explicit revision conflicts
+remain errors. Env `launch.model_path` and
 `launch.model_revision` consume the same binding. Hooks additionally receive
 `SPARKRUN_MODEL_PATH` (workload path, blank for controller post-commands) and the
 resolved `SPARKRUN_MODEL_REVISION`. Compilation/runtime caches remain separate

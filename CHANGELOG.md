@@ -29,6 +29,9 @@ first tagged release containing them, regardless of their original commit date.
 
 ### Fixed
 
+- Custom serve commands that use the recipe's exact model ID without a revision
+  now warn and proceed, restoring compatibility with v1 and v2 recipes blocked by
+  0.4.0's model-binding guard. Explicit revision conflicts remain errors.
 - Model distribution no longer fails healthy transfers at a fixed two-hour deadline (#324).
   A copy or Hugging Face repair download runs as long as its byte count keeps advancing;
   one that stops for `model_transfer_idle_timeout_s` (default 600) is cancelled, resumed

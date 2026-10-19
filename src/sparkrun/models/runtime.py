@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import logging
 from pathlib import PurePosixPath
 import shlex
 
 from sparkrun.core.env_templates import _mounts, workload_model_path
 from sparkrun.core.model_distribution import prepared_model, prepared_models
+from sparkrun.core.validation import _model_arg_literal
 from sparkrun.models.artifacts import ModelArtifactError
 from sparkrun.models.observation import observation_script, parse_observations
 from sparkrun.utils.shell import quote
+
+logger = logging.getLogger(__name__)
 
 
 def bind_runtime_models(recipe, overrides: dict, runtime, hosts, executors, volumes) -> None:
@@ -41,7 +45,8 @@ def bind_runtime_models(recipe, overrides: dict, runtime, hosts, executors, volu
     overrides["_prepared_model_path"] = path
     overrides["_prepared_model_revision"] = binding.manifest.revision
     # Templated commands explicitly referring to {model} use the prepared path.
-    # A literal model ID is accepted only with the verified revision (below).
+    # Matching literal IDs without a revision retain legacy behavior with a
+    # warning; explicit revision conflicts are still rejected below.
     if recipe.command or binding.manifest.weight_path:
         overrides["model"] = path
     if binding.manifest.weight_path:
@@ -78,7 +83,7 @@ def bind_runtime_models(recipe, overrides: dict, runtime, hosts, executors, volu
 
 
 def validate_runtime_command(recipe, overrides, runtime, command: str) -> None:
-    """Refuse a literal custom command that would load a different artifact."""
+    """Reject conflicting bindings; warn for an unpinned matching model ID."""
     path = overrides.get("_prepared_model_path")
     if not path:
         return
@@ -89,11 +94,26 @@ def validate_runtime_command(recipe, overrides, runtime, command: str) -> None:
     if recipe.model not in tokens and not any(t.endswith("=" + recipe.model) for t in tokens):
         raise ModelArtifactError("serve command does not identify the validated model")
     flags = runtime.model_revision_flags()
+    revisions = []
     for i, token in enumerate(tokens):
-        if token in flags and i + 1 < len(tokens) and tokens[i + 1] == revision:
-            return
-        if any(token == flag + "=" + revision for flag in flags):
-            return
+        if token in flags:
+            revisions.append(tokens[i + 1] if i + 1 < len(tokens) else "")
+        elif any(token.startswith(flag + "=") for flag in flags):
+            revisions.append(token.split("=", 1)[1])
+    if revisions and all(value == revision for value in revisions):
+        return
+    # Use the same model-argument recognition as recipe validation, with
+    # shell quoting already removed. An alias or tokenizer matching the model
+    # must not qualify for the compatibility exception.
+    if not revisions and _model_arg_literal(tokens, recipe.model):
+        logger.warning(
+            "Serve command uses recipe model '%s' without pinning validated revision '%s'; allowing launch for compatibility. "
+            "The engine may load a different cached revision. Use {model} or a supported revision flag with {model_revision} "
+            "to consume the validated model.",
+            recipe.model,
+            revision,
+        )
+        return
     raise ModelArtifactError(
         "serve command does not consume the validated model; use {model} or a supported revision flag with {model_revision}"
     )

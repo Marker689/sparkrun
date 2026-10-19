@@ -391,16 +391,17 @@ _MANAGED_CONTAINER_PATHS: Mapping[str, str] = {
 _HF_LAYOUT_RE = re.compile(r"models--[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+")
 
 
-def _model_arg_literal(command: str, model: str) -> str | None:
+def _model_arg_literal(command: str | list[str], model: str) -> str | None:
     """Return the spelling by which *command* passes *model* as a literal.
 
     Whole-token equality throughout, never a substring: measured across the
     cached registries, the model id appears in a ``command:`` **only** as the
     model argument — so exact matching costs nothing, while substring matching
     would claim a ``--served-model-name`` or a chat-template path that merely
-    embeds the id.
+    embeds the id. Callers that already parsed shell quoting can pass tokens
+    directly to preserve argument boundaries.
     """
-    tokens = [t for t in command.split() if t != "\\"]
+    tokens = [t for t in command.split() if t != "\\"] if isinstance(command, str) else command
     for idx, token in enumerate(tokens):
         for flag in _MODEL_ARG_FLAGS:
             if token == flag and idx + 1 < len(tokens) and tokens[idx + 1] == model:
