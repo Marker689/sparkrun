@@ -84,7 +84,7 @@ def generate_ib_detect_script(mgmt_interface: str | None = None) -> str:
 
     Output variables (if IB is found)::
 
-        DETECTED_GID_INDEX=<n>
+        DETECTED_GID_INDEX=<n>    (-1 = let NCCL choose; see scripts/_gid_index.sh)
         DETECTED_HCA_LIST=<comma-separated HCA names>
         DETECTED_SOCKET_IFNAME=<interface>
         DETECTED_NET_LIST=<comma-separated net interfaces>

@@ -709,6 +709,16 @@ helper is also written **brace-free, including its comments**: `ray_head.sh` /
 brace raises `KeyError` inside a Ray launch. `tests/test_mgmt_iface.py` runs
 the helper under real bash against a fixture sysfs tree and guards both.
 
+**GID-index selection** (`scripts/_gid_index.sh`, shared by `ib_detect.sh` and
+the combined probe) is the same rule applied to `NCCL_IB_GID_INDEX`: `show_gids`'
+IPv4 RoCE v2 row (the stock DGX OS path, unchanged) → the first sysfs RoCE v2
+entry whose GID is IPv4-mapped (`…:ffff:…`) → **`-1`**, NCCL's own dynamic
+selection (2.21+). The old fallback took the first RoCE v2 entry of any kind,
+which on ConnectX is index 1, the link-local `fe80::` GID. NCCL bootstrapped and
+then failed QP setup with `ibv_modify_qp: 22` (#327). The old last resort was
+a hardcoded `3`. A cluster `env: {NCCL_IB_GID_INDEX: …}` still overrides any of
+these, because cluster env layers above the detected NCCL env.
+
 Scripts compose via a `# sparkrun:include <file>` directive resolved in
 `scripts/read_script` (`load_script_resource` is the *raw* loader and does not
 expand it); `scripts.inject_shell_vars` passes config into a script piped to

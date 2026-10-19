@@ -150,15 +150,7 @@ echo "{accel_end}"
 # ===========================================================================
 echo "{ib_start}"
 
-find_rocev2_ipv4_index() {{
-    local hca=$1
-    if ! command -v show_gids &>/dev/null; then
-        return 1
-    fi
-    show_gids \
-    | awk -v dev="$hca" \
-      '$1 == dev && $6 == "v2" && $5 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ {{print $3; exit}}'
-}}
+{gid_helper}
 
 echo "Running InfiniBand detection..." >&2
 
@@ -187,27 +179,7 @@ for ib_path in /sys/class/infiniband/*; do
         UCX_DEVS+=("${{hca_name}}:1")
 
         if [ -z "$GID_INDEX" ]; then
-            idx=$(find_rocev2_ipv4_index "$hca_name")
-            if [ -n "$idx" ]; then
-                GID_INDEX=$idx
-                echo "Device $hca_name: Active (RoCEv2 GID Index: $idx)" >&2
-            else
-                port_gid_dir="$ib_path/ports/1/gid_attrs/types"
-                if [ -d "$port_gid_dir" ]; then
-                    for type_file in "$port_gid_dir"/*; do
-                        gid_type=$(cat "$type_file" 2>/dev/null || true)
-                        if [[ "$gid_type" == *"RoCE v2"* ]] || [[ "$gid_type" == *"RoCEv2"* ]]; then
-                            GID_INDEX=$(basename "$type_file")
-                            echo "Device $hca_name: Active (RoCEv2 GID Index: $GID_INDEX via sysfs)" >&2
-                            break
-                        fi
-                    done
-                fi
-                if [ -z "$GID_INDEX" ]; then
-                    echo "Device $hca_name: Active (GID detect failed, defaulting to 3)" >&2
-                    GID_INDEX=3
-                fi
-            fi
+            GID_INDEX=$(sparkrun_rocev2_gid_index "$hca_name" "$ib_path")
         else
             echo "Device $hca_name: Active" >&2
         fi
@@ -266,6 +238,8 @@ echo "{ib_end}"
     # Substituted verbatim — the helper is written brace-free precisely so it
     # survives this .format() pass.  See _mgmt_iface.sh.
     mgmt_helper=read_script("_mgmt_iface.sh"),
+    # Same brace-free rule.  See _gid_index.sh.
+    gid_helper=read_script("_gid_index.sh"),
 )
 
 
