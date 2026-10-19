@@ -329,6 +329,82 @@ def test_discover_cluster_id_sweeps_whole_host_scope(monkeypatch):
     assert found == cid  # discovered via the local sweep, not docker
 
 
+def test_discover_cluster_id_passes_the_cluster_hardware_inventory(monkeypatch):
+    """Intent discovery queries status with the cluster's saved inventory, the
+    way ``api.status`` does, so the executors never fall back to
+    ``resolve_hardware()`` for a host the cluster already describes."""
+    from sparkrun.api._resolve import discover_cluster_id_by_intent
+    from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.cluster_status import HostOccupancy, RunningWorkload
+    from sparkrun.core.hardware import AcceleratorSpec, HostHardware
+
+    intent = "aabbccddeeff0011"
+    cid = "sparkrun_%s_0123456789ab" % intent
+    hw = HostHardware([AcceleratorSpec("nvidia", "jetson-orin", memory_gb=61.3)], source="detected")
+    queries: list[dict] = []
+
+    def _query(*args, **kwargs):
+        queries.append(kwargs)
+        return ClusterStatus(hosts=(HostOccupancy(host="h1", workloads=(RunningWorkload(cluster_id=cid),)),), executor="docker")
+
+    monkeypatch.setattr("sparkrun.orchestration.executor.query_status_for_cluster", _query)
+
+    found = discover_cluster_id_by_intent(
+        intent,
+        ["h1"],
+        cluster_def=ClusterDefinition(name="c", hosts=["h1"], hosts_hardware={"h1": hw}),
+        cache_dir=None,
+        sctx=None,
+    )
+
+    assert found == cid
+    assert queries[0]["host_hardware"] == {"h1": hw}
+
+
+def test_discover_cluster_id_under_require_metadata_profile(monkeypatch):
+    """End to end through the real docker/local executors: an application
+    profile with ``hardware_fallback="require-metadata"`` finds its running
+    workload on a cluster whose inventory was probed, instead of reporting
+    the host's status as unavailable."""
+    import json
+
+    from sparkrun.api._resolve import discover_cluster_id_by_intent
+    from sparkrun.core.application_profile import ApplicationProfile, select_application_profile
+    from sparkrun.core.cluster_manager import ClusterDefinition
+    from sparkrun.core.hardware import AcceleratorSpec, HostHardware
+
+    profile = select_application_profile(
+        ApplicationProfile(
+            id="jetsonrun",
+            display_name="Jetsonrun",
+            command="jetsonrun",
+            package="jetsonrun",
+            hardware_fallback="require-metadata",
+        )
+    )
+    intent = "aabbccddeeff0011"
+    cid = "jetsonrun_%s_0123456789ab" % intent
+    hw = HostHardware([AcceleratorSpec("nvidia", "jetson-orin", memory_gb=61.3)], source="detected")
+
+    def _fake_parallel(hosts, script, **kwargs):
+        out = ""
+        if script.startswith("docker ps"):
+            out = json.dumps({"ID": "x", "Names": cid + "_solo", "Labels": "sparkrun.distribution=" + profile.id}) + "\n"
+        return [RemoteResult(h, 0, out, "") for h in hosts]
+
+    monkeypatch.setattr("sparkrun.orchestration.ssh.run_remote_scripts_parallel", _fake_parallel)
+
+    found = discover_cluster_id_by_intent(
+        intent,
+        ["localhost"],
+        cluster_def=ClusterDefinition(name="c", hosts=["localhost"], hosts_hardware={"localhost": hw}),
+        cache_dir=None,
+        sctx=None,
+    )
+
+    assert found == cid
+
+
 # --------------------------------------------------------------------------
 # api.logs — argument validation
 # --------------------------------------------------------------------------
