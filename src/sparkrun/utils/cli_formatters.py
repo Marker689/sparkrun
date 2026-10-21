@@ -1125,7 +1125,7 @@ _CLAIM_ACTION_LABELS = {"would_release": "would release", "released": "released"
 
 
 def format_claim_reconciliation(results, *, dry_run: bool, now: float | None = None) -> str:
-    """Render ``model-cache reconcile --all``: one row per outstanding claim, then a summary."""
+    """Render ``model-cache reconcile`` (MODEL or --all): one row per outstanding claim, then a summary."""
     if not results:
         return "No outstanding workload claims."
     header = ("REPO", "REVISION", "CLAIM", "WORKLOAD", "HOSTS", "CREATED", "STATUS")

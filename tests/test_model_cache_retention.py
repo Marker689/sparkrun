@@ -488,7 +488,7 @@ def test_cli_reconcile_all_forwards_cluster_scope_and_age(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_resolve_targets", lambda sctx, **kw: (["h1"], "/hf", "Cluster: lab — 1 host(s)", "lab"))
     reconcile = Mock(return_value=())
     monkeypatch.setattr(model_cache, "reconcile_claims", reconcile)
-    result = CliRunner().invoke(cli.model_cache, ["reconcile", "--all", "org/model", "--apply", "--min-age-minutes", "5"])
+    result = CliRunner().invoke(cli.model_cache, ["reconcile", "org/model", "--apply", "--min-age-minutes", "5"])
     assert result.exit_code == 0, result.output
     assert "No outstanding workload claims." in result.output
     kwargs = reconcile.call_args.kwargs
@@ -504,10 +504,13 @@ def test_cli_reconcile_all_forwards_cluster_scope_and_age(monkeypatch, tmp_path)
 @pytest.mark.parametrize(
     "args,message",
     [
-        (["--all", "--claim", "x"], "--all finds claims itself"),
-        (["--all", "--endpoint", "https://mirror.example"], "--all finds claims itself"),
-        (["org/model", "--revision", SHA], "or pass --all"),
-        (["org/model", "--revision", SHA, "--claim", "x", "--confirm-inactive", "--apply"], "applies only with --all"),
+        ([], "Name a MODEL to reconcile, or pass --all."),
+        (["--all", "org/model"], "Name a MODEL to reconcile, or pass --all."),
+        (["org/model", "--revision", SHA], "apply only with --claim"),
+        (["--all", "--endpoint", "https://mirror.example"], "apply only with --claim"),
+        (["--all", "--claim", "x"], "--claim releases one claim"),
+        (["org/model", "--revision", SHA, "--claim", "x", "--confirm-inactive", "--apply"], "--claim releases one claim"),
+        (["org/model", "--claim", "x", "--confirm-inactive"], "--claim needs MODEL and --revision."),
     ],
 )
 def test_cli_reconcile_rejects_mixed_modes(args, message):

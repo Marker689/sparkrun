@@ -285,17 +285,17 @@ def pin_cache(model, revision, remove, endpoint, **kwargs):
 
 @model_cache.command("reconcile")
 @click.argument("model", required=False)
-@click.option("--revision", default=None, help="Full immutable model commit ID.")
-@click.option("--claim", default=None, help="Exact outstanding claim ID shown by model-cache list.")
-@click.option("--confirm-inactive", is_flag=True, help="Confirm all workloads/launches sharing this claim have stopped.")
-@click.option("--all", "reconcile_all", is_flag=True, help="Find every claim whose workload is gone (of MODEL, if given) and release it.")
-@click.option("--dry-run/--apply", default=True, show_default=True, help="With --all: preview, or explicitly release orphaned claims.")
+@click.option("--revision", default=None, help="With --claim: full immutable model commit ID.")
+@click.option("--claim", default=None, help="Release this exact claim ID shown by model-cache list, instead of finding claims.")
+@click.option("--confirm-inactive", is_flag=True, help="With --claim: confirm all workloads/launches sharing it have stopped.")
+@click.option("--all", "reconcile_all", is_flag=True, help="Find orphaned claims on every model in the cache.")
+@click.option("--dry-run/--apply", default=True, show_default=True, help="Preview, or explicitly release the orphaned claims found.")
 @click.option(
     "--min-age-minutes",
     type=click.FloatRange(min=0),
     default=api.RECONCILE_MIN_AGE_SECONDS / 60,
     show_default=True,
-    help="With --all: keep younger claims, which may belong to a launch still preparing.",
+    help="Keep younger claims, which may belong to a launch still preparing.",
 )
 @endpoint_option
 @click.pass_context
@@ -306,13 +306,13 @@ def reconcile_cache(
 ):
     """Release workload claims left by workloads that are no longer running.
 
-    Normal stop releases claims automatically. With --all, sweeps the target
-    hosts' status and releases each claim whose workload runs on none of the
-    hosts it claims, provided every one of them was reachable, no pending
-    operation here names it, and it is older than --min-age-minutes. Defaults
-    to a preview; pass --apply to release.
+    Normal stop releases claims automatically. Given MODEL (or --all for
+    every model), sweeps the target hosts' status and releases each claim
+    whose workload runs on none of the hosts it claims, provided every one of
+    them was reachable, no pending operation here names it, and it is older
+    than --min-age-minutes. Defaults to a preview; pass --apply to release.
 
-    Otherwise releases one exact claim (MODEL --revision --claim) after you
+    With --claim, releases that one claim (MODEL --revision --claim) after you
     have inspected every host in it and pass --confirm-inactive. A dead
     controller or an old timestamp does not prove inactivity. Never deletes
     model files.
@@ -320,16 +320,20 @@ def reconcile_cache(
     from sparkrun.orchestration.primitives import build_ssh_kwargs
     from sparkrun.utils.cli_formatters import format_claim_reconciliation
 
-    source = ctx.get_parameter_source
-    if reconcile_all:
-        if revision or claim or confirm_inactive or source("endpoint") is click.core.ParameterSource.COMMANDLINE:
-            raise click.UsageError("--all finds claims itself; it takes no --revision, --claim, --confirm-inactive or --endpoint.")
+    def given(name):
+        return ctx.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE
+
+    automatic = claim is None
+    if automatic:
+        if bool(model) == reconcile_all:
+            raise click.UsageError("Name a MODEL to reconcile, or pass --all.")
+        if revision or confirm_inactive or given("endpoint"):
+            raise click.UsageError("--revision, --confirm-inactive and --endpoint apply only with --claim.")
     else:
-        if not (model and revision and claim):
-            raise click.UsageError("Name MODEL, --revision and --claim, or pass --all.")
-        for name in ("dry_run", "min_age_minutes"):
-            if source(name) is not click.core.ParameterSource.DEFAULT:
-                raise click.UsageError("--%s applies only with --all." % ("apply/--dry-run" if name == "dry_run" else "min-age-minutes"))
+        if reconcile_all or given("dry_run") or given("min_age_minutes"):
+            raise click.UsageError("--claim releases one claim; it takes no --all, --apply/--dry-run or --min-age-minutes.")
+        if not (model and revision):
+            raise click.UsageError("--claim needs MODEL and --revision.")
         if not confirm_inactive:
             raise click.ClickException("Inspect every host in the claim, stop its workloads, then pass --confirm-inactive")
     sctx = _get_context(ctx)
@@ -338,7 +342,7 @@ def reconcile_cache(
         if not output_json:
             click.echo(banner)
         common = dict(cache_dir=cache_dir, hosts=tuple(host_list), ssh_kwargs=build_ssh_kwargs(sctx.config))
-        if reconcile_all:
+        if automatic:
             results = api.reconcile_claims(
                 cluster=cluster,
                 repo=ModelArtifactRequest(model).repo if model else None,
@@ -352,7 +356,7 @@ def reconcile_cache(
             reports = api.reconcile_claim(request, claim=claim, confirm_inactive=True, **common)
     except (ModelArtifactError, ValueError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc
-    if not reconcile_all:
+    if not automatic:
         if output_json:
             click.echo(json.dumps([asdict(report) for report in reports], indent=2))
         else:

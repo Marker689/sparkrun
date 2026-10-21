@@ -307,8 +307,9 @@ Retry a normal stop to reconcile a known workload. Otherwise let sparkrun find
 the claims whose workload is gone (default cluster, or `--cluster`/`--hosts`):
 
 ```sh
-sparkrun model-cache reconcile --all            # preview
+sparkrun model-cache reconcile --all            # preview, every model
 sparkrun model-cache reconcile --all --apply    # release
+sparkrun model-cache reconcile org/model        # one model only
 ```
 
 It sweeps the targets' status once and releases a claim only when every host in
@@ -319,9 +320,9 @@ them) are kept, as are claims that may belong to a workload launched through an
 executor whose feature flag has since been turned off. The age floor covers a launch that has claimed its model but not
 yet started containers, possibly from another control machine; lower it only
 when nothing else is launching. Claims on unreachable hosts, or naming hosts
-outside the targets, are reported and kept. Pass MODEL to limit it to one model.
+outside the targets, are reported and kept.
 
-To release one claim by hand, inspect **every host listed in the outstanding
+To release one claim by hand (`--claim`), inspect **every host listed in the outstanding
 claim**, stop the workload and any in-flight launch, then release the exact
 claim shown by `list`:
 
