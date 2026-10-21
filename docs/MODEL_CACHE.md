@@ -254,16 +254,23 @@ sparkrun model-cache list --hosts node1,node2 --cache-dir /models/hf --json
 
 # Preview LRU cleanup (the default); a byte budget applies per cache.
 sparkrun model-cache prune --hosts node1 --cache-dir /models/hf \
-  --min-age-days 7 --max-bytes 536870912000
+  --min-age-days 7 --max-bytes 500G
 
 # Explicitly apply the same policy. Nothing deletes automatically by default.
 sparkrun model-cache prune --hosts node1 --cache-dir /models/hf \
-  --min-age-days 7 --max-bytes 536870912000 --apply
+  --min-age-days 7 --max-bytes 500G --apply
 
-# Keep an immutable revision; use --remove to remove its retention pin.
-sparkrun model-cache pin org/model --revision FULL_COMMIT \
+# Keep a revision; use --remove to remove its retention pin. A ref such as
+# main resolves through each cache's own refs/, so caches may pin different commits.
+sparkrun model-cache pin org/model --revision main \
   --hosts node1 --cache-dir /models/hf
 ```
+
+`prune`, `adopt` and `reconcile` preview by default and change nothing without
+`--apply`; `prune --apply` does not ask again, so review the preview first.
+`delete` always previews, then asks for confirmation (`--yes` skips it,
+`--dry-run` stops after the preview). `repair` only adds files and runs unless
+given `--dry-run`.
 
 `prune` defaults to a dry run and a seven-day minimum age. Without a byte
 target it selects all eligible revisions older than that age. `--max-bytes`
@@ -327,7 +334,7 @@ claim**, stop the workload and any in-flight launch, then release the exact
 claim shown by `list`:
 
 ```sh
-sparkrun model-cache reconcile org/model --revision FULL_COMMIT \
+sparkrun model-cache reconcile org/model --revision FULL_COMMIT_OR_REF \
   --claim CLAIM_ID --hosts node1 --cache-dir /models/hf --confirm-inactive
 ```
 
@@ -343,11 +350,14 @@ Optional automatic cleanup runs before manifest-based model preparation:
 model_cache_prune:
   enabled: false                  # opt in explicitly
   min_age_days: 7
-  min_free_bytes: 107374182400     # 100 GiB free-space target per cache
-  # max_bytes: 536870912000       # optional 500 GiB private snapshot budget
+  min_free_bytes: 100G             # free-space target per cache
+  # max_bytes: 500G               # optional private snapshot budget
 ```
 
-Enabling it requires at least one byte target. It reuses the explicit prune
+Enabling it requires at least one byte target. Sizes take a plain byte count or
+a suffix: `K`/`M`/`G`/`T` (or `KiB`...`TiB`) are binary, `KB`/`MB`/`GB`/`TB`
+decimal, in any letter case. `prune --max-bytes` / `--min-free-bytes` take the
+same forms. It reuses the explicit prune
 implementation, excludes the repository being prepared, and retains pins and
 workload claims. It warns if protected content prevents meeting the target;
 this is not a guarantee that a subsequent download will fit. It does not run

@@ -520,3 +520,78 @@ def test_cli_reconcile_rejects_mixed_modes(args, message):
     result = CliRunner().invoke(cli.model_cache, ["reconcile", *args])
     assert result.exit_code != 0
     assert message in result.output
+
+
+def test_pin_and_reconcile_accept_a_cached_ref(tmp_path):
+    tracked(tmp_path)
+    refs = tmp_path / "hub" / "models--org--model" / "refs"
+    refs.mkdir(parents=True, exist_ok=True)
+    (refs / "main").write_text(SHA)
+    (report,) = model_cache.pin_revision(ModelArtifactRequest("org/model", "main"), cache_dir=str(tmp_path))
+    assert [(e.revision, e.pinned) for e in report.entries if e.action] == [(SHA, True)]
+
+    with pytest.raises(ModelArtifactError, match="no cached ref 'dev'"):
+        model_cache.pin_revision(ModelArtifactRequest("org/model", "dev"), cache_dir=str(tmp_path))
+    with pytest.raises(ModelArtifactError, match="ref name"):
+        model_cache.pin_revision(ModelArtifactRequest("org/model", "../main"), cache_dir=str(tmp_path))
+
+    token, _ = _claimed(tmp_path, GONE)
+    model_cache.reconcile_claim(ModelArtifactRequest("org/model", "main"), cache_dir=str(tmp_path), claim=token, confirm_inactive=True)
+    assert model_cache.inventory_cache(cache_dir=str(tmp_path))[0].entries[0].claims == {}
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [("500G", 500 * 2**30), ("500gib", 500 * 2**30), ("500GB", 500 * 10**9), ("1.5T", 3 * 2**39), ("1024", 1024), (0, 0), (1e3, 1000)],
+)
+def test_byte_sizes_parse_case_insensitively(value, expected):
+    from sparkrun.utils.data import parse_byte_size
+
+    assert parse_byte_size(value) == expected
+
+
+@pytest.mark.parametrize("value", ["1.5", "12x", "GiB", "-1G", -1, True, 1.5])
+def test_byte_sizes_reject_ambiguous_or_fractional_input(value):
+    from sparkrun.utils.data import parse_byte_size
+
+    with pytest.raises(ValueError):
+        parse_byte_size(value)
+
+
+def test_cli_prune_takes_sizes_and_echoes_the_target(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+    from sparkrun.cli import _model_cache as cli
+
+    monkeypatch.setattr(cli, "_get_context", lambda ctx: cli_context())
+    prune = Mock(return_value=())
+    monkeypatch.setattr(model_cache, "prune_cache", prune)
+    result = CliRunner().invoke(
+        cli.model_cache, ["prune", "--cache-dir", str(tmp_path), "--max-bytes", "500G", "--min-free-bytes", "100GB"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (prune.call_args.kwargs["max_bytes"], prune.call_args.kwargs["min_free_bytes"]) == (500 * 2**30, 100 * 10**9)
+    assert "Target: managed snapshots <= 500.0 GiB; free space >= 93.1 GiB" in result.output
+    bad = CliRunner().invoke(cli.model_cache, ["prune", "--cache-dir", str(tmp_path), "--max-bytes", "lots"])
+    assert bad.exit_code == 2 and "is not a byte size" in bad.output
+
+
+def test_auto_prune_config_accepts_sizes(monkeypatch):
+    from sparkrun.models import cache
+
+    calls = []
+    monkeypatch.setattr(cache, "host_cache", lambda io, host, root, **kw: calls.append(kw) or {"reclaimed_bytes": 0, "target_met": True})
+    policy = {"model_cache_prune": {"enabled": True, "max_bytes": "1T"}}
+    cache.auto_prune(
+        None, [("h1", "/hf")], config=SimpleNamespace(get=lambda key, default=None: policy.get(key, default)), exclude_repos=()
+    )
+    assert calls[0]["max_bytes"] == 2**40 and calls[0]["min_free_bytes"] is None
+
+
+@pytest.mark.parametrize("action,force", [("inventory", False), ("delete", True)])
+def test_claimed_revisions_point_at_reconcile(tmp_path, action, force):
+    from sparkrun.utils.cli_formatters import format_model_cache_reports
+
+    _claimed(tmp_path, GONE)
+    text = format_model_cache_reports(model_cache.inventory_cache(cache_dir=str(tmp_path)), action=action)
+    assert "model-cache reconcile org/model` (a preview; add --apply)" in text
+    assert ("--force" in text) == force

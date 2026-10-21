@@ -236,14 +236,24 @@ def prune_cache(
     )
 
 
+def _require_revision(request):
+    import re
+
+    if not request.revision or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", request.revision):
+        raise ModelArtifactError("a full model commit or a ref name such as main is required")
+
+
 def pin_revision(
     request, *, cache_dir, hosts=("localhost",), pinned=True, ssh_kwargs=None, session=None, sctx=None
 ) -> tuple[CacheReport, ...]:
-    """Pin/unpin an already tracked immutable revision on selected cache hosts."""
-    from sparkrun.models.cache import cache_operation
-    from sparkrun.models.usage import usage_path
+    """Pin/unpin an already tracked revision on selected cache hosts.
 
-    usage_path("/", request.repo, request.revision)  # Require a full immutable commit.
+    ``request.revision`` is a full commit, or a ref such as ``main`` that each
+    cache resolves through its own ``refs/`` (reports carry the commit).
+    """
+    from sparkrun.models.cache import cache_operation
+
+    _require_revision(request)
     return cache_operation(
         cache_dir=cache_dir,
         hosts=hosts,
@@ -265,11 +275,11 @@ def reconcile_claim(
 
     Normal stop releases exact claims automatically. Never infer inactivity from
     age, a dead controller, an unavailable host, or missing local job metadata.
+    ``request.revision`` may be a ref, resolved per cache as in :func:`pin_revision`.
     """
     from sparkrun.models.cache import cache_operation
-    from sparkrun.models.usage import usage_path
 
-    usage_path("/", request.repo, request.revision)
+    _require_revision(request)
     return cache_operation(
         cache_dir=cache_dir,
         hosts=hosts,

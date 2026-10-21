@@ -20,6 +20,11 @@ def model_cache():
 
     Targets the hosts of --cluster, --hosts or --hosts-file, else the default
     cluster, else config default_hosts, else localhost.
+
+    Commands that remove or release (prune, adopt, reconcile) preview by
+    default and act only with --apply. delete always previews and then asks
+    for confirmation (--yes skips it, --dry-run stops after the preview).
+    repair only adds files, so it runs unless given --dry-run.
     """
 
 
@@ -55,11 +60,29 @@ def _target_options(function):
     return host_options(function)
 
 
+class ByteSizeType(click.ParamType):
+    """A byte count typed as ``500G`` / ``1.5TiB`` / ``500GB`` / ``1073741824``."""
+
+    name = "size"
+
+    def convert(self, value, param, ctx):
+        from sparkrun.utils.data import parse_byte_size
+
+        try:
+            return parse_byte_size(value)
+        except ValueError as error:
+            self.fail(str(error), param, ctx)
+
+
+BYTE_SIZE = ByteSizeType()
+
+
 endpoint_option = click.option(
     "--endpoint",
     default="https://huggingface.co",
     envvar="HF_ENDPOINT",
-    help="Model origin URL (defaults to HF_ENDPOINT or huggingface.co).",
+    help="Model origin URL (defaults to HF_ENDPOINT or huggingface.co). For pin and reconcile it only guards against"
+    " a mismatch with the origin recorded for the revision.",
 )
 
 
@@ -102,9 +125,20 @@ def options(function):
         click.option("--checksum", "checksums", is_flag=True, help="Hash selected files; normal inspection checks size and readability."),
         _target_options,
         endpoint_option,
-        click.option("--projector", default=None),
-        click.option("--file-selection", type=click.Choice(["auto", "all", "safetensors"]), default="auto", show_default=True),
-        click.option("--revision", default=None),
+        click.option(
+            "--projector",
+            default=None,
+            help="GGUF only: mmproj file to include, by name substring (default: chosen automatically; none to skip).",
+        ),
+        click.option(
+            "--file-selection",
+            type=click.Choice(["auto", "all", "safetensors"]),
+            default="auto",
+            show_default=True,
+            help="auto: with a safetensors index, its shards plus non-weight files, else every file; all: every file;"
+            " safetensors: like auto, but require the index.",
+        ),
+        click.option("--revision", default=None, help="Commit or ref to select (default: main)."),
         click.argument("model"),
     ):
         wrapped = decorator(wrapped)
@@ -120,9 +154,18 @@ def inspect_cache(request, *, config, **kwargs):
 
 @model_cache.command("resolve")
 @click.argument("model")
-@click.option("--revision", default=None)
-@click.option("--file-selection", type=click.Choice(["auto", "all", "safetensors"]), default="auto", show_default=True)
-@click.option("--projector", default=None)
+@click.option("--revision", default=None, help="Commit or ref to resolve (default: main).")
+@click.option(
+    "--file-selection",
+    type=click.Choice(["auto", "all", "safetensors"]),
+    default="auto",
+    show_default=True,
+    help="auto: with a safetensors index, its shards plus non-weight files, else every file; all: every file;"
+    " safetensors: like auto, but require the index.",
+)
+@click.option(
+    "--projector", default=None, help="GGUF only: mmproj file to include, by name substring (default: chosen automatically; none to skip)."
+)
 @endpoint_option
 @click.option("--cache-dir", default=None, help="HF_HOME on this control machine, used for the weight index download.")
 @click.option("--output", required=True, type=click.Path(path_type=Path), help="Write the portable manifest here.")
@@ -149,7 +192,11 @@ def resolve(model, revision, file_selection, projector, endpoint, cache_dir, out
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Import this inventory offline; otherwise resolve metadata from the model origin.",
 )
-@click.option("--offline", is_flag=True, help="Require --manifest; do not contact the model origin.")
+@click.option(
+    "--offline",
+    is_flag=True,
+    help="Fail rather than contact the model origin when no --manifest is given (--manifest alone never does).",
+)
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Allow origin-resolved metadata without asking for confirmation.")
 @options
 @click.pass_context
@@ -185,9 +232,15 @@ def import_cache(ctx, request, *, manifest_file, offline, assume_yes, config, **
 
 @model_cache.command("repair")
 @click.option("--offline", is_flag=True, help="Permit cluster copies only; no origin calls or tool installation.")
-@click.option("--dry-run", is_flag=True)
-@click.option("--local-cache-dir", default=None)
-@click.option("--transfer-mode", type=click.Choice(["local", "push", "delegated", "pull"]), default="local")
+@click.option("--dry-run", is_flag=True, help="Report what would be acquired and copied; change nothing.")
+@click.option("--local-cache-dir", default=None, help="HF_HOME on this control machine, the copy source for local/push.")
+@click.option(
+    "--transfer-mode",
+    type=click.Choice(["local", "push", "delegated", "pull"]),
+    default="local",
+    show_default=True,
+    help="How files reach the hosts, as for run: via this machine (local/push), via the first host, or each host from the origin.",
+)
 @options
 def repair(request, **kwargs):
     """Repair selected paths, then validate every target against the manifest."""
@@ -257,24 +310,31 @@ def list_cache(**kwargs):
 )
 @click.option(
     "--max-bytes",
-    type=click.IntRange(min=0),
-    help="Target budget for private managed snapshot bytes, including blobs only that snapshot uses.",
+    type=BYTE_SIZE,
+    help="Target budget for managed snapshots, counting blobs only they use (e.g. 500G, 1.5T; GB/TB are decimal).",
 )
-@click.option("--min-free-bytes", type=click.IntRange(min=0), help="Target free space on the cache filesystem in bytes.")
+@click.option("--min-free-bytes", type=BYTE_SIZE, help="Target free space on the cache filesystem (e.g. 200G).")
 @cache_options("prune")
 def prune_cache(**kwargs):
     """Remove eligible revisions in least-recently-used order.
 
-    Defaults to a read-only preview. With no space target, selects all eligible
-    revisions older than --min-age-days. Pins, workload claims, busy caches and
-    unknown content are protected. Blobs another revision still uses are kept.
+    Defaults to a read-only preview; --apply deletes without asking, so review
+    the preview first. With no space target, selects all eligible revisions
+    older than --min-age-days. Pins, workload claims, busy caches and unknown
+    content are protected. Blobs another revision still uses are kept.
     """
+    targets = [
+        "managed snapshots <= %s" % format_bytes(kwargs["max_bytes"]) if kwargs.get("max_bytes") is not None else None,
+        "free space >= %s" % format_bytes(kwargs["min_free_bytes"]) if kwargs.get("min_free_bytes") is not None else None,
+    ]
+    if any(targets):
+        click.echo("Target: " + "; ".join(t for t in targets if t), err=True)
     return api.prune_cache(**kwargs)
 
 
 @model_cache.command("pin")
 @click.argument("model")
-@click.option("--revision", required=True, help="Full immutable model commit ID.")
+@click.option("--revision", required=True, help="Commit ID, or a ref such as main resolved in each cache.")
 @click.option("--remove", is_flag=True, help="Remove the retention pin instead of setting it.")
 @endpoint_option
 @cache_options("pin")
@@ -285,7 +345,7 @@ def pin_cache(model, revision, remove, endpoint, **kwargs):
 
 @model_cache.command("reconcile")
 @click.argument("model", required=False)
-@click.option("--revision", default=None, help="With --claim: full immutable model commit ID.")
+@click.option("--revision", default=None, help="With --claim: commit ID, or a ref such as main.")
 @click.option("--claim", default=None, help="Release this exact claim ID shown by model-cache list, instead of finding claims.")
 @click.option("--confirm-inactive", is_flag=True, help="With --claim: confirm all workloads/launches sharing it have stopped.")
 @click.option("--all", "reconcile_all", is_flag=True, help="Find orphaned claims on every model in the cache.")

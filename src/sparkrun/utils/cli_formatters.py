@@ -1147,6 +1147,21 @@ def format_claim_reconciliation(results, *, dry_run: bool, now: float | None = N
     return "\n".join(lines)
 
 
+def _claim_hint(repos: list[str], *, force: bool) -> str:
+    """Where to go when a claim protects a revision nothing seems to be using."""
+    from sparkrun.core.application_profile import render_identity_text
+
+    target = repos[0] if len(repos) == 1 else "--all"
+    hint = (
+        "Workload claims protect revisions a workload may still use; `{app_command} stop` releases them.\n"
+        "If nothing is running, find and release orphaned claims with `{app_command} model-cache reconcile %s`"
+        " (a preview; add --apply)." % target
+    )
+    if force:
+        hint += "\nOr pass --force to delete claimed revisions anyway."
+    return render_identity_text(hint)
+
+
 def format_model_cache_reports(reports, *, action: str = "inventory", now: float | None = None, show_untracked: bool = False) -> str:
     """Render ``CacheReport`` results from ``model-cache list/prune/pin/reconcile``.
 
@@ -1158,6 +1173,9 @@ def format_model_cache_reports(reports, *, action: str = "inventory", now: float
     if not reports:
         return "No cache hosts reported."
     blocks = ["\n".join(_format_cache_report(r, action, now, show_untracked)) for r in reports]
+    claimed = sorted({e.repo for r in reports for e in r.entries if e.claims and e.action not in ("would_delete", "deleted")})
+    if claimed and action in ("inventory", "delete"):
+        blocks.append(_claim_hint(claimed, force=action == "delete"))
     if action == "prune" and any(e.action == "would_remove" for r in reports for e in r.entries):
         blocks.append("Dry run: nothing was removed. Re-run with --apply to remove the revisions marked above.")
     if action == "adopt" and any(e.action == "would_adopt" for r in reports for e in r.entries):
