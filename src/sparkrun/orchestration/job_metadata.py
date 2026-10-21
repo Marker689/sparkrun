@@ -619,8 +619,14 @@ def save_job_metadata(
     digest = _filename_digest(cluster_id)
     jobs_dir = Path(cache_dir) / "jobs"
     existing = jobs_dir / f"{digest}.yaml"
-    if existing.exists() and load_job_metadata(cluster_id, cache_dir=cache_dir) is None:
+    previous = load_job_metadata(cluster_id, cache_dir=cache_dir) if existing.exists() else None
+    if existing.exists() and previous is None:
         raise ValueError("Refusing to replace metadata owned by another distribution: %s" % existing)
+    # A relaunch under the same cluster_id replaces the earlier containers by
+    # name without stopping them, so the earlier launch's cache claims are
+    # never released by anything but this record's eventual ``stop``. Dropping
+    # them here orphans them on the hosts for good.
+    model_cache_claims = _merge_claims((previous or {}).get("model_cache_claims"), model_cache_claims)
     jobs_dir.mkdir(parents=True, exist_ok=True)
     # Metadata can carry the resolved upstream API key (see below), so keep the
     # directory owner-only.  Best-effort: a pre-existing dir from an older
@@ -805,6 +811,14 @@ def save_job_metadata(
 
     atomic_private_write(meta_path, yaml.safe_dump(meta, default_flow_style=False))
     logger.debug("Saved job metadata to %s", meta_path)
+
+
+def _merge_claims(previous, current):
+    merged = []
+    for ref in [*(previous or ()), *(current or ())]:
+        if ref not in merged:
+            merged.append(ref)
+    return merged
 
 
 def remove_job_metadata(

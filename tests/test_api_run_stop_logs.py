@@ -589,7 +589,9 @@ def test_log_inspection_preserves_pending_launch_claims(tmp_path, relaunch, filt
         with pytest.raises(api.JobNotFound, match="job metadata has been preserved"):
             api.logs(cluster_id, hosts=("h1",), cache_dir=str(tmp_path), **({"host": "h1"} if filtered else {}))
         release.assert_not_called()
-    assert load_job_metadata(cluster_id, cache_dir=str(tmp_path))["model_cache_claims"] == claims
+    # A relaunch under the same ID keeps the earlier launch's claim alongside its own.
+    expected = [{**claims[0], "claim": "pending-launch"}] + (claims if relaunch else [])
+    assert load_job_metadata(cluster_id, cache_dir=str(tmp_path))["model_cache_claims"] == expected
 
 
 def test_logs_precheck_worker_alive_when_head_dead(tmp_path):
