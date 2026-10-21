@@ -1121,6 +1121,32 @@ def _format_cache_report(report, action: str, now: float | None, show_untracked:
     return lines
 
 
+_CLAIM_ACTION_LABELS = {"would_release": "would release", "released": "released", "failed": "release failed"}
+
+
+def format_claim_reconciliation(results, *, dry_run: bool, now: float | None = None) -> str:
+    """Render ``model-cache reconcile --all``: one row per outstanding claim, then a summary."""
+    if not results:
+        return "No outstanding workload claims."
+    header = ("REPO", "REVISION", "CLAIM", "WORKLOAD", "HOSTS", "CREATED", "STATUS")
+    rows = []
+    for r in sorted(results, key=lambda r: (r.repo, r.revision, r.created or 0, r.claim)):
+        status = r.reason if r.action is None else "%s (%s)" % (_CLAIM_ACTION_LABELS.get(r.action, r.action), r.reason)
+        rows.append((r.repo, r.revision[:12], r.claim, r.workload or "-", ",".join(r.hosts) or "-", format_age(r.created, now=now), status))
+    lines = _columns(header, rows)
+    count = {action: sum(1 for r in results if r.action == action) for action in _CLAIM_ACTION_LABELS}
+    kept = sum(1 for r in results if r.action is None)
+    lines.append("")
+    if dry_run:
+        lines.append("Would release %d orphaned claim(s); %d kept." % (count["would_release"], kept))
+        if count["would_release"]:
+            lines.append("Dry run: nothing was released. Re-run with --apply to release the claims marked above.")
+    else:
+        failed = " %d could not be released." % count["failed"] if count["failed"] else ""
+        lines.append("Released %d orphaned claim(s); %d kept.%s" % (count["released"], kept, failed))
+    return "\n".join(lines)
+
+
 def format_model_cache_reports(reports, *, action: str = "inventory", now: float | None = None, show_untracked: bool = False) -> str:
     """Render ``CacheReport`` results from ``model-cache list/prune/pin/reconcile``.
 

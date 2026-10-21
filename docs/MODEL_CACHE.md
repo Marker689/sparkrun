@@ -303,9 +303,27 @@ Confirmed `stop`/`stop-all` releases the corresponding claims and restarts the
 retention age. A failed or interrupted activation retains its claims; neither
 age nor a dead controller proves that remote workloads stopped.
 
-Retry a normal stop to reconcile a known workload. If job metadata is missing,
-inspect **every host listed in the outstanding claim**, stop the workload and
-any in-flight launch, then explicitly release the exact claim shown by `list`:
+Retry a normal stop to reconcile a known workload. Otherwise let sparkrun find
+the claims whose workload is gone (default cluster, or `--cluster`/`--hosts`):
+
+```sh
+sparkrun model-cache reconcile --all            # preview
+sparkrun model-cache reconcile --all --apply    # release
+```
+
+It sweeps the targets' status once and releases a claim only when every host in
+the claim was observed, its workload runs on none of them, no pending operation
+on this control machine names it, and it is older than `--min-age-minutes`
+(default 60). Claims of another distribution's workloads (status cannot see
+them) are kept, as are claims that may belong to a workload launched through an
+executor whose feature flag has since been turned off. The age floor covers a launch that has claimed its model but not
+yet started containers, possibly from another control machine; lower it only
+when nothing else is launching. Claims on unreachable hosts, or naming hosts
+outside the targets, are reported and kept. Pass MODEL to limit it to one model.
+
+To release one claim by hand, inspect **every host listed in the outstanding
+claim**, stop the workload and any in-flight launch, then release the exact
+claim shown by `list`:
 
 ```sh
 sparkrun model-cache reconcile org/model --revision FULL_COMMIT \
@@ -313,8 +331,8 @@ sparkrun model-cache reconcile org/model --revision FULL_COMMIT \
 ```
 
 Reconciliation removes a protection record, not model files, and refreshes its
-retention age. The confirmation is an operator assertion; this command does
-not infer process inactivity. External applications and older Sparkrun
+retention age. For a single claim the confirmation is an operator assertion;
+that form does not infer process inactivity. External applications and older Sparkrun
 processes do not participate in these claims/locks: pin revisions they use,
 or leave automatic cleanup disabled on their shared caches.
 
@@ -340,7 +358,8 @@ Inventory and cleanup use Python 3 and standard filesystem tools on Linux cache
 hosts, through the existing SSH/host session. They never contact the model
 origin or install tools. Existing metadata inspection remains independent of
 this Python helper. CLI and daemon callers use the same Python API:
-`inventory_cache`, `prune_cache`, `pin_revision`, `reconcile_claim` and `adopt_cache`.
+`inventory_cache`, `prune_cache`, `pin_revision`, `reconcile_claim` and `adopt_cache`
+(`reconcile_claims`, behind `reconcile --all`, is Python/CLI only).
 The daemon exposes `model_cache.list`, `model_cache.prune`, `model_cache.pin`,
 `model_cache.reconcile` and `model_cache.adopt` (and matching `/v1/model_cache/...`
 routes). Prune, reconciliation and adoption require admin scope; prune and adopt

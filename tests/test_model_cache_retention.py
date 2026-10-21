@@ -382,3 +382,138 @@ def test_cli_retention_preserves_custom_endpoint(monkeypatch, tmp_path, command,
     result = CliRunner().invoke(cli.model_cache, args)
     assert result.exit_code == 0, result.output
     assert mutation.call_args.args[0].endpoint == endpoint
+
+
+GONE = "sparkrun_" + "a" * 16 + "_" + "b" * 12
+LIVE = "sparkrun_" + "c" * 16 + "_" + "d" * 12
+
+
+def _claimed(root, workload, *, created=1.0):
+    """A tracked revision holding one activated claim of *workload* on localhost."""
+    manifest, _, path = tracked(root)
+    with usage_operation():
+        begin_workload(workload, {})
+        with ModelHostIO() as io:
+            record_use(io, "localhost", str(root), manifest)
+        token = workload_claims()[0]["claim"]
+        activate_workload()
+    record = json.loads(path.read_text())
+    record["claims"][token]["created"] = created
+    path.write_text(json.dumps(record))
+    return token, path
+
+
+def _sweep(monkeypatch, *, running=(), errors=None, pending=(), jobs=(), swept=("docker",)):
+    coverage = tuple(SimpleNamespace(target=SimpleNamespace(executor=name)) for name in swept)
+    snapshot = SimpleNamespace(running_cluster_ids=lambda: tuple(running), observation_errors=dict(errors or {}), coverage=coverage)
+    records = [SimpleNamespace(workload_id=w, metadata={"executor": e}) for w, e in jobs]
+    monkeypatch.setattr("sparkrun.api._jobs.list_jobs", lambda **kw: records)
+    sweep = Mock(return_value=snapshot)
+    monkeypatch.setattr("sparkrun.api._status.status", sweep)
+    monkeypatch.setattr("sparkrun.core.pending_ops.list_pending_ops", lambda: [{"job_cluster_id": w} for w in pending])
+    return sweep
+
+
+def test_reconcile_all_previews_then_releases_an_orphaned_claim(tmp_path, monkeypatch):
+    token, path = _claimed(tmp_path, GONE)
+    sweep = _sweep(monkeypatch)
+
+    (preview,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), cluster="lab")
+    assert (preview.claim, preview.workload, preview.status, preview.action) == (token, GONE, "orphaned", "would_release")
+    assert token in json.loads(path.read_text())["claims"]
+    assert sweep.call_args.kwargs["cluster"] == "lab"
+
+    (applied,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    assert applied.action == "released"
+    assert json.loads(path.read_text())["claims"] == {}
+
+
+@pytest.mark.parametrize(
+    "sweep,created,status",
+    [
+        ({"running": [LIVE]}, 1.0, "running"),
+        ({"errors": {"localhost": "unreachable"}}, 1.0, "unverified"),
+        ({"pending": [LIVE]}, 1.0, "preparing"),
+        ({}, None, "recent"),
+        ({"jobs": [(LIVE, "local")]}, 1.0, "unverified"),
+        ({"jobs": [(GONE, "local")]}, 1.0, "unverified"),
+        ({"jobs": [(LIVE, "docker")]}, 1.0, "orphaned"),
+    ],
+)
+def test_reconcile_all_keeps_claims_it_cannot_prove_orphaned(tmp_path, monkeypatch, sweep, created, status):
+    import time
+
+    token, path = _claimed(tmp_path, LIVE, created=time.time() if created is None else created)
+    _sweep(monkeypatch, **sweep)
+    (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    if status == "orphaned":
+        assert result.action == "released"
+        return
+    assert (result.status, result.action) == (status, None)
+    assert token in json.loads(path.read_text())["claims"]
+
+
+@pytest.mark.parametrize(
+    "workload,patch,status",
+    [
+        ("othername_" + "a" * 16 + "_" + "b" * 12, {}, "foreign"),
+        ("not-a-workload-id", {}, "foreign"),
+        (GONE, {"created": "yesterday"}, "unverified"),
+        (GONE, {"hosts": "localhost"}, "unverified"),
+    ],
+)
+def test_reconcile_all_keeps_foreign_and_malformed_claims(tmp_path, monkeypatch, workload, patch, status):
+    token, path = _claimed(tmp_path, workload)
+    record = json.loads(path.read_text())
+    record["claims"][token].update(patch)
+    path.write_text(json.dumps(record))
+    _sweep(monkeypatch)
+    (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    assert (result.status, result.action) == (status, None)
+    assert token in json.loads(path.read_text())["claims"]
+
+
+def test_reconcile_all_skips_the_status_sweep_without_claims(tmp_path, monkeypatch):
+    tracked(tmp_path)
+    sweep = _sweep(monkeypatch)
+    assert model_cache.reconcile_claims(cache_dir=str(tmp_path)) == ()
+    sweep.assert_not_called()
+
+
+def test_cli_reconcile_all_forwards_cluster_scope_and_age(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+    from sparkrun.cli import _model_cache as cli
+
+    monkeypatch.setattr(cli, "_get_context", lambda ctx: cli_context())
+    monkeypatch.setattr(cli, "_resolve_targets", lambda sctx, **kw: (["h1"], "/hf", "Cluster: lab — 1 host(s)", "lab"))
+    reconcile = Mock(return_value=())
+    monkeypatch.setattr(model_cache, "reconcile_claims", reconcile)
+    result = CliRunner().invoke(cli.model_cache, ["reconcile", "--all", "org/model", "--apply", "--min-age-minutes", "5"])
+    assert result.exit_code == 0, result.output
+    assert "No outstanding workload claims." in result.output
+    kwargs = reconcile.call_args.kwargs
+    assert (kwargs["cluster"], kwargs["repo"], kwargs["dry_run"], kwargs["min_age_seconds"], kwargs["hosts"]) == (
+        "lab",
+        "org/model",
+        False,
+        300,
+        ("h1",),
+    )
+
+
+@pytest.mark.parametrize(
+    "args,message",
+    [
+        (["--all", "--claim", "x"], "--all finds claims itself"),
+        (["--all", "--endpoint", "https://mirror.example"], "--all finds claims itself"),
+        (["org/model", "--revision", SHA], "or pass --all"),
+        (["org/model", "--revision", SHA, "--claim", "x", "--confirm-inactive", "--apply"], "applies only with --all"),
+    ],
+)
+def test_cli_reconcile_rejects_mixed_modes(args, message):
+    from click.testing import CliRunner
+    from sparkrun.cli import _model_cache as cli
+
+    result = CliRunner().invoke(cli.model_cache, ["reconcile", *args])
+    assert result.exit_code != 0
+    assert message in result.output

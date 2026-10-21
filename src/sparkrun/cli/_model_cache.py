@@ -26,7 +26,8 @@ def model_cache():
 def _resolve_targets(sctx, *, legacy_hosts, hosts, hosts_file, cluster_name, cache_dir):
     """Resolve target hosts and their HF home like every other cluster command.
 
-    Returns ``(host_list, cache_dir, banner)``. ``--host`` (repeatable, legacy)
+    Returns ``(host_list, cache_dir, banner, cluster_name)``; *cluster_name*
+    is the effective cluster (``None`` for explicit or default hosts). ``--host`` (repeatable, legacy)
     is merged into ``--hosts``. With no host source at all the control
     machine's own cache (localhost) is the target, as before clusters were
     supported. The cache dir is ``--cache-dir`` → the cluster's ``cache_dir`` →
@@ -39,12 +40,12 @@ def _resolve_targets(sctx, *, legacy_hosts, hosts, hosts_file, cluster_name, cac
     config = sctx.config
     hosts = ",".join([*legacy_hosts, *([hosts] if hosts else [])]) or None
     if not (hosts or hosts_file or cluster_name or config.default_hosts or _get_cluster_manager(sctx=sctx).get_default()):
-        host_list, cluster_cache, banner = ["localhost"], None, "Hosts: localhost (no cluster configured)"
+        host_list, cluster_cache, banner, effective = ["localhost"], None, "Hosts: localhost (no cluster configured)", None
     else:
         hctx = resolve_host_context(hosts, hosts_file, cluster_name, config, sctx=sctx)
-        host_list, cluster_cache, banner = hctx.host_list, hctx.cluster.cache_dir, hctx.describe()
+        host_list, cluster_cache, banner, effective = hctx.host_list, hctx.cluster.cache_dir, hctx.describe(), hctx.cluster_name
     cache_dir = resolve_effective_cache_dir(cache_dir or cluster_cache, host_list, build_ssh_kwargs(config), config)
-    return host_list, cache_dir, banner
+    return host_list, cache_dir, banner, effective
 
 
 def _target_options(function):
@@ -73,7 +74,7 @@ def options(function):
 
         sctx = _get_context(ctx)
         try:
-            host_list, cache_dir, banner = _resolve_targets(sctx, **_pop_targets(kwargs))
+            host_list, cache_dir, banner, _ = _resolve_targets(sctx, **_pop_targets(kwargs))
             if not output_json:
                 click.echo(banner)
             request = ModelArtifactRequest(model, revision, endpoint, projector, file_selection)
@@ -212,7 +213,7 @@ def _cache_options(function, action):
         sctx = _get_context(ctx)
         show_all = kwargs.pop("show_all", False)
         try:
-            host_list, cache_dir, banner = _resolve_targets(sctx, **_pop_targets(kwargs))
+            host_list, cache_dir, banner, _ = _resolve_targets(sctx, **_pop_targets(kwargs))
             if not output_json:
                 click.echo(banner)
             reports = function(
@@ -283,22 +284,88 @@ def pin_cache(model, revision, remove, endpoint, **kwargs):
 
 
 @model_cache.command("reconcile")
-@click.argument("model")
-@click.option("--revision", required=True, help="Full immutable model commit ID.")
-@click.option("--claim", required=True, help="Exact outstanding claim ID shown by model-cache list.")
+@click.argument("model", required=False)
+@click.option("--revision", default=None, help="Full immutable model commit ID.")
+@click.option("--claim", default=None, help="Exact outstanding claim ID shown by model-cache list.")
 @click.option("--confirm-inactive", is_flag=True, help="Confirm all workloads/launches sharing this claim have stopped.")
+@click.option("--all", "reconcile_all", is_flag=True, help="Find every claim whose workload is gone (of MODEL, if given) and release it.")
+@click.option("--dry-run/--apply", default=True, show_default=True, help="With --all: preview, or explicitly release orphaned claims.")
+@click.option(
+    "--min-age-minutes",
+    type=click.FloatRange(min=0),
+    default=api.RECONCILE_MIN_AGE_SECONDS / 60,
+    show_default=True,
+    help="With --all: keep younger claims, which may belong to a launch still preparing.",
+)
 @endpoint_option
-@cache_options("reconcile")
-def reconcile_cache(model, revision, claim, confirm_inactive, endpoint, **kwargs):
-    """Release an interrupted workload's claim after inspecting its hosts.
+@click.pass_context
+@_target_options
+@json_option("Print the per-cache reports as JSON.")
+def reconcile_cache(
+    ctx, model, revision, claim, confirm_inactive, reconcile_all, dry_run, min_age_minutes, endpoint, output_json, **targets
+):
+    """Release workload claims left by workloads that are no longer running.
 
-    Normal stop releases claims automatically. A dead controller or an old
-    timestamp does not prove inactivity. Shared-cache claims may cover several
-    hosts; inspect all of them before confirming. Does not delete model files.
+    Normal stop releases claims automatically. With --all, sweeps the target
+    hosts' status and releases each claim whose workload runs on none of the
+    hosts it claims, provided every one of them was reachable, no pending
+    operation here names it, and it is older than --min-age-minutes. Defaults
+    to a preview; pass --apply to release.
+
+    Otherwise releases one exact claim (MODEL --revision --claim) after you
+    have inspected every host in it and pass --confirm-inactive. A dead
+    controller or an old timestamp does not prove inactivity. Never deletes
+    model files.
     """
-    if not confirm_inactive:
-        raise click.ClickException("Inspect every host in the claim, stop its workloads, then pass --confirm-inactive")
-    return api.reconcile_claim(ModelArtifactRequest(model, revision, endpoint=endpoint), claim=claim, confirm_inactive=True, **kwargs)
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+    from sparkrun.utils.cli_formatters import format_claim_reconciliation
+
+    source = ctx.get_parameter_source
+    if reconcile_all:
+        if revision or claim or confirm_inactive or source("endpoint") is click.core.ParameterSource.COMMANDLINE:
+            raise click.UsageError("--all finds claims itself; it takes no --revision, --claim, --confirm-inactive or --endpoint.")
+    else:
+        if not (model and revision and claim):
+            raise click.UsageError("Name MODEL, --revision and --claim, or pass --all.")
+        for name in ("dry_run", "min_age_minutes"):
+            if source(name) is not click.core.ParameterSource.DEFAULT:
+                raise click.UsageError("--%s applies only with --all." % ("apply/--dry-run" if name == "dry_run" else "min-age-minutes"))
+        if not confirm_inactive:
+            raise click.ClickException("Inspect every host in the claim, stop its workloads, then pass --confirm-inactive")
+    sctx = _get_context(ctx)
+    try:
+        host_list, cache_dir, banner, cluster = _resolve_targets(sctx, **targets)
+        if not output_json:
+            click.echo(banner)
+        common = dict(cache_dir=cache_dir, hosts=tuple(host_list), ssh_kwargs=build_ssh_kwargs(sctx.config))
+        if reconcile_all:
+            results = api.reconcile_claims(
+                cluster=cluster,
+                repo=ModelArtifactRequest(model).repo if model else None,
+                dry_run=dry_run,
+                min_age_seconds=min_age_minutes * 60,
+                sctx=sctx,
+                **common,
+            )
+        else:
+            request = ModelArtifactRequest(model, revision, endpoint=endpoint)
+            reports = api.reconcile_claim(request, claim=claim, confirm_inactive=True, **common)
+    except (ModelArtifactError, ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not reconcile_all:
+        if output_json:
+            click.echo(json.dumps([asdict(report) for report in reports], indent=2))
+        else:
+            click.echo(format_model_cache_reports(reports, action="reconcile"))
+        if any(not r.get("target_met", True) for r in reports):
+            ctx.exit(1)
+        return
+    if output_json:
+        click.echo(json.dumps([asdict(result) for result in results], indent=2))
+    else:
+        click.echo(format_claim_reconciliation(results, dry_run=dry_run))
+    if any(result.action == "failed" for result in results):
+        ctx.exit(1)
 
 
 @model_cache.command("adopt")
@@ -369,7 +436,7 @@ def delete_cache(ctx, model, revision, dry_run, assume_yes, force, output_json, 
     sctx = _get_context(ctx)
     try:
         request = ModelArtifactRequest(model, revision)
-        host_list, cache_dir, banner = _resolve_targets(sctx, **targets)
+        host_list, cache_dir, banner, _ = _resolve_targets(sctx, **targets)
         delete = partial(
             api.delete_model,
             request,
