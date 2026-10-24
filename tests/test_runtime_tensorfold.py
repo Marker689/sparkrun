@@ -516,3 +516,7 @@ def test_dsv41_generate_command_for_cluster_is_a_rank0_preview():
     command = runtime.generate_command(_dsv41_recipe(), {}, is_cluster=True)
     assert "/opt/tensorfold-dsv41/bin/tensorfold-native serve" in command
     assert "%s/model" % _DSV41_BUNDLE in command
+
+
+def test_tensorfold_uses_the_native_cluster_strategy():
+    assert TensorFoldRuntime().cluster_strategy() == "native"

@@ -186,6 +186,10 @@ class TensorFoldRuntime(RuntimePlugin):
 
     # --- capabilities / env -------------------------------------------------
 
+    def cluster_strategy(self) -> str:
+        """TensorFold clusters use the native rank orchestration, not Ray."""
+        return "native"
+
     def native_api_options(self) -> list[str]:
         """TensorFold serves OpenAI Chat/Completions/Responses and Anthropic Messages."""
         return ["chat_completions", "responses", "messages"]
