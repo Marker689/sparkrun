@@ -29,9 +29,14 @@ defaults:
   top_p: 1.0
   top_k: 20
   rdma_hca: rocep1s0f0,roceP2p1s0f0
-  net_if: enp1s0f0np0
   served_k: solo
   tf_env:
     TF_RDMA_GID: 3
     TF_SEED_RANDOM: 1
     TF_TOP_K_MAX: 56
+
+# The image is built on the Spark hosts (or published elsewhere); do not make
+# the control machine pull/save it.  Each target still probes its local tag.
+distribution_config:
+  containers:
+    enabled: false
