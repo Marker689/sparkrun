@@ -67,7 +67,7 @@ declares all three to the proxy/readiness layers and uses `/health`.
 | `max_tokens` | `--max-tokens` | default reply cap |
 | `temperature`, `top_p`, `top_k`, `min_p` | same | sampling defaults |
 | `thinking` | `--thinking` / `--no-thinking` | false emits `--no-thinking` |
-| `vision`, `no_drafts`, `loop_guard`, `metrics_open` | presence flags | |
+| `vision`, `no_drafts`, `loop_guard`, `metrics_open`, `dashboard` | presence flags | `metrics_open`/`dashboard` are rank-0 only |
 | `drafter`, `drafter_bits`, `alias`, `chat_template` | same | |
 | `api_key` | `--api-key` | also surfaced to proxy discovery |
 | `command_binary` | replaces `tensorfold-native` | for images with an entrypoint |

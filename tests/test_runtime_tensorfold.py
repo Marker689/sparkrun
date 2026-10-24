@@ -295,6 +295,7 @@ def test_known_config_keys_cover_flag_map_and_owned_keys():
         "reasoning_effort": "--reasoning-effort",
         "loop_guard": "--loop-guard",
         "metrics_open": "--metrics-open",
+        "dashboard": "--dashboard",
         "alias": "--alias",
         "chat_template": "--chat-template",
     }
@@ -520,3 +521,25 @@ def test_dsv41_generate_command_for_cluster_is_a_rank0_preview():
 
 def test_tensorfold_uses_the_native_cluster_strategy():
     assert TensorFoldRuntime().cluster_strategy() == "native"
+
+
+def test_dashboard_and_metrics_are_rank0_only():
+    runtime = TensorFoldRuntime()
+    recipe = _recipe(defaults={"tf_family": "glm", "tensor_parallel": 2, "dashboard": True, "metrics_open": True})
+    head = runtime.generate_node_command(recipe, {}, head_ip="10.0.0.1", num_nodes=2, node_rank=0)
+    worker = runtime.generate_node_command(recipe, {}, head_ip="10.0.0.1", num_nodes=2, node_rank=1)
+    assert "--dashboard" in head
+    assert "--metrics-open" in head
+    assert "--dashboard" not in worker
+    assert "--metrics-open" not in worker
+
+
+def test_dsv41_dashboard_is_rank0_only():
+    runtime = TensorFoldRuntime()
+    recipe = _dsv41_recipe(defaults={"dashboard": True, "metrics_open": True})
+    head = runtime.generate_node_command(recipe, {}, head_ip="10.0.0.1", num_nodes=2, node_rank=0)
+    follower = runtime.generate_node_command(recipe, {}, head_ip="10.0.0.1", num_nodes=2, node_rank=1)
+    assert "--dashboard" in head
+    assert "--metrics-open" in head
+    assert "--dashboard" not in follower
+    assert "--metrics-open" not in follower

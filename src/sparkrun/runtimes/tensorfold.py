@@ -105,17 +105,22 @@ _TENSORFOLD_FLAG_MAP: dict[str, str] = {
     "reasoning_effort": "--reasoning-effort",
     "loop_guard": "--loop-guard",
     "metrics_open": "--metrics-open",
+    "dashboard": "--dashboard",
     "alias": "--alias",
     "chat_template": "--chat-template",
 }
 
 #: Flags that take no value (presence means "on").
-_TENSORFOLD_BOOL_FLAGS = frozenset({"thinking", "vision", "no_drafts", "loop_guard", "metrics_open"})
+_TENSORFOLD_BOOL_FLAGS = frozenset({"thinking", "vision", "no_drafts", "loop_guard", "metrics_open", "dashboard"})
 
 #: Boolean flags whose ``False`` must render ``--no-<flag>``.  ``thinking`` is
 #: the only engine flag that defaults on for some templates; omitting it would
 #: silently keep thinking enabled when the recipe asked for it off.
 _TENSORFOLD_NEGATABLE_FLAGS = frozenset({"thinking"})
+
+#: Flags that only the serving rank may receive: the worker/follower rank has
+#: no HTTP listener, and the DeepSeek follower binary is a different argv shape.
+_RANK0_ONLY_FLAG_KEYS = frozenset({"metrics_open", "dashboard"})
 
 #: Keys this runtime consumes outside the flag map.  ``report_unmapped_config_keys``
 #: uses this to distinguish "the engine never sees this" from "handled elsewhere".
@@ -351,6 +356,8 @@ class TensorFoldRuntime(RuntimePlugin):
         parts.append("--no-update-check")
 
         skip = set(_SKIP_KEYS) | set(skip_keys)
+        if not bind:
+            skip |= _RANK0_ONLY_FLAG_KEYS
         parts.extend(
             self.build_flags_from_map(
                 config,
