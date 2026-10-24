@@ -154,6 +154,7 @@ class SglangTuner(BaseTuner):
     def _run_tune_for_tp(self, tp_size, triton_version):
         if self.mode == "moe":
             return super()._run_tune_for_tp(tp_size, triton_version)
+        import logging
         from sparkrun.orchestration.primitives import run_script_on_host_streaming
         from sparkrun.scripts import read_script
         from sparkrun.tuning._common import resolve_tuning_timeout
@@ -168,8 +169,16 @@ class SglangTuner(BaseTuner):
             " ".join(quote(arg) for arg in args),
             read_script("sglang_tune_fp8.py"),
         )
+        # Same policy as orchestration/distribution.py: a caller that does not own the terminal
+        # (the monitor TUI pins root to WARNING) must capture rather than stream, since a
+        # streaming subprocess inherits fds 1/2 and paints over a Textual app.
         result = run_script_on_host_streaming(
-            self.host, script, ssh_kwargs=self.ssh_kwargs, timeout=resolve_tuning_timeout(self.timeout), dry_run=self.dry_run
+            self.host,
+            script,
+            ssh_kwargs=self.ssh_kwargs,
+            timeout=resolve_tuning_timeout(self.timeout),
+            dry_run=self.dry_run,
+            quiet=not logging.getLogger().isEnabledFor(logging.INFO),
         )
         return 0 if self.dry_run else result.returncode
 

@@ -54,6 +54,18 @@ class ModelHostIO:
             return True
         return False
 
+    def release_leases(self):
+        """End a preparation phase before acquiring a larger, ordered lock set.
+
+        Callers must re-observe after reacquisition. A lost lease is terminal,
+        even here; releasing it must never turn failure into a successful retry.
+        """
+        with self._mutex:
+            self.check_leases()
+            self._stack.close()
+            self._owners.clear()
+            self._locks.clear()
+
     def execute(
         self,
         host: str | None,
@@ -161,6 +173,8 @@ class ModelHostIO:
             if key in self._locks:
                 return self._locks[key]
             existing = self.read(host, path)
+            if existing:
+                existing = existing.splitlines()[0]
             if existing is not None and existing in self._owners:
                 self.check_leases()
                 self._locks[key] = existing
@@ -169,7 +183,7 @@ class ModelHostIO:
             if not isinstance(session, StreamingHostSession):
                 raise ModelArtifactError("model publication requires a host session with supervised streaming leases")
             nonce = self._operation + ":" + uuid.uuid4().hex
-            owner = PublicationLease(session, host, cache, path, nonce)
+            owner = PublicationLease(session, host, cache, path, nonce, check=self.check_leases)
             self._stack.callback(owner.process.close)
             self._owners[nonce] = owner
             self._locks[key] = nonce

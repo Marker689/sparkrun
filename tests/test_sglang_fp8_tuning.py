@@ -1,6 +1,7 @@
 """Dense FP8 tuning and installation contracts without a GPU dependency."""
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -250,3 +251,24 @@ def test_existing_experimental_registry_gains_tuning_path_without_reset():
     assert entry.tuning_subpath == "experimental-tuning"
     assert custom.tuning_subpath == "my-tuning" and custom.mods_subpath == "my-mods"
     assert not RegistryManager._backfill_default_subpaths([entry, custom])
+
+
+@pytest.mark.parametrize(("level", "quiet"), [(logging.WARNING, True), (logging.INFO, False)])
+def test_fp8_tuning_captures_output_unless_info_logging(level, quiet, tmp_path, monkeypatch):
+    """A terminal it does not own (monitor TUI pins root to WARNING) must not be painted over."""
+    seen = {}
+
+    def fake_stream(host, script_text, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("sparkrun.orchestration.primitives.run_script_on_host_streaming", fake_stream)
+    tuner = SglangTuner(host="localhost", image="test", model="test", output_dir=str(tmp_path), mode="fp8", shapes=((1792, 5120),))
+    root = logging.getLogger()
+    previous = root.level
+    root.setLevel(level)
+    try:
+        assert tuner._run_tune_for_tp(4, "3.7.1") == 0
+    finally:
+        root.setLevel(previous)
+    assert seen["quiet"] is quiet
