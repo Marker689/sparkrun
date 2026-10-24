@@ -37,8 +37,10 @@ and then distributes it to the cluster hosts (`docker save | ssh docker load`):
 docker/tensorfold/build.sh --load
 # = ghcr.io/spark-arena/tensorfold:1.1.3
 
-docker/tensorfold-dsv41/build.sh --load
+docker/tensorfold-dsv41/build.sh --load              # TP2 lane
 # = ghcr.io/spark-arena/tensorfold-dsv41:3ff3b2a
+docker/tensorfold-dsv41/build.sh --lane tp4 --load    # TP4 lane
+# = ghcr.io/spark-arena/tensorfold-dsv41:5940208
 ```
 
 `image.env` in each directory is the one pinned source of truth; the drift
@@ -179,7 +181,11 @@ TP because it cannot emit different argv for the serving and follower ranks.
 ## `tensorfold-dsv41`: DeepSeek-V4.1 TP2/TP4 (experimental)
 
 The released TensorFold binary does **not** serve DeepSeek-V4.1.  This runtime
-wraps the community fork that does, and is deliberately a separate runtime:
+wraps the community fork that does, and is deliberately a separate runtime.
+The image is built per lane: TP2 from `deepseek-v41-zig` @ `3ff3b2a` with three
+patches, TP4 from `deepseek-v41-zig-tp4` @ `5940208` with four patches (the TP4
+recipe names its container explicitly because the platform default is the TP2
+image):
 
 - rank 0 runs `tensorfold-native serve` with `TF_TP_*`;
 - followers run a different binary, `tf-dsv41-lanes`, with positional argv;

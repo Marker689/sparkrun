@@ -31,6 +31,11 @@ env:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [tp2, tp4]
+    name: build-${{ matrix.lane }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -41,9 +46,15 @@ jobs:
       - name: Load pinned inputs
         run: |
           set -a; . ./docker/tensorfold-dsv41/image.env; set +a
-          for key in IMAGE_REPO IMAGE_TAG TF_FORK_SHA CUDA_DEVEL_TAG CUDA_TAG NCCL_APT_VERSION ZIG_VERSION TARGET_SM TOKENIZERS_VERSION; do
+          case "${{ matrix.lane }}" in
+            tp2) LANE_SHA="$TF_FORK_SHA"; LANE_TAG="$IMAGE_TAG"; PATCH_SET=tp2 ;;
+            tp4) LANE_SHA="$TF_FORK_SHA_TP4"; LANE_TAG="$IMAGE_TAG_TP4"; PATCH_SET=tp4 ;;
+            *) echo "unknown lane ${{ matrix.lane }}" >&2; exit 1 ;;
+          esac
+          for key in IMAGE_REPO CUDA_DEVEL_TAG CUDA_TAG NCCL_APT_VERSION ZIG_VERSION TARGET_SM TOKENIZERS_VERSION; do
             printf '%s=%s\n' "$key" "${!key}" >> "$GITHUB_ENV"
           done
+          printf 'LANE_SHA=%s\nLANE_TAG=%s\nPATCH_SET=%s\n' "$LANE_SHA" "$LANE_TAG" "$PATCH_SET" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -61,14 +72,15 @@ jobs:
           context: docker/tensorfold-dsv41
           platforms: linux/arm64
           push: ${{ env.PUSH == 'true' }}
-          tags: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+          tags: ${{ env.IMAGE_REPO }}:${{ env.LANE_TAG }}
           build-args: |
-            TF_SHA=${{ env.TF_FORK_SHA }}
+            TF_SHA=${{ env.LANE_SHA }}
+            PATCH_SET=${{ env.PATCH_SET }}
             CUDA_DEVEL_TAG=${{ env.CUDA_DEVEL_TAG }}
             CUDA_TAG=${{ env.CUDA_TAG }}
             NCCL_APT_VERSION=${{ env.NCCL_APT_VERSION }}
             ZIG_VERSION=${{ env.ZIG_VERSION }}
             TARGET_SM=${{ env.TARGET_SM }}
             TOKENIZERS_VERSION=${{ env.TOKENIZERS_VERSION }}
-          cache-from: type=gha,scope=tensorfold-dsv41
-          cache-to: type=gha,mode=max,scope=tensorfold-dsv41
+          cache-from: type=gha,scope=tensorfold-dsv41-${{ matrix.lane }}
+          cache-to: type=gha,mode=max,scope=tensorfold-dsv41-${{ matrix.lane }}

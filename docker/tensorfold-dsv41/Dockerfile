@@ -34,6 +34,7 @@ RUN pip install --no-cache-dir "ziglang==${ZIG_VERSION}"
 FROM nvidia/cuda:${CUDA_DEVEL_TAG} AS builder
 
 ARG TF_SHA=3ff3b2ac1d71a789cb930068c46d9abed025eefa
+ARG PATCH_SET=tp2
 ARG TARGETARCH
 ARG TARGET_SM=121
 
@@ -53,18 +54,27 @@ RUN apt-get update \
 COPY --from=zigstage /usr/local/lib/python3.12/site-packages/ziglang /opt/zig
 RUN /opt/zig/zig version
 
-# Source at the pinned fork commit plus the three deployment patches.
-COPY patches/ /tmp/patches/
+# Source at the pinned fork commit plus the deployment patches for the
+# selected lane (TP2: three patches on deepseek-v41-zig; TP4: four patches on
+# deepseek-v41-zig-tp4).
+COPY patches/ /tmp/patches-tp2/
+COPY patches-tp4/ /tmp/patches-tp4/
 RUN set -eux; \
+    case "${PATCH_SET}" in \
+        tp2) PATCHES=/tmp/patches-tp2 ;; \
+        tp4) PATCHES=/tmp/patches-tp4 ;; \
+        *) echo "PATCH_SET must be tp2 or tp4" >&2; exit 1 ;; \
+    esac; \
+    test -n "$(ls "$PATCHES"/*.patch 2>/dev/null)" || { echo "no patches under $PATCHES" >&2; exit 1; }; \
     curl -fsSL -o /tmp/src.tar.gz "https://codeload.github.com/bertholomus/TensorFold/tar.gz/${TF_SHA}"; \
     mkdir -p /src; \
     tar -xzf /tmp/src.tar.gz -C /src --strip-components=1; \
     cd /src; \
-    for p in /tmp/patches/*.patch; do \
+    for p in "$PATCHES"/*.patch; do \
         echo "== applying $(basename "$p")"; \
         patch -p1 --batch --forward --fuzz=0 < "$p"; \
     done; \
-    rm -rf /tmp/patches /tmp/src.tar.gz
+    rm -rf /tmp/patches-tp2 /tmp/patches-tp4 /tmp/src.tar.gz
 
 # `install` writes the family tools to zig-out/bin and tensorfold-native to
 # zig-out/native/bin.  The DeepSeek TP2/TP4 lane needs all of them.
@@ -90,6 +100,7 @@ RUN set -eux; \
 FROM nvidia/cuda:${CUDA_TAG}
 
 ARG TF_SHA=3ff3b2ac1d71a789cb930068c46d9abed025eefa
+ARG PATCH_SET=tp2
 ARG NCCL_APT_VERSION=2.32.3-1+cuda13.4
 ARG TOKENIZERS_VERSION=0.21.1
 
@@ -133,6 +144,7 @@ LABEL org.opencontainers.image.title="sparkrun-tensorfold-dsv41" \
       org.opencontainers.image.description="TensorFold DeepSeek-V4.1 TP2/TP4 community build for sparkrun" \
       org.opencontainers.image.source="https://github.com/spark-arena/sparkrun" \
       dev.sparkrun.tensorfold.fork="bertholomus/TensorFold@${TF_SHA}" \
+      dev.sparkrun.tensorfold.patchset="${PATCH_SET}" \
       dev.sparkrun.nccl.version="${NCCL_APT_VERSION}"
 
 CMD ["sleep", "infinity"]

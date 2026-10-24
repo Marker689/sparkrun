@@ -75,6 +75,7 @@ _DSV41_OWNED_KEYS = frozenset(
         "rdma_gid_index",
         "nccl_ib_gid_index",
         "cuda_kernels",
+        "served_k",
         "tf_env",
     }
 )
@@ -260,6 +261,9 @@ class TensorFoldDSV41Runtime(TensorFoldRuntime):
             env["TF_DS_2D_GU"] = config.get("tf_2d") or "parity"
             env["TF_DS_WINDOW"] = config.get("window") or 2097152
             env["TF_DS_ROUND_ROWS"] = config.get("round_rows") or 48
+            # The 2D-split reference deployment serves a solo request per rank;
+            # the engine uses this to pick the served lane shape.
+            env["TF_DS_SERVED_K"] = config.get("served_k") or "solo"
         extra = config.get("tf_env")
         if isinstance(extra, dict):
             for key, value in extra.items():

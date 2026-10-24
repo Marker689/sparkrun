@@ -115,6 +115,7 @@ def test_dsv41_tp4_adds_2d_split_env():
     assert "TF_DS_2D_GU=parity" in command
     assert "TF_DS_WINDOW=2097152" in command
     assert "TF_DS_ROUND_ROWS=48" in command
+    assert "TF_DS_SERVED_K=solo" in command
     assert " 2 4 192.168.192.2 29620 " in command
 
 

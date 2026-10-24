@@ -6,7 +6,8 @@
 # tarball and Zig wheel) and takes several minutes; the resulting image is
 # self-contained.
 #
-#   docker/tensorfold-dsv41/build.sh --load
+#   docker/tensorfold-dsv41/build.sh --load              # TP2 lane
+#   docker/tensorfold-dsv41/build.sh --lane tp4 --load    # TP4 lane
 #
 # Publishing is explicit; CI does it from a native arm64 runner (see
 # .github/workflows/tensorfold-dsv41-image.yml).
@@ -19,10 +20,12 @@ set -a; source ./image.env; set +a
 
 MODE=build
 PLATFORM="${PLATFORM:-linux/arm64}"
+LANE=tp2
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --push) MODE=push ;;
         --load) MODE=load ;;
+        --lane) shift; LANE="$1" ;;
         --platform) shift; PLATFORM="$1" ;;
         --help|-h)
             awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"
@@ -33,8 +36,15 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+case "$LANE" in
+    tp2) LANE_SHA="$TF_FORK_SHA"; LANE_TAG="$IMAGE_TAG"; PATCH_SET=tp2 ;;
+    tp4) LANE_SHA="$TF_FORK_SHA_TP4"; LANE_TAG="$IMAGE_TAG_TP4"; PATCH_SET=tp4 ;;
+    *) echo "--lane must be tp2 or tp4" >&2; exit 2 ;;
+esac
+
 ARGS=(buildx build --platform "$PLATFORM"
-    --build-arg "TF_SHA=${TF_FORK_SHA}"
+    --build-arg "TF_SHA=${LANE_SHA}"
+    --build-arg "PATCH_SET=${PATCH_SET}"
     --build-arg "CUDA_DEVEL_TAG=${CUDA_DEVEL_TAG}"
     --build-arg "CUDA_TAG=${CUDA_TAG}"
     --build-arg "NCCL_APT_VERSION=${NCCL_APT_VERSION}"
@@ -42,7 +52,7 @@ ARGS=(buildx build --platform "$PLATFORM"
     --build-arg "TOKENIZERS_VERSION=${TOKENIZERS_VERSION}"
     --build-arg "TARGET_SM=${TARGET_SM}"
     --build-arg "TARGETARCH=${PLATFORM##*/}"
-    -t "${IMAGE_REPO}:${IMAGE_TAG}"
+    -t "${IMAGE_REPO}:${LANE_TAG}"
     .)
 if [ "$MODE" = push ]; then
     ARGS+=(--push)
@@ -50,11 +60,11 @@ else
     ARGS+=(--load)
 fi
 
-echo "==> ${MODE} ${IMAGE_REPO}:${IMAGE_TAG} for ${PLATFORM} (fork ${TF_FORK_SHA:0:7})"
+echo "==> ${MODE} ${IMAGE_REPO}:${LANE_TAG} for ${PLATFORM} lane ${LANE} (fork ${LANE_SHA:0:7}, patches ${PATCH_SET})"
 docker "${ARGS[@]}"
 
 if [ "$MODE" != push ]; then
     echo "==> verify"
-    docker run --rm "${IMAGE_REPO}:${IMAGE_TAG}" bash -lc \
+    docker run --rm "${IMAGE_REPO}:${LANE_TAG}" bash -lc \
         '/opt/tensorfold-dsv41/bin/tensorfold-native --version && test -x /opt/tensorfold-dsv41/bin/tf-dsv41-lanes && echo followers-present'
 fi

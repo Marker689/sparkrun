@@ -20,6 +20,7 @@ DOCKERFILE = REPO_ROOT / "docker" / "tensorfold" / "Dockerfile"
 DSV41_ENV = REPO_ROOT / "docker" / "tensorfold-dsv41" / "image.env"
 DSV41_DOCKERFILE = REPO_ROOT / "docker" / "tensorfold-dsv41" / "Dockerfile"
 DSV41_PATCHES = REPO_ROOT / "docker" / "tensorfold-dsv41" / "patches"
+DSV41_PATCHES_TP4 = REPO_ROOT / "docker" / "tensorfold-dsv41" / "patches-tp4"
 
 needs_repo = pytest.mark.skipif(not IMAGE_ENV.is_file(), reason="requires the repo checkout")
 
@@ -98,9 +99,20 @@ def test_dsv41_dockerfile_pins_fork_and_patches():
     assert "patch -p1" in text
     patches = sorted(path.name for path in DSV41_PATCHES.glob("*.patch"))
     assert len(patches) == 3, "the pinned TP2 build applies three patches; got %r" % patches
+    patches_tp4 = sorted(path.name for path in DSV41_PATCHES_TP4.glob("*.patch"))
+    assert len(patches_tp4) == 4, "the pinned TP4 build applies four patches; got %r" % patches_tp4
 
 
 @needs_repo
 def test_dsv41_bundle_helpers_are_shipped():
     assert (REPO_ROOT / "docker" / "tensorfold-dsv41" / "chat_template.jinja").is_file()
     assert (REPO_ROOT / "scripts" / "tensorfold-dsv41-prepare.sh").is_file()
+
+
+@needs_repo
+def test_dsv41_tp4_image_tag_matches_the_tp4_pin():
+    env = _load_env_from(DSV41_ENV)
+    assert env["IMAGE_TAG_TP4"] == env["TF_FORK_SHA_TP4"][:7]
+    assert env["IMAGE_TAG_TP4"] != env["IMAGE_TAG"]
+    recipe = (REPO_ROOT / "recipes" / "tensorfold-dsv41-flash-tp4.yaml").read_text()
+    assert "container: %s:%s" % (env["IMAGE_REPO"], env["IMAGE_TAG_TP4"]) in recipe
