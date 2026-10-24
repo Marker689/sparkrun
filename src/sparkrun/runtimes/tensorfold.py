@@ -4,52 +4,48 @@ TensorFold (https://github.com/ashhart/TensorFold) is a Zig/CUDA native LLM
 server with an OpenAI-compatible API.  It is distributed as a release archive,
 not as a Python package, and the server itself is ``tensorfold-native serve``.
 
-Two deployment shapes are supported:
+One runtime covers the engine's deployment shapes; the recipe selects the shape
+with ``defaults.tf_family``:
 
-* **Solo** — one GB10 (one GPU per DGX Spark).  The engine reads the checkpoint
-  from the standard HuggingFace cache or from a local directory.  An absolute
-  ``model:`` path (or ``cluster_config.resolved_model_path``) is sparkrun's
-  pre-placed/NFS mode: distribution is skipped and the directory is
+* **Solo** (no family) — one GB10 (one GPU per DGX Spark).  The engine reads the
+  checkpoint from the standard HuggingFace cache or from a local directory.  An
+  absolute ``model:`` path (or ``cluster_config.resolved_model_path``) is
+  sparkrun's pre-placed/NFS mode: distribution is skipped and the directory is
   identity-mounted into the container.
-* **Native multi-node TP** — the engine families that place their own ranks
-  through environment variables.  As of TensorFold 1.1.3 the native CUDA
-  build has no generic ``--tp`` flag; each family wires its own ranks:
-
-  ==============  ======================================  =================
-  family          rank variables                          rendezvous
-  ==============  ======================================  =================
-  ``glm``         ``TF_GLM_RANK`` / ``TF_GLM_WORLD``      ``NCCL_COMM_ID``
-  ``nemotron``    ``TF_NEMOTRON_RANK`` / ``TF_NEMOTRON_WORLD``  ``NCCL_COMM_ID``
-  ==============  ======================================  =================
-
-  Rank 0 serves HTTP; the follower ranks must already be running when rank 0
-  starts, so :meth:`native_start_order` returns ``"workers_first"`` and the
-  orchestrator deliberately skips the head-port gate.
-
-The engine's third TP dialect — the DeepSeek-V4.1 community fork, whose
-followers run a separate ``tf-dsv41-lanes`` binary — is implemented by
-:class:`sparkrun.runtimes.tensorfold_dsv41.TensorFoldDSV41Runtime`, not here.
+* **Native TP2, family ``glm`` / ``nemotron``** — the upstream native CUDA build
+  has no generic ``--tp`` flag; these families place their own ranks through
+  environment variables (``TF_GLM_RANK``/``TF_GLM_WORLD`` and
+  ``TF_NEMOTRON_RANK``/``TF_NEMOTRON_WORLD``, both with ``NCCL_COMM_ID``).
+  Rank 0 serves HTTP and the followers must already be running when rank 0
+  starts, so :meth:`native_start_order` returns ``"workers_first"``.
+* **Native TP2/TP4, family ``dsv41``** — the DeepSeek-V4.1 community fork.  Its
+  followers run a separate ``tf-dsv41-lanes`` binary and the engine reads a
+  prepared per-rank-cache bundle rather than the raw checkpoint.  This is the
+  same runtime, not a second plugin: only the command shape and validation
+  differ, and both are selected by the same family key.
 
 Container image
 ---------------
 The runtime relies on the platform's per-runtime default image (see
-``platforms/dgx_spark.py``).  That image only needs the release archive plus a
-CUDA/NCCL capable base; see ``docker/tensorfold`` and
-``scripts/build-tensorfold-image.sh``.  A recipe may override ``container:`` to
-pin an exact engine version.
+``platforms/dgx_spark.py``) for the upstream build.  That image only needs the
+release archive plus a CUDA/NCCL capable base and is built outside this
+repository, like the other first-party runtime images.  The DeepSeek fork is not
+a first-party image: its recipes name an explicit ``container:`` (the community
+build is compiled outside sparkrun) and validation refuses the lane without one.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, TYPE_CHECKING
 
-from sparkrun.core.validation import RecipeIssue
 from sparkrun.core.readiness import (
     ANTHROPIC_MESSAGES_STREAM,
     OPENAI_CHAT_STREAM,
     OPENAI_RESPONSES_STREAM,
 )
+from sparkrun.core.validation import RecipeIssue
 from sparkrun.runtimes._util import default_env_hf_offline, parse_flag_value_from_command
 from sparkrun.runtimes.base import RuntimePlugin, render_flag_value
 from sparkrun.utils.data import integer_setting
@@ -70,8 +66,23 @@ _TP_FAMILIES: dict[str, tuple[str, str]] = {
     "nemotron": ("TF_NEMOTRON_RANK", "TF_NEMOTRON_WORLD"),
 }
 
+#: The DeepSeek-V4.1 community fork has its own follower binary and bundle
+#: layout.  It is a family of the same runtime, not a separate plugin.
+_DSV41_FAMILY = "dsv41"
+
+#: Every family that implies a multi-rank launch.
+_ALL_FAMILIES = frozenset({*_TP_FAMILIES, _DSV41_FAMILY})
+
 #: Recipe ``defaults`` key naming the engine's rank-placement family.
 _FAMILY_KEY = "tf_family"
+
+#: Supported rank counts for the DeepSeek fork (upstream GLM/Nemotron allow other
+#: worlds but sparkrun qualifies the released ones).
+_DSV41_WORLDS = frozenset({2, 4})
+
+#: Default engine locations inside the community DeepSeek image.
+_DEFAULT_DSV41_COMMAND = "/opt/tensorfold-dsv41/bin/tensorfold-native"
+_DEFAULT_DSV41_FOLLOWER = "/opt/tensorfold-dsv41/bin/tf-dsv41-lanes"
 
 #: Recipe config key -> TensorFold serve flag.  Kept deliberately close to the
 #: verified ``serve --help`` surface; exotic flags belong in a recipe's
@@ -123,13 +134,43 @@ _TENSORFOLD_OWNED_KEYS = frozenset(
     }
 )
 
-#: Runtime configuration keys consumed from the structured path (and therefore
-#: not "dropped" when reporting unmapped defaults).
+#: DeepSeek-fork config keys (bundle layout, rank caches, fabric, TP4 2D split).
+_DSV41_OWNED_KEYS = frozenset(
+    {
+        "follower_binary",
+        "streams",
+        "pool",
+        "round_rows",
+        "window",
+        "tf_2d",
+        "rdma_hca",
+        "net_if",
+        "rdma_gid_index",
+        "nccl_ib_gid_index",
+        "cuda_kernels",
+        "served_k",
+        "tf_env",
+    }
+)
+
+#: Config keys that are emitted as inline environment assignments, with one
+#: env-var name each.  Values are quoted when substituted.  The fork's TP2 and
+#: TP4 branches spell the GID knob differently (TF_RDMA_GID_INDEX vs TF_RDMA_GID);
+#: the TP4 branch's spelling is supplied through ``tf_env`` in the recipe.
+_DSV41_ENV_KEYS: dict[str, str] = {
+    "rdma_hca": "TF_RDMA_DEVICES",
+    "net_if": "NCCL_SOCKET_IFNAME",
+    "rdma_gid_index": "TF_RDMA_GID_INDEX",
+    "nccl_ib_gid_index": "NCCL_IB_GID_INDEX",
+}
+
+#: Config keys consumed from the structured path (and therefore not "dropped"
+#: when reporting unmapped defaults).
 _SKIP_KEYS = frozenset({"host", "port", "served_model_name", "api_key", "command_binary", _FAMILY_KEY})
 
 
 class TensorFoldRuntime(RuntimePlugin):
-    """TensorFold Zig/CUDA server, solo or native multi-node TP."""
+    """TensorFold Zig/CUDA server: solo, native TP2, and the DeepSeek fork."""
 
     runtime_name = "tensorfold"
     default_image_prefix = "ghcr.io/spark-arena/tensorfold"
@@ -163,7 +204,7 @@ class TensorFoldRuntime(RuntimePlugin):
     # --- config surface -----------------------------------------------------
 
     def known_config_keys(self) -> frozenset[str]:
-        return frozenset(_TENSORFOLD_FLAG_MAP) | _TENSORFOLD_OWNED_KEYS
+        return frozenset(_TENSORFOLD_FLAG_MAP) | _TENSORFOLD_OWNED_KEYS | _DSV41_OWNED_KEYS
 
     def serve_flag_map(self):
         return _TENSORFOLD_FLAG_MAP
@@ -184,10 +225,10 @@ class TensorFoldRuntime(RuntimePlugin):
         if value is None:
             return None
         if not isinstance(value, str):
-            raise ValueError("%s must be a string (glm or nemotron)" % _FAMILY_KEY)
+            raise ValueError("%s must be a string (glm, nemotron or dsv41)" % _FAMILY_KEY)
         family = value.strip().lower()
-        if family not in _TP_FAMILIES:
-            raise ValueError("%s must be one of %s, not %r" % (_FAMILY_KEY, ", ".join(sorted(_TP_FAMILIES)), value))
+        if family not in _ALL_FAMILIES:
+            raise ValueError("%s must be one of %s, not %r" % (_FAMILY_KEY, ", ".join(sorted(_ALL_FAMILIES)), value))
         return family
 
     @staticmethod
@@ -217,6 +258,15 @@ class TensorFoldRuntime(RuntimePlugin):
     def _requires_tp(self, config) -> bool:
         return self._tensor_parallel(config) > 1
 
+    @staticmethod
+    def _is_dsv41(config) -> bool:
+        return TensorFoldRuntime._family(config) == _DSV41_FAMILY
+
+    @staticmethod
+    def _is_prepared_bundle(recipe: "Recipe") -> bool:
+        bundle = getattr(getattr(recipe, "cluster_config", None), "resolved_model_path", None) or recipe.model
+        return isinstance(bundle, str) and os.path.isabs(bundle)
+
     # --- placement / orchestration -----------------------------------------
 
     def world_size(
@@ -228,13 +278,12 @@ class TensorFoldRuntime(RuntimePlugin):
     ) -> int:
         """Ranks this launch needs.
 
-        With a TP family the world is ``tensor_parallel`` (one GPU per Spark,
-        so one host per rank).  Without one TensorFold is a single-node engine;
-        ``prepare``/``validate_recipe`` refuse a multi-rank request rather than
-        silently honouring a ``--tp`` the engine cannot use.
+        Every multi-rank family maps one rank to one host (one GPU per Spark).
+        Without a family TensorFold is a single-node engine; ``prepare`` and
+        ``validate_recipe`` refuse a multi-rank request the engine cannot use.
         """
         config = self._config(recipe, {})
-        if self._family(config) is not None and self._requires_tp(config):
+        if self._family(config) in _ALL_FAMILIES and self._requires_tp(config):
             return max(1, parallelism.tensor_parallel)
         return 1
 
@@ -243,14 +292,14 @@ class TensorFoldRuntime(RuntimePlugin):
         if recipe is None:
             return "head_first"
         config = self._config(recipe, overrides)
-        if self._requires_tp(config) and self._family(config):
+        if self._family(config) in _ALL_FAMILIES and self._requires_tp(config):
             return "workers_first"
         return "head_first"
 
     def native_rendezvous_port(
         self, recipe: "Recipe | None", overrides: dict[str, Any] | None = None, *, num_nodes: int = 1, init_port: int = 25000
     ) -> int | None:
-        """The port carried in ``NCCL_COMM_ID`` (and, for some families, port+1)."""
+        """The port carried in ``NCCL_COMM_ID``/``TF_TP_PORT`` (some families use +1)."""
         return init_port
 
     def native_rendezvous_port_span(self, recipe: "Recipe | None" = None, overrides: dict[str, Any] | None = None) -> int:
@@ -258,9 +307,9 @@ class TensorFoldRuntime(RuntimePlugin):
         if recipe is None:
             return 1
         config = self._config(recipe, overrides)
-        return 2 if (self._requires_tp(config) and self._family(config)) else 1
+        return 2 if (self._family(config) in _ALL_FAMILIES and self._requires_tp(config)) else 1
 
-    # --- command construction ----------------------------------------------
+    # --- upstream command construction -------------------------------------
 
     def _build_command(
         self,
@@ -270,7 +319,7 @@ class TensorFoldRuntime(RuntimePlugin):
         bind: bool,
         skip_keys: set[str] | frozenset[str] = frozenset(),
     ) -> str:
-        """Build one TensorFold serve command.
+        """Build one upstream TensorFold serve command.
 
         *bind* is true only for the serving rank: it emits the host/port/name/
         api-key flags that make the rank reachable.  Follower ranks run the same
@@ -305,6 +354,134 @@ class TensorFoldRuntime(RuntimePlugin):
         )
         return " ".join(parts)
 
+    # --- DeepSeek fork bundle/command helpers ------------------------------
+
+    @staticmethod
+    def _bundle(recipe: "Recipe", config) -> str:
+        """Absolute prepared-bundle root (the recipe's pre-placed ``model:``)."""
+        bundle = config.get("_prepared_model_path") or config.get("resolved_model_path") or recipe.model
+        if not bundle:
+            raise ValueError("the dsv41 family needs a prepared bundle path in model:")
+        return str(bundle).rstrip("/")
+
+    @staticmethod
+    def _bundle_path(bundle: str, config, key: str, default: str) -> str:
+        value = config.get(key)
+        return str(value) if value not in (None, "") else "%s/%s" % (bundle, default)
+
+    @staticmethod
+    def _env_assignment(name: str, value: object) -> str:
+        return "%s=%s" % (name, quote(str(value)))
+
+    def _dsv41_common_flags(self, config, skip_keys: set[str] | frozenset[str]) -> list[str]:
+        skip = set(_SKIP_KEYS) | set(skip_keys)
+        return self.build_flags_from_map(
+            config,
+            _TENSORFOLD_FLAG_MAP,
+            bool_keys=_TENSORFOLD_BOOL_FLAGS,
+            skip_keys=skip,
+            negatable_keys=_TENSORFOLD_NEGATABLE_FLAGS,
+        )
+
+    def _dsv41_rank0_command(self, config, bundle: str) -> str:
+        binary = config.get("command_binary")
+        binary = _DEFAULT_DSV41_COMMAND if binary is None else str(binary)
+        parts = ([binary] if binary else []) + ["serve", quote("%s/model" % bundle)]
+        host = config.get("host") or "0.0.0.0"
+        port = config.get("port") or 8000
+        parts.extend(["--host", render_flag_value(host), "--port", render_flag_value(port)])
+        served_name = config.get("served_model_name")
+        if served_name is not None:
+            parts.extend(["--name", render_flag_value(served_name)])
+        api_key = config.get("api_key")
+        if api_key not in (None, ""):
+            parts.extend(["--api-key", render_flag_value(api_key)])
+        parts.append("--no-update-check")
+        parts.extend(["--backend", "cuda"])
+        parts.extend(self._dsv41_common_flags(config, frozenset()))
+        return " ".join(parts)
+
+    def _dsv41_follower_command(self, config, bundle: str, world: int, rank: int, head_ip: str, init_port: int) -> str:
+        binary = config.get("follower_binary")
+        binary = _DEFAULT_DSV41_FOLLOWER if binary is None else str(binary)
+        cache = self._bundle_path(bundle, config, "cache_dir", "cache/rank-cache")
+        kit = self._bundle_path(bundle, config, "kit_dir", "kit")
+        engram = self._bundle_path(bundle, config, "engram_dir", "engram")
+        token_map = self._bundle_path(bundle, config, "token_map", "cache/dsv41_token_map.json")
+        streams = config.get("streams") or config.get("max_num_seqs") or 4
+        pool = config.get("pool") or config.get("max_model_len") or 1048576
+        rdma = config.get("rdma_hca") or ""
+        parts = [
+            binary,
+            quote("%s/model" % bundle),
+            quote(cache),
+            str(rank),
+            str(world),
+            quote(head_ip),
+            str(init_port),
+            quote(kit),
+            "--engram",
+            quote(engram),
+            "--token-map",
+            quote(token_map),
+            "--pool",
+            render_flag_value(pool),
+            "--graphs",
+            "1",
+            "--side",
+            "1",
+            "--prefetch",
+            "1",
+            "--aio",
+            "1",
+            "--streams",
+            render_flag_value(streams),
+        ]
+        if rdma:
+            parts.extend(["--rdma", quote(str(rdma))])
+        return " ".join(parts)
+
+    def _dsv41_rank_env(self, config, bundle: str, world: int, rank: int, head_ip: str, init_port: int) -> list[str]:
+        cache = self._bundle_path(bundle, config, "cache_dir", "cache/rank-cache")
+        kit = self._bundle_path(bundle, config, "kit_dir", "kit")
+        engram = self._bundle_path(bundle, config, "engram_dir", "engram")
+        token_map = self._bundle_path(bundle, config, "token_map", "cache/dsv41_token_map.json")
+        kernels = config.get("cuda_kernels") or "%s/aot" % kit
+        env: dict[str, object] = {
+            "TF_TP_RANK": rank,
+            "TF_TP_WORLD": world,
+            "TF_TP_MASTER": head_ip,
+            "TF_TP_PORT": init_port,
+            "TF_DS_RANK_CACHE": cache,
+            "TF_DS_KIT": kit,
+            "TF_DS_ENGRAM": engram,
+            "TF_DS_TOKEN_MAP": token_map,
+            "TENSORFOLD_CUDA_KERNELS": kernels,
+            "TF_DS_GRAPHS": 1,
+            "TF_DS_HC_SIDE": 1,
+            "TF_DS_L2_PREFETCH": 1,
+            "TF_DS_ENGRAM_AIO": 1,
+            "TF_DS_STREAMS": config.get("streams") or config.get("max_num_seqs") or 4,
+        }
+        for key, env_name in _DSV41_ENV_KEYS.items():
+            value = config.get(key)
+            if value not in (None, ""):
+                env[env_name] = value
+        if world == 4:
+            env["TF_DS_2D_GU"] = config.get("tf_2d") or "parity"
+            env["TF_DS_WINDOW"] = config.get("window") or 2097152
+            env["TF_DS_ROUND_ROWS"] = config.get("round_rows") or 48
+            # The 2D-split reference deployment serves a solo request per rank.
+            env["TF_DS_SERVED_K"] = config.get("served_k") or "solo"
+        extra = config.get("tf_env")
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if isinstance(key, str) and value is not None:
+                    env[key] = value
+        return [self._env_assignment(name, value) for name, value in env.items()]
+
+    # --- command generation ------------------------------------------------
+
     def generate_command(
         self,
         recipe: "Recipe",
@@ -314,8 +491,13 @@ class TensorFoldRuntime(RuntimePlugin):
         head_ip: str | None = None,
         skip_keys: set[str] | frozenset[str] = frozenset(),
     ) -> str:
-        """Generate the solo serve command (rank 0 shape)."""
+        """Generate the solo serve command (upstream shape only)."""
         config = self._config(recipe, overrides)
+        if self._is_dsv41(config):
+            raise ValueError(
+                "the dsv41 TensorFold family is multi-node only: use --tp 2 or --tp 4 with a prepared bundle "
+                "(single-rank DeepSeek-V4.1 has no qualified serving path in this lane)"
+            )
         rendered = recipe.render_command(config)
         if rendered:
             rendered = self._augment_served_model_name(rendered, config, "--name", skip_keys)
@@ -336,17 +518,27 @@ class TensorFoldRuntime(RuntimePlugin):
         hosts: list[str] | None = None,
         placement=None,
     ) -> str:
-        """Generate the per-rank command for the family's native TP launch."""
+        """Generate the per-rank command for the selected family."""
         config = self._config(recipe, overrides)
         family = self._family(config)
         if family is None:
             raise ValueError(
-                "TensorFold multi-node launch needs defaults.tf_family (glm or nemotron); "
+                "TensorFold multi-node launch needs defaults.tf_family (glm, nemotron or dsv41); "
                 "the native CUDA engine has no generic tensor-parallel flag"
             )
+        if family == _DSV41_FAMILY:
+            if num_nodes not in _DSV41_WORLDS:
+                raise ValueError("the dsv41 family supports tp=2 or tp=4 (got %d nodes)" % num_nodes)
+            bundle = self._bundle(recipe, config)
+            env = self._dsv41_rank_env(config, bundle, num_nodes, node_rank, head_ip, init_port)
+            command = (
+                self._dsv41_rank0_command(config, bundle)
+                if node_rank == 0
+                else self._dsv41_follower_command(config, bundle, num_nodes, node_rank, head_ip, init_port)
+            )
+            return " ".join(env + [command])
+
         rank_env, world_env = _TP_FAMILIES[family]
-        # Serving rank only: full bind flags.  Followers: same engine command,
-        # no HTTP listener.  Both get the common serve flags.
         command = self._build_command(recipe, config, bind=node_rank == 0, skip_keys=skip_keys)
         env_prefix = " ".join(
             [
@@ -360,8 +552,13 @@ class TensorFoldRuntime(RuntimePlugin):
     # --- validation ---------------------------------------------------------
 
     def validate_recipe(self, recipe: "Recipe") -> list[str | RecipeIssue]:
-        issues = super().validate_recipe(recipe)
         config = self._config(recipe, {})
+        if self._is_dsv41(config):
+            return self._validate_dsv41(recipe, config)
+        return self._validate_upstream(recipe, config)
+
+    def _validate_upstream(self, recipe: "Recipe", config) -> list[str | RecipeIssue]:
+        issues: list[str | RecipeIssue] = list(RuntimePlugin.validate_recipe(self, recipe))
         dims = self._parallelism_dimensions(config)
         tp = dims["tensor_parallel"]
         family = self._family(config)
@@ -374,7 +571,7 @@ class TensorFoldRuntime(RuntimePlugin):
             if family is None:
                 issues.append(
                     self.recipe_error(
-                        "multi-node TP needs defaults.tf_family (glm or nemotron); the native CUDA engine has no generic --tp flag"
+                        "multi-node TP needs defaults.tf_family (glm, nemotron or dsv41); the native CUDA engine has no generic --tp flag"
                     )
                 )
             if family == "glm" and tp > 16:
@@ -398,6 +595,41 @@ class TensorFoldRuntime(RuntimePlugin):
 
         return issues
 
+    def _validate_dsv41(self, recipe: "Recipe", config) -> list[str | RecipeIssue]:
+        issues: list[str | RecipeIssue] = list(RuntimePlugin.validate_recipe(self, recipe))
+        dims = self._parallelism_dimensions(config)
+        tp = dims["tensor_parallel"]
+        for key in ("pipeline_parallel", "data_parallel", "expert_parallel"):
+            if dims[key] > 1:
+                issues.append(self.recipe_error("%s is not supported by the dsv41 family" % key))
+        if tp not in _DSV41_WORLDS:
+            issues.append(
+                self.recipe_error(
+                    "the dsv41 family is TP2/TP4 only: set defaults.tensor_parallel to 2 or 4 "
+                    "(single-rank DeepSeek-V4.1 is not a qualified TensorFold path)"
+                )
+            )
+        if not self._is_prepared_bundle(recipe):
+            issues.append(
+                self.recipe_error(
+                    "the dsv41 family needs a prepared bundle directory as an absolute model: path "
+                    "(or cluster_config.resolved_model_path); see docs/TENSORFOLD.md"
+                )
+            )
+        if recipe.command:
+            issues.append(
+                self.recipe_error(
+                    "a command: template is not supported for the dsv41 family: rank 0 and the tf-dsv41-lanes followers take different argv"
+                )
+            )
+        if not (recipe.container or recipe.containers):
+            issues.append(
+                self.recipe_error("the dsv41 family needs an explicit container: image; the community fork image is built outside sparkrun")
+            )
+        if recipe.min_nodes and recipe.min_nodes > tp:
+            issues.append(self.recipe_error("min_nodes=%d exceeds tensor_parallel=%d" % (recipe.min_nodes, tp)))
+        return issues
+
     def prepare(
         self,
         recipe: "Recipe",
@@ -407,21 +639,31 @@ class TensorFoldRuntime(RuntimePlugin):
         transfer_mode: str = "auto",
         overrides: dict[str, Any] | None = None,
     ) -> None:
-        """Refuse a CLI-only multi-node request that the engine cannot serve.
-
-        ``validate_recipe`` sees recipe defaults only, so ``--tp 2`` without a
-        TP family in the recipe would otherwise reach the scheduler and be
-        discovered after distribution.  This is the same check on the effective
-        config chain, before any asset movement.
-        """
+        """Refuse a launch the selected family cannot serve, before assets move."""
         chain = self._config(recipe, overrides)
         dims = self._parallelism_dimensions(chain)
+        family = self._family(chain)
         for key in ("pipeline_parallel", "data_parallel", "expert_parallel"):
             if dims[key] > 1:
                 raise RuntimeError("TensorFold does not support %s" % key)
-        if dims["tensor_parallel"] > 1 and self._family(chain) is None:
+        if family == _DSV41_FAMILY:
+            if dims["tensor_parallel"] not in _DSV41_WORLDS:
+                raise RuntimeError(
+                    "the dsv41 family is TP2/TP4 only (got tensor_parallel=%d); single-rank DeepSeek-V4.1 is not qualified"
+                    % dims["tensor_parallel"]
+                )
+            if not self._is_prepared_bundle(recipe):
+                raise RuntimeError("the dsv41 family needs an absolute prepared-bundle model: path (or cluster_config.resolved_model_path)")
+            if not (recipe.container or recipe.containers):
+                raise RuntimeError("the dsv41 family needs an explicit container: image (built outside sparkrun)")
+            if len(hosts) != dims["tensor_parallel"]:
+                raise RuntimeError(
+                    "the dsv41 family needs exactly tensor_parallel hosts (got %d hosts for tp=%d)" % (len(hosts), dims["tensor_parallel"])
+                )
+            return
+        if dims["tensor_parallel"] > 1 and family is None:
             raise RuntimeError(
-                "TensorFold multi-node TP needs tf_family (glm or nemotron); set it in the recipe defaults or run solo with --tp 1"
+                "TensorFold multi-node TP needs tf_family (glm, nemotron or dsv41); set it in the recipe defaults or run solo with --tp 1"
             )
         if dims["tensor_parallel"] > 1 and recipe.command:
             raise RuntimeError("TensorFold multi-node TP does not support a recipe command: template")
@@ -439,10 +681,12 @@ class TensorFoldRuntime(RuntimePlugin):
 
     def version_commands(self) -> dict[str, str]:
         commands = super().version_commands()
-        # The image is deliberately Python-free; base Python probes will print
+        # The images are deliberately Python-free; base Python probes will print
         # "unknown" and that is fine.  The engine version is what matters.
         commands["tensorfold"] = "tensorfold-native --version 2>/dev/null | head -1 || echo unknown"
         commands["nccl_lib"] = "ldconfig -p 2>/dev/null | grep -m1 'libnccl\\.so\\.2' | awk '{print $NF}' || echo unknown"
+        commands["tensorfold_dsv41"] = "/opt/tensorfold-dsv41/bin/tensorfold-native --version 2>/dev/null | head -1 || echo unknown"
+        commands["tensorfold_dsv41_lanes"] = "test -x /opt/tensorfold-dsv41/bin/tf-dsv41-lanes && echo present || echo missing"
         return commands
 
     # --- cluster lifecycle --------------------------------------------------
@@ -482,7 +726,7 @@ class TensorFoldRuntime(RuntimePlugin):
             init_port=init_port,
             skip_keys=skip_keys,
             banner_title="TensorFold Cluster Launcher",
-            port_label="NCCL Comm Port",
+            port_label="NCCL/TP Port",
             node_label="TensorFold rank",
             **kwargs,
         )

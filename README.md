@@ -86,8 +86,7 @@ sparkrun update --yolo     # alias for --alpha
 
 - **Multi-runtime** — vLLM, SGLang, llama.cpp, TensorFold and more out of the box
 - **Multi-node tensor parallelism** — `--tp 2` = 2 hosts, automatic InfiniBand/RDMA detection
-- **TensorFold** — native Zig/CUDA engine with OpenAI/Anthropic APIs; solo, NFS weights, and native TP2 for the engine's family-specific rank modes (`docs/TENSORFOLD.md`)
-- **DeepSeek-V4.1** — experimental TP2/TP4 via the community TensorFold fork, with a prepared per-rank-cache bundle and the repository's reference tuning
+- **TensorFold** — native Zig/CUDA engine with OpenAI/Anthropic APIs; solo, NFS weights, and native TP2 for the engine's family-specific rank modes, plus an experimental DeepSeek-V4.1 TP2/TP4 family (`docs/TENSORFOLD.md`)
 - **VRAM estimation** — know if your model fits before you launch (`sparkrun show <recipe>`)
 - **Git-based recipe registries** — we publish official recipes, community recipes, and benchmarked recipes via [Spark Arena](https://spark-arena.com), plus you can add your own registries.
 - **Guided setup wizard** — cluster creation, SSH mesh, CX7 auto-detection, sudoers, earlyoom

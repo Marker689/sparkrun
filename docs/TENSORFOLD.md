@@ -1,57 +1,40 @@
 # TensorFold
 
 TensorFold ([ashhart/TensorFold](https://github.com/ashhart/TensorFold)) is a
-Zig/CUDA native LLM server with an OpenAI-compatible API.  Sparkrun ships two
-runtimes for it:
+Zig/CUDA native LLM server with an OpenAI-compatible API.  One sparkrun runtime
+covers the engine's deployment shapes; the recipe selects the shape with
+`defaults.tf_family`:
 
-| runtime | engine | shapes | status |
-|---|---|---|---|
-| `tensorfold` | upstream release, pinned by the image | solo (one Spark); native TP2 for GLM-5.3-Flash and Nemotron 3.5 Super VL | primary path |
-| `tensorfold-dsv41` | community fork `bertholomus/TensorFold` + the tonyd2wild TP2/TP4 patches | TP2 / TP4 across 2 or 4 Sparks | **experimental** |
+| `tf_family` | shape | engine |
+|---|---|---|
+| absent | solo on one GB10 | upstream TensorFold release |
+| `glm` | native TP2 | upstream TensorFold release (GLM-5.3-Flash) |
+| `nemotron` | native TP2 | upstream TensorFold release (Nemotron 3.5 Super VL) |
+| `dsv41` | native TP2/TP4 | community DeepSeek-V4.1 fork, prepared bundle |
 
-Both are gated to `gb10` hosts (`requires_capability`).  TensorFold's released
-CUDA fatbins target sm_80/86/120/121, but only the GB10 (sm_121) path is
-qualified by sparkrun today; another accelerator needs its own image and
-qualification.
+The runtime is gated to `gb10` hosts (`requires_capability`).  TensorFold's
+released CUDA fatbins target sm_80/86/120/121, but only the GB10 (sm_121) path
+is qualified by sparkrun today.
 
-## Why an image
+## Container images are built outside sparkrun
 
-Upstream publishes release archives, not containers.  The sparkrun image wraps
-the pinned archive and adds the libraries the engine may `dlopen`:
+Like the other first-party runtime images, the upstream TensorFold image is not
+defined in this repository.  It only needs the pinned release archive plus a
+CUDA/NCCL-capable base:
 
-- **NCCL ≥ 2.30** — native tensor-parallel ranks.  The engine refuses older
-  NCCL; the CUDA runtime base holds 2.28, so the image raises it explicitly.
-- **libibverbs / verbs providers** — RoCE/RDMA gathers between Sparks.
-- cuBLASLt from the CUDA runtime base — `--vision` and some projection paths.
+- glibc ≥ 2.28 and a driver providing `libcuda.so.1`;
+- **NCCL ≥ 2.30** when native ranks are used (TensorFold refuses older NCCL);
+- libibverbs/verbs providers for RoCE, and cuBLASLt for `--vision`/projections.
 
-The DeepSeek image additionally compiles the fork from source (Zig 0.17.0) and
-installs a small Python venv only for the rank-cache preparation helper.  The
-serving process itself uses no Python.
+The DGX Spark platform default names the upstream image tag; recipes may
+override `container:` to pin an exact engine version or a locally built image.
 
-Build the image on a Spark (arm64) and tag it with the platform default so no
-registry is needed.  The control machine can be a Spark or a separate arm64
-machine; sparkrun uses a locally present image without contacting a registry
-and then distributes it to the cluster hosts (`docker save | ssh docker load`):
-
-```sh
-docker/tensorfold/build.sh --load
-# = ghcr.io/spark-arena/tensorfold:1.1.3
-
-docker/tensorfold-dsv41/build.sh --load              # TP2 lane
-# = ghcr.io/spark-arena/tensorfold-dsv41:3ff3b2a
-docker/tensorfold-dsv41/build.sh --lane tp4 --load    # TP4 lane
-# = ghcr.io/spark-arena/tensorfold-dsv41:5940208
-```
-
-`image.env` in each directory is the one pinned source of truth; the drift
-guards in `tests/test_tensorfold_image.py` keep the platform defaults in step.
+The DeepSeek-V4.1 fork is **not** a first-party image: its recipes must name an
+explicit `container:` built outside sparkrun (the fork's serving and follower
+binaries, its three/four patch set and the tokenizers helper for bundle
+preparation).  Validation refuses a `dsv41` launch without an explicit image.
 
 ## Solo: one Spark
-
-```sh
-sparkrun run recipes/tensorfold-qwen3.8-27b.yaml --hosts spark-a
-sparkrun run recipes/tensorfold-nemotron-3.5-lightning.yaml --hosts spark-a
-```
 
 The runtime emits, inside the container:
 
@@ -67,8 +50,7 @@ graceful drain (`TF_DRAIN_S`, 20 s by default), which is what `sparkrun stop`
 uses.
 
 Served APIs: Chat/Completions, Responses and Anthropic Messages.  The runtime
-declares all three to the proxy/readiness layers and uses the engine's
-`/health` endpoint.
+declares all three to the proxy/readiness layers and uses `/health`.
 
 ### Common `defaults:` keys
 
@@ -115,9 +97,8 @@ template also resolves to that path.  Two consequences:
 - **Trust matters.** An absolute `model:` (or `cluster_config`) is a
   trusted-recipe feature: a local recipe or `--trust` is required.  A registry
   recipe cannot carry an NFS path that sparkrun will silently honour.
-- The path must be the **complete checkpoint directory** (HF snapshot layout or
-  the engine's expected model directory), not a partial copy.  For TensorFold's
-  per-rank DeepSeek lane the bundle layout is below.
+- The path must be the complete checkpoint directory (HF snapshot layout or the
+  engine's expected model directory), not a partial copy.
 
 A shared Hugging Face cache on NFS is the other supported shape: set the
 cluster's `cache_dir` to the shared mount and disable distribution
@@ -126,75 +107,64 @@ reads the mounted cache (`HF_HOME`/`HF_HUB_CACHE` are set by the runtime).
 Prefer the absolute-path form for TensorFold: it survives SHA-pinned downloads
 that leave no `refs/` entry in the cache.
 
-## TP2: GLM-5.3-Flash and Nemotron 3.5 Super VL
+## Native TP: family-specific rank placement
 
-TensorFold's native CUDA build has **no generic `--tp` flag**.  Each engine
-family places its own ranks through environment variables, only rank 0 serves
-HTTP, and the follower ranks must already be running when rank 0 starts:
+TensorFold's native CUDA build has **no generic `--tp` flag** (upstream
+`docs/multi-rank-receipts.md`).  Each family places its own ranks through
+environment variables, only rank 0 serves HTTP, and the followers must already
+be running when rank 0 starts:
 
-| family | rank/world variables | extra | qualified |
+| `tf_family` | rank/world variables | extra | qualified |
 |---|---|---|---|
-| `glm` | `TF_GLM_RANK` / `TF_GLM_WORLD` | `NCCL_COMM_ID=<head_ip>:<port>` | 2 ranks (EXL3/TR3); NVFP4 contributed |
+| `glm` | `TF_GLM_RANK` / `TF_GLM_WORLD` | `NCCL_COMM_ID` | 2 ranks (EXL3/TR3); NVFP4 contributed |
 | `nemotron` | `TF_NEMOTRON_RANK` / `TF_NEMOTRON_WORLD` | `NCCL_COMM_ID`, NCCL ≥ 2.30 | 2 ranks for Super VL 120B |
+| `dsv41` | `TF_TP_RANK` / `TF_TP_WORLD` + follower binary | `TF_TP_MASTER/PORT`, bundle env | 2 or 4 ranks in the reference deployment |
 
-Set the family in `defaults:` and let `--tp` place the hosts:
+Set the family in `defaults:` and let `--tp` place the hosts (`tensor_parallel`
+is the node count; one GPU per Spark):
 
 ```yaml
-runtime: tensorfold
 defaults:
   tensor_parallel: 2
-  tf_family: glm          # or nemotron
+  tf_family: glm          # or nemotron / dsv41
 min_nodes: 2
 max_nodes: 2
 ```
 
-Then `sparkrun run recipes/tensorfold-glm-5.3-flash-tp2.yaml --tp 2` (or just
-the recipe, which declares it) starts rank 1 first, then rank 0; the head-port
-gate is skipped because the engine owns the join, and the launcher watches the
-serve endpoint afterwards.  The runtime reserves a contiguous
-`NCCL_COMM_ID` port pair (`port` and `port + 1` — some families use the second
-for their follower control channel).
+The orchestrator starts the follower ranks first, then rank 0, and skips the
+head-port gate because the engine owns the join; the launcher's endpoint watcher
+still owns readiness.  The runtime reserves a contiguous rendezvous port pair
+(`port` and `port + 1` — some families use the second for their follower control
+channel).
 
 Recipe defaults are passed to both ranks; only rank 0 gets
-`--host/--port/--name/--api-key`.  A recipe `command:` template is refused for
-TP because it cannot emit different argv for the serving and follower ranks.
+`--host/--port/--name/--api-key`.  A recipe `command:` template is refused for TP
+because it cannot emit different argv for the serving and follower ranks.
 
-### Limits to know before planning a deployment
+### Limits
 
-- **Two ranks only are release-qualified.**  GLM's engine accepts a world up to
-  16, and a three-node NVFP4 run is reported, but sparkrun treats >2 as
-  experimental and surfaces a warning.  Nemotron's world must divide the expert
-  shares.
-- **TP is not a speed multiplier yet.**  On two GB10s, upstream issue #981
-  reports TP=2 serial decode roughly equal to TP=1; the reason to run TP is
-  capacity (a larger model, more headroom), not throughput.  DeepSeek EXL3
-  packs are the exception where the fork shows a real gain.
-- Both ranks verify the checkpoint (layout and content hashes) before serving.
-  They must see the same checkpoint; a shared NFS mount is the simplest way to
-  guarantee that.
-- The container needs the fabric: sparkrun's Docker executor already uses host
+- Upstream qualifies two ranks; GLM's engine accepts up to 16 and Nemotron's
+  world must divide the expert shares, but sparkrun treats >2 as experimental.
+- TP is not a speed multiplier yet on two GB10s (upstream issue #981); the
+  reason to run it is capacity.
+- Both ranks verify the checkpoint before serving; a shared NFS mount is the
+  simplest way to guarantee they see the same one.
+- The container needs the fabric: the Docker executor already uses host
   networking, privileged mode and the optional `/dev/infiniband` device; the
   runtime adds `IPC_LOCK` and unlimited memlock.  Set `NCCL_IB_GID_INDEX` etc.
-  through cluster/recipe `env` for your fabric; `rdma` environment from the
-  normal IB detection also flows through.
+  through cluster/recipe `env` for your fabric.
 
-## `tensorfold-dsv41`: DeepSeek-V4.1 TP2/TP4 (experimental)
+## `tf_family: dsv41` — DeepSeek-V4.1 TP2/TP4 (experimental)
 
-The released TensorFold binary does **not** serve DeepSeek-V4.1.  This runtime
-wraps the community fork that does, and is deliberately a separate runtime.
-The image is built per lane: TP2 from `deepseek-v41-zig` @ `3ff3b2a` with three
-patches, TP4 from `deepseek-v41-zig-tp4` @ `5940208` with four patches (the TP4
-recipe names its container explicitly because the platform default is the TP2
-image):
-
-- rank 0 runs `tensorfold-native serve` with `TF_TP_*`;
-- followers run a different binary, `tf-dsv41-lanes`, with positional argv;
-- the engine reads a **prepared bundle**, not the raw checkpoint: per-rank
-  weight caches, a kernel kit and the Engram tables.
+The released TensorFold binary does not serve DeepSeek-V4.1 (upstream PR #827),
+so this family targets a community fork.  Rank 0 runs `tensorfold-native serve`
+with `TF_TP_*`; the followers run the different `tf-dsv41-lanes` binary, and the
+engine reads a **prepared bundle**, not the raw checkpoint.
 
 ### Bundle layout
 
-`model:` is the absolute bundle root, identical on every node:
+`model:` is the absolute bundle root, identical on every node (NFS or pre-placed
+local mounts):
 
 ```text
 <bundle>/model/                 config/tokenizer/index/encoding/, vision shards, chat_template.jinja
@@ -204,27 +174,17 @@ image):
 <bundle>/engram/                shards 47 and 48 of the base checkpoint
 ```
 
-### Prepare once
+The fork's `tf-dsv41-rank-cache`/`node_inputs.sh` tool writes the per-rank
+caches from the EXL3 pack (CPU only, about six minutes per rank); the kit comes
+from the reference recipe, and the Engram tables are the base checkpoint's
+shards 47/48.  A TP2 pair needs ~2×106 GB of rank caches; TP4 uses ~4×69 GB;
+Engram is ~203 GB and is latency-sensitive, so the reference deployment keeps a
+local per-node copy and overrides `engram_dir`.  These assets are prepared once,
+outside sparkrun; the runtime only mounts and serves them.
 
-```sh
-scripts/tensorfold-dsv41-prepare.sh \
-    --pack   /mnt/models/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw \
-    --bundle /mnt/nfs/sparkrun/tensorfold-dsv41-flash-tp2 \
-    --world  2 \
-    --kit    /opt/tensorfold-recipes/kit-v0.6.1 \
-    --engram-source /mnt/models/DeepSeek-V4.1-Flash-1017
-```
-
-The script assembles the model directory, copies the kit and Engram shards, and
-runs the CPU-only rank-cache writer in the image (about six minutes per rank).
-Plan for ~2×106 GB of rank caches on TP2 / ~4×69 GB on TP4, plus ~203 GB of
-Engram, and a 196–240 GB pack as input.  On a shared NFS bundle every node sees
-the caches; Engram is latency-sensitive, so copy `<bundle>/engram` to local NVMe
-per worker and set `defaults.engram_dir` to that local path.
-
-The bundle path is an absolute `model:` and therefore needs a trusted recipe
-(local or `--trust`).  Edit the model path and `rdma_hca`/`net_if` in
-`recipes/tensorfold-dsv41-flash-tp2.yaml` or `...-tp4.yaml` before running.
+`model:` is an absolute path, so the recipe must be trusted (local or
+`--trust`), and the family requires an explicit `container:` because the fork
+image is built outside sparkrun.
 
 ### Runtime knobs
 
@@ -233,48 +193,42 @@ The bundle path is an absolute `model:` and therefore needs a trusted recipe
 | `tensor_parallel` | 2 or 4 (required; single-rank DeepSeek is not qualified) |
 | `max_model_len` | serve `--context` (1M in the reference lane) |
 | `max_num_seqs` | serve `--parallel` and the follower `--streams` default |
-| `streams`, `pool` | follower `--streams` / `--pool` (and shared KV positions) |
-| `round_rows`, `window`, `tf_2d` | TP4 2D-split settings (`TF_DS_*`); defaults: 48 / 2097152 / `parity` |
+| `streams`, `pool` | follower `--streams` / `--pool` |
+| `round_rows`, `window`, `tf_2d` | TP4 2D-split settings (`TF_DS_*`); defaults 48 / 2097152 / `parity` |
+| `served_k` | TP4 served-lane shape (`TF_DS_SERVED_K`, default `solo`) |
 | `rdma_hca`, `net_if`, `rdma_gid_index`, `nccl_ib_gid_index` | fabric env |
 | `cuda_kernels` | `TENSORFOLD_CUDA_KERNELS` (default `<bundle>/kit/aot`) |
 | `tf_env` | extra `TF_*`/`NCCL_*` assignments, a mapping |
 | `served_model_name`, sampling keys | same as upstream |
 
-The fork's patch set pins request sampling (`TF_SEED_RANDOM`, `TF_TOP_K_MAX`)
-through the image; recipes expose the normal sampling defaults.
-
 ## Validation checklist for the hardware run
 
-1. `docker/tensorfold/build.sh --load` (and the dsv41 build if used); check
-   `tensorfold-native --version`.
+1. Build/publish the upstream image outside this repository; build or obtain the
+   DeepSeek fork image and check both `tensorfold-native --version` and the
+   follower binary.
 2. `sparkrun run <recipe> --dry-run` — confirm the rendered command has
    `--host 0.0.0.0 --port <port>`, and for TP the rank env/`NCCL_COMM_ID`.
-3. Solo: run one Spark, then `curl http://<host>:<port>/v1/models`, start
-   `sparkrun proxy`, and check `sparkrun cluster monitor` colorizes
-   `[tensorfold]` lines (the colorizer already shipped before this runtime).
-4. NFS: run with an absolute `model:` on a path present on the target; confirm
-   no download/distribution phase and that the path is identity-mounted.
-5. TP2: run `tensorfold-glm-5.3-flash-tp2` and
-   `tensorfold-nemotron-3.5-super-vl-tp2`; rank 1 should be started before rank
-   0; both ranks' logs are under the normal `sparkrun logs`.  Stop the launch
-   and confirm both containers are removed.
-6. DeepSeek: build the bundle with the prep script, run TP2 first (smaller
-   world), verify `/v1/models` and a chat completion, then stop/restart and
-   check the caches are reused (no repeated rank-cache generation).
-7. Report the exact engine tag, NGC/CUDA base, NCCL version, model pack and
-   revision — the engine's cadence is fast and only the latest release gets
-   security fixes.
+3. Solo: one Spark, then `/v1/models`, `sparkrun proxy`, `sparkrun cluster
+   monitor` (`[tensorfold]` lines are colorized), `sparkrun logs`, `stop`.
+4. NFS: an absolute `model:` present on the target; confirm no download and the
+   identity mount.
+5. TP2: GLM/Nemotron recipes; rank 1 must start before rank 0; both logs under
+   the normal `sparkrun logs`; stop removes both containers.
+6. DeepSeek: prepare the bundle first, run TP2 before TP4, verify `/v1/models`
+   and a chat completion, then stop/restart and confirm the caches are reused.
+7. Report the exact engine tag, CUDA/NCCL versions, model pack and revision.
 
 ## Known limitations / non-goals
 
-- No generic TP for arbitrary models.  Only `glm` and `nemotron` (upstream) and
-  the DeepSeek fork are wired; other families run solo and a multi-node request
-  is refused with an actionable message.
-- No >2-rank qualification upstream; the DeepSeek fork supports TP4 in its
-  reference deployment, but sparkrun's support is experimental and image-pinned.
-- No `--speed-up` (macOS-only) and no CPU execution.
-- TensorFold is a moving target: several releases a week, only the latest gets
-  security fixes.  The image version is pinned; bump it deliberately.
-- The engine binds unauthenticated on `0.0.0.0`.  Set `defaults.api_key`
-  (forwarded as `--api-key`) when more than the control machine can reach the
-  host, exactly as with any other sparkrun runtime.
+- No generic TP for arbitrary models.  Only `glm`, `nemotron` and the DeepSeek
+  fork are wired; other families run solo and a multi-node request is refused
+  with an actionable message.
+- >2 ranks upstream is unqualified; the DeepSeek fork's TP4 is image-pinned and
+  experimental.
+- No macOS/`--speed-up` (upstream-only) and no CPU execution.
+- TensorFold moves fast (several releases a week; only the latest gets security
+  fixes).  Mirror the runtime's `container:` override to a pinned image tag and
+  bump it deliberately.
+- The engine binds unauthenticated on `0.0.0.0`.  Set `api_key` (forwarded as
+  `--api-key`) when more than the control machine can reach the host, exactly as
+  with any other sparkrun runtime.

@@ -360,9 +360,8 @@ GENERIC_COLORIZER = GenericColorizer()
 #: ``atlas``, ``llama-cpp``, ``tensorfold``) plus aliases. ``modular-max`` and
 #: ``tokenary`` are deliberately absent: their lines are Python-logging shaped,
 #: which the generic vocabulary covers, so sniffing handles them.  The
-#: ``tensorfold-dsv41`` fork logs under the same ``[tensorfold]``/``tensorfold:``
-#: prefixes, so the alias gives both runtimes the verified rules without
-#: relying on content sniffing.
+#: DeepSeek community fork logs under the same ``[tensorfold]``/``tensorfold:``
+#: prefixes, so the single runtime's alias covers it without content sniffing.
 RUNTIME_COLORIZERS: dict[str, LogColorizer] = {
     "vllm": _VLLM,
     "vllm-ray": _VLLM,
@@ -375,7 +374,6 @@ RUNTIME_COLORIZERS: dict[str, LogColorizer] = {
     "trt-llm": _TRT_LLM,
     "atlas": _ATLAS,
     "tensorfold": _TENSORFOLD,
-    "tensorfold-dsv41": _TENSORFOLD,
 }
 
 _BY_NAME: dict[str, LogColorizer] = {colorizer.name: colorizer for colorizer in (*COLORIZERS, GENERIC_COLORIZER)}
