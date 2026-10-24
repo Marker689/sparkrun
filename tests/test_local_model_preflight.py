@@ -241,3 +241,22 @@ def test_launcher_checks_local_models_before_replacement(tmp_path, monkeypatch, 
     else:
         assert launch().rc == 0
         assert events == (["run"] if case == "dry_run" else ["access", "access", "replace", "run"])
+
+
+def test_leftover_bin_index_beside_safetensors_is_ignored(tmp_path):
+    """A '*.safetensors' + '*.json' download keeps the .bin index without its shards."""
+    root = checkpoint(tmp_path)
+    (root / "pytorch_model.bin.index.json").write_text(json.dumps({"weight_map": {"w": "pytorch_model-00001-of-00001.bin"}}))
+    files = validate_local_model(root, "hf")
+    assert str(root / "weights.safetensors") in files
+    assert not any("pytorch_model" in f for f in files)
+
+
+def test_bin_index_is_validated_when_it_is_the_only_index(tmp_path):
+    root = checkpoint(tmp_path)
+    (root / "model.safetensors.index.json").unlink()
+    (root / "pytorch_model.bin.index.json").write_text(json.dumps({"weight_map": {"w": "pytorch_model-00001-of-00001.bin"}}))
+    with pytest.raises(ValueError, match="missing.*pytorch_model-00001-of-00001.bin"):
+        validate_local_model(root, "hf")
+    (root / "pytorch_model-00001-of-00001.bin").write_bytes(b"w")
+    assert str(root / "pytorch_model-00001-of-00001.bin") in validate_local_model(root, "hf")
