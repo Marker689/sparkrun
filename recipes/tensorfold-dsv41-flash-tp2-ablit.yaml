@@ -15,6 +15,7 @@ defaults:
   streams: 4
   pool: 1048576
   thinking: true
+  dashboard: true
   engram_dir: /var/tmp/tensorfold-dsv41/engram
   max_tokens: 32768
   temperature: 1.0
