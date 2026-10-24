@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 from typing import Any, TYPE_CHECKING
 
+from sparkrun.core.validation import RecipeIssue
 from sparkrun.runtimes.base import RuntimePlugin, render_flag_value
 from sparkrun.runtimes.tensorfold import TensorFoldRuntime
 from sparkrun.utils.data import integer_setting
@@ -313,7 +314,7 @@ class TensorFoldDSV41Runtime(TensorFoldRuntime):
         bundle = getattr(getattr(recipe, "cluster_config", None), "resolved_model_path", None) or recipe.model
         return isinstance(bundle, str) and os.path.isabs(bundle)
 
-    def validate_recipe(self, recipe: "Recipe") -> list[str]:
+    def validate_recipe(self, recipe: "Recipe") -> list[str | RecipeIssue]:
         # Skip TensorFoldRuntime's upstream-TP checks: this lane is TP2/TP4 by
         # construction and uses a prepared bundle, not a family key.
         issues = RuntimePlugin.validate_recipe(self, recipe)

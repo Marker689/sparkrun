@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 from typing import Any, TYPE_CHECKING
 
+from sparkrun.core.validation import RecipeIssue
 from sparkrun.core.readiness import (
     ANTHROPIC_MESSAGES_STREAM,
     OPENAI_CHAT_STREAM,
@@ -358,7 +359,7 @@ class TensorFoldRuntime(RuntimePlugin):
 
     # --- validation ---------------------------------------------------------
 
-    def validate_recipe(self, recipe: "Recipe") -> list[str]:
+    def validate_recipe(self, recipe: "Recipe") -> list[str | RecipeIssue]:
         issues = super().validate_recipe(recipe)
         config = self._config(recipe, {})
         dims = self._parallelism_dimensions(config)
