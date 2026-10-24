@@ -36,6 +36,20 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+# A Spark's Docker Engine may not ship the buildx plugin; for a local native
+# build the classic builder is sufficient.  Push/cross builds still require
+# buildx (the CI workflows use it).
+if [ "$MODE" != push ] && ! docker buildx version >/dev/null 2>&1; then
+    echo "==> buildx unavailable; native docker build"
+    docker build -t "${IMAGE_REPO}:${IMAGE_TAG}" \
+        --build-arg "TF_VERSION=${TF_VERSION}" \
+        --build-arg "CUDA_TAG=${CUDA_TAG}" \
+        --build-arg "NCCL_APT_VERSION=${NCCL_APT_VERSION}" \
+        --build-arg "TARGETARCH=${PLATFORM##*/}" \
+        .
+    exit 0
+fi
+
 ARGS=(buildx build --platform "$PLATFORM"
     --build-arg "TF_VERSION=${TF_VERSION}"
     --build-arg "CUDA_TAG=${CUDA_TAG}"

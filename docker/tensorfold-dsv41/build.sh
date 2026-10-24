@@ -42,6 +42,25 @@ case "$LANE" in
     *) echo "--lane must be tp2 or tp4" >&2; exit 2 ;;
 esac
 
+# A Spark's Docker Engine may not ship the buildx plugin; for a local native
+# build the classic builder is sufficient.  Push/cross builds still require
+# buildx (the CI workflows use it).
+if [ "$MODE" != push ] && ! docker buildx version >/dev/null 2>&1; then
+    echo "==> buildx unavailable; native docker build"
+    docker build -t "${IMAGE_REPO}:${LANE_TAG}" \
+        --build-arg "TF_SHA=${LANE_SHA}" \
+        --build-arg "PATCH_SET=${PATCH_SET}" \
+        --build-arg "CUDA_DEVEL_TAG=${CUDA_DEVEL_TAG}" \
+        --build-arg "CUDA_TAG=${CUDA_TAG}" \
+        --build-arg "NCCL_APT_VERSION=${NCCL_APT_VERSION}" \
+        --build-arg "ZIG_VERSION=${ZIG_VERSION}" \
+        --build-arg "TOKENIZERS_VERSION=${TOKENIZERS_VERSION}" \
+        --build-arg "TARGET_SM=${TARGET_SM}" \
+        --build-arg "TARGETARCH=${PLATFORM##*/}" \
+        .
+    exit 0
+fi
+
 ARGS=(buildx build --platform "$PLATFORM"
     --build-arg "TF_SHA=${LANE_SHA}"
     --build-arg "PATCH_SET=${PATCH_SET}"
