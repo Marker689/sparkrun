@@ -24,6 +24,7 @@ from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ItemGrid, Vertical
+from textual.content import Content
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Input, OptionList, ProgressBar, Select, Static
@@ -299,11 +300,11 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
         filters = self.query_one("#recipe-filters", OptionList)
         options = [Option("All recipes", id="all")]
         for runtime in sorted(set(self._runtime_families.values())):
-            options.append(Option(f"Runtime: {runtime}", id=f"runtime:{runtime}"))
+            options.append(Option(Content(f"Runtime: {runtime}"), id=f"runtime:{runtime}"))
         if any(s.registry is None for s in self._recipes):
             options.append(Option("Local recipes", id="registry:"))
         for registry in sorted({s.registry for s in self._recipes if s.registry}):
-            options.append(Option(f"@{registry}", id=f"registry:{registry}"))
+            options.append(Option(Content(f"@{registry}"), id=f"registry:{registry}"))
         selected = next((i for i, option in enumerate(options) if option.id == self._filter), 0)
         self._filter = options[selected].id or "all"
         with self.prevent(OptionList.OptionHighlighted):
@@ -345,7 +346,7 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
         # Index ids, not names: two registry recipes can share one qualified name.
         for idx, summary in enumerate(self._shown):
             prompt = f"{summary.name} — {summary.model}" if summary.model else summary.name
-            listed.add_option(Option(prompt, id=str(idx)))
+            listed.add_option(Option(Content(prompt), id=str(idx)))
 
         target = next((i for i, s in enumerate(self._shown) if s.name == keep), 0)
         listed.highlighted = target
@@ -363,25 +364,29 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
             self.query_one("#recipe-meta-desc", Static).update(desc)
 
     @staticmethod
-    def _render_meta(summary: RecipeSummary) -> tuple[str, str, str]:
+    def _render_meta(summary: RecipeSummary) -> tuple[Content, Content, Content]:
         """Info box fields, in render order: identity, decision stats, prose.
 
         Only what a launch decision needs: which recipe (the name carries its
         registry qualifier), what it runs, how many hosts it needs, and the
         parallelism and memory knobs. Paths and other provenance internals are
         left out. The description closes the box.
+
+        Recipe fields are registry content, so they are substituted as plain
+        text: parsed as markup, a ``[/think]`` in a description raised at
+        render time and exited the app.
         """
         tp = summary.tensor_parallel if summary.tensor_parallel is not None else "runtime default"
         gpu_mem = summary.gpu_memory_utilization if summary.gpu_memory_utilization is not None else "recipe default"
-        head = "\n".join(
-            [
-                f"[bold]{summary.name}[/bold]",
-                f"model: {summary.model or '-'}",
-                f"runtime: {summary.runtime or '-'}",
-            ]
+        head = Content.from_markup(
+            "[bold]$name[/bold]\nmodel: $model\nruntime: $runtime",
+            name=summary.name,
+            model=summary.model or "-",
+            runtime=summary.runtime or "-",
         )
-        stats = f"min nodes: {summary.min_nodes} · tensor parallel: {tp} · gpu memory util: {gpu_mem}"
-        return head, stats, summary.description or "[dim]no description[/dim]"
+        stats = Content(f"min nodes: {summary.min_nodes} · tensor parallel: {tp} · gpu memory util: {gpu_mem}")
+        desc = Content(summary.description) if summary.description else Content.from_markup("[dim]no description[/dim]")
+        return head, stats, desc
 
     # -- events -------------------------------------------------------------
 
@@ -898,7 +903,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         env = getattr(self.recipe, "env", None) or {}
         self._env_keys = sorted(env)
         with Vertical(id="params-dialog"):
-            yield Static(f"Run [bold]{self.summary.name}[/bold]?", id="param-title")
+            yield Static(Content.from_markup("Run [bold]$name[/bold]?", name=self.summary.name), id="param-title")
             with Horizontal(id="param-cols"):
                 with Vertical(id="param-short"):
                     yield Static("Tensor parallel", classes="param-label")
@@ -936,7 +941,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                             reasons = dict(self.checks.reasons)
                             for index, host in enumerate(self.hosts):
                                 eligible = host in self.checks.selectable
-                                label = host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})"
+                                label = Content(host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})")
                                 yield Checkbox(
                                     label,
                                     # A disabled row cannot be unchecked, so an
@@ -948,8 +953,11 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                                     id=f"param-host-{index}",
                                 )
                     if self.pending_hooks:
-                        yield Static("Untrusted hooks need authorization", classes="param-label")
-                        yield Checkbox(self._hooks_label(), id="param-trust")
+                        yield Static("Untrusted recipe needs authorization", classes="param-label")
+                        # The summary is recipe content, so it is never parsed as markup,
+                        # and the checkbox names nothing the recipe can influence.
+                        yield Static(self._trust_summary(), id="param-trust-summary", markup=False)
+                        yield Checkbox("Authorize the hooks and overrides above", id="param-trust")
                     with Vertical(id="param-adv-long"):
                         yield from self._knob_fields(knob for knob in _LAUNCH_KNOBS if knob.column == "long")
                         for index, (key, value) in enumerate(self._default_knobs):
@@ -992,9 +1000,22 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                     input_kwargs["type"] = "number"
                 yield Input(placeholder=knob.placeholder, id=widget_id, **input_kwargs)
 
-    def _hooks_label(self) -> str:
-        parts = [f"{kind}: {', '.join(commands)}" for kind, commands in self.pending_hooks.items()]
-        return "Authorize hooks — " + "; ".join(parts)
+    def _trust_summary(self) -> str:
+        """What the trust checkbox authorizes: the same summary ``sparkrun run`` prompts with.
+
+        ``RunOptions(trust=True)`` authorizes the recipe's container-isolation
+        overrides (host mounts, privileged mode, executor selection, pre-placed
+        paths) as well as its hooks, so both are listed. Listing only the hooks
+        let one tick grant mounts the user never saw.
+        """
+        from sparkrun.core.launcher import recipe_isolation_overrides
+        from sparkrun.utils.text import format_hook_summary
+
+        try:
+            isolation = recipe_isolation_overrides(self.recipe)
+        except Exception:  # noqa: BLE001 - disclosure must not break the modal
+            isolation = ["Could not list this recipe's container-isolation overrides; trusting it allows any it declares."]
+        return format_hook_summary(self.summary.name, self.pending_hooks, isolation=isolation)
 
     # -- hosts --------------------------------------------------------------
 
@@ -1041,7 +1062,8 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
 
     def _set_error(self, message: str) -> None:
         try:
-            self.query_one("#param-error", Static).update(f"[red]{message}[/red]" if message else "")
+            # The message quotes user input and plan errors; substitute it as text.
+            self.query_one("#param-error", Static).update(Content.from_markup("[red]$message[/red]", message=message) if message else "")
         except Exception:
             pass
 
@@ -1272,7 +1294,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         for host, box in self._host_boxes():
             eligible = host in checks.selectable
             box.disabled = not eligible
-            box.label = host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})"
+            box.label = Content(host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})")
             # A disabled row cannot be unchecked by hand, so a host the new
             # check rejected must end unchecked; eligible rows keep the user's
             # own selection.

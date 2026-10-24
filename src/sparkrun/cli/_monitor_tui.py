@@ -445,6 +445,15 @@ class ClusterMonitorApp(App):
     # the fallback poll is generous before it degrades to a notification.
     PENDING_LOG_OPEN_TIMEOUT_S: float = 60.0
 
+    def notify(self, message: str, *, markup: bool = False, **kwargs: Any) -> None:
+        """Toasts default to plain text.
+
+        Every toast carries remote or recipe text (errors, log records, ids),
+        and Textual parses markup by default: a ``[/]`` in it raises at render
+        time and exits the app, and ``[red]…`` restyles what the user reads.
+        """
+        super().notify(message, markup=markup, **kwargs)
+
     def __init__(
         self,
         session: "LiveMonitorSession",

@@ -38,6 +38,18 @@ first tagged release containing them, regardless of their original commit date.
 - `uvx sparkrun setup install` writes tab-completion for the installed tool instead of
   the first `sparkrun` on PATH, which under uvx is uvx's throwaway copy in the uv cache.
   After `uv cache clean`, that broke every new shell.
+- Launching an untrusted recipe from `cluster monitor` now shows what its trust checkbox
+  authorizes: the recipe's hooks and its container-isolation overrides (host mounts,
+  privileged mode, executor selection, pre-placed paths), as `sparkrun run` does. The
+  checkbox previously listed only the hooks, and rendered recipe text as markup, so a
+  hook could restyle or hide what was shown.
+- `cluster monitor` no longer exits with a markup error when a recipe description,
+  model name, typed override or error message contains square brackets (`[/think]`,
+  `[/]`); such text is displayed as written.
+- Local HF model directories that keep a `pytorch_model.bin.index.json` beside their
+  safetensors weights (for example, a download filtered to `*.safetensors` and `*.json`)
+  pass the new pre-launch check again. Like the loaders, it reads the safetensors index
+  when one exists.
 - `setup rdma-test --suite nccl|all` no longer hangs for its full 10-minute budget on
   clusters where a host runs docker bridge networks. Open MPI advertised those unroutable
   `br-*` addresses and blocked in `MPI_Init`; its TCP traffic is now pinned to the

