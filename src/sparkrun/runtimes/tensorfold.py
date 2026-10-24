@@ -138,6 +138,10 @@ _TENSORFOLD_OWNED_KEYS = frozenset(
 _DSV41_OWNED_KEYS = frozenset(
     {
         "follower_binary",
+        "cache_dir",
+        "kit_dir",
+        "engram_dir",
+        "token_map",
         "streams",
         "pool",
         "round_rows",

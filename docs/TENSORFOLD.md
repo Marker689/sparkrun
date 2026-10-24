@@ -190,6 +190,24 @@ outside sparkrun; the runtime only mounts and serves them.
 `--trust`), and the family requires an explicit `container:` because the fork
 image is built outside sparkrun.
 
+The bundle can be split by latency: Engram is read during generation and is
+the usual candidate for node-local storage.  Copy shards 47/48 to a local
+directory on every node, point `engram_dir` at it, and bind-mount that directory
+into the container with the executor:
+
+```yaml
+defaults:
+  engram_dir: /var/tmp/tensorfold-dsv41/engram
+executor_config:
+  volumes:
+    - /var/tmp/tensorfold-dsv41/engram   # identity mount, same path inside
+```
+
+`model/`, `cache/` and `kit/` can stay on the shared NFS bundle; only
+`TF_DS_ENGRAM`/`--engram` changes.  This is how the reference TP2 deployment
+keeps Engram on each Spark's NVMe while the large shared artifacts stay on the
+network.
+
 ### Runtime knobs
 
 | key | meaning |
@@ -200,6 +218,7 @@ image is built outside sparkrun.
 | `streams`, `pool` | follower `--streams` / `--pool` |
 | `round_rows`, `window`, `tf_2d` | TP4 2D-split settings (`TF_DS_*`); defaults 48 / 2097152 / `parity` |
 | `served_k` | TP4 served-lane shape (`TF_DS_SERVED_K`, default `solo`) |
+| `cache_dir`, `kit_dir`, `engram_dir`, `token_map` | bundle subdirectory overrides (absolute paths inside the mounted bundle, or a separately bind-mounted path) |
 | `rdma_hca`, `net_if`, `rdma_gid_index`, `nccl_ib_gid_index` | fabric env |
 | `cuda_kernels` | `TENSORFOLD_CUDA_KERNELS` (default `<bundle>/kit/aot`) |
 | `tf_env` | extra `TF_*`/`NCCL_*` assignments, a mapping |
