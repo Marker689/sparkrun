@@ -28,6 +28,10 @@ CUDA/NCCL-capable base:
 
 The DGX Spark platform default names the upstream image tag; recipes may
 override `container:` to pin an exact engine version or a locally built image.
+If an image exists only on the targets (pre-built locally, not published),
+set `distribution_config.containers.enabled: false`; the launcher then skips
+the control-machine pull/save and leaves the local tag to each host.  The
+runtime still probes the image on every target before the model starts.
 
 The DeepSeek-V4.1 fork is **not** a first-party image: its recipes must name an
 explicit `container:` built outside sparkrun (the fork's serving and follower
