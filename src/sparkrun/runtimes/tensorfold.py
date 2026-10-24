@@ -494,6 +494,13 @@ class TensorFoldRuntime(RuntimePlugin):
         """Generate the solo serve command (upstream shape only)."""
         config = self._config(recipe, overrides)
         if self._is_dsv41(config):
+            # The native path never executes this string: each rank gets its
+            # own argv from generate_node_command() (the followers use a
+            # different binary).  The launcher nevertheless requires a
+            # non-empty command for validation/metadata, so describe rank 0's
+            # shape rather than refusing the whole cluster here.
+            if is_cluster:
+                return self._dsv41_rank0_command(config, self._bundle(recipe, config))
             raise ValueError(
                 "the dsv41 TensorFold family is multi-node only: use --tp 2 or --tp 4 with a prepared bundle "
                 "(single-rank DeepSeek-V4.1 has no qualified serving path in this lane)"

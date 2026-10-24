@@ -509,3 +509,10 @@ def test_dsv41_version_commands_report_both_binaries():
     commands = TensorFoldRuntime().version_commands()
     assert "tensorfold-dsv41/bin/tensorfold-native" in commands["tensorfold_dsv41"]
     assert "tf-dsv41-lanes" in commands["tensorfold_dsv41_lanes"]
+
+
+def test_dsv41_generate_command_for_cluster_is_a_rank0_preview():
+    runtime = TensorFoldRuntime()
+    command = runtime.generate_command(_dsv41_recipe(), {}, is_cluster=True)
+    assert "/opt/tensorfold-dsv41/bin/tensorfold-native serve" in command
+    assert "%s/model" % _DSV41_BUNDLE in command
