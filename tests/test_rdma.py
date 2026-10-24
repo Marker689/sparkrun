@@ -1301,3 +1301,27 @@ def test_cli_reports_nccl_bus_bandwidth_in_gbytes_and_gbits(runner, v, patched_c
         assert nccl["avg_bus_bw_gbits"] == pytest.approx(nccl["avg_bus_bw_gbytes"] * 8)
     else:
         assert "avg bus bandwidth %.2f GB/s (%.1f Gb/s)" % (sample.avg_bus_bw, sample.avg_bus_bw * 8) in result.output
+
+
+@pytest.mark.parametrize(("extra", "expected"), [([], "clusteruser"), (["--user", "override"], "override")])
+def test_cli_connects_as_the_cluster_user_unless_overridden(runner, v, patched_cluster_mgr, monkeypatch, extra, expected):
+    """A launch on this cluster connects as its user:; the test must too (--user still wins)."""
+    from sparkrun.api.setup._rdma import RdmaTestReport
+
+    monkeypatch.setenv("SPARKRUN_FEATURE_CLI_SETUP_RDMA_TEST", "1")
+    patched_cluster_mgr.create("fabric", ["h1", "h2"], user="clusteruser")
+    with mock.patch("sparkrun.api.setup.rdma_test", return_value=RdmaTestReport(dry_run=True)) as call:
+        result = runner.invoke(main, ["setup", "rdma-test", "--dry-run", "--cluster", "fabric", *extra])
+    assert result.exit_code == 0, result.output
+    assert call.call_args.args[2]["ssh_user"] == expected
+
+
+@pytest.mark.parametrize(("flag", "expected"), [([], None), (["--offline"], True), (["--online"], False)])
+def test_cli_forwards_the_offline_choice(runner, v, patched_cluster_mgr, monkeypatch, flag, expected):
+    from sparkrun.api.setup._rdma import RdmaTestReport
+
+    monkeypatch.setenv("SPARKRUN_FEATURE_CLI_SETUP_RDMA_TEST", "1")
+    with mock.patch("sparkrun.api.setup.rdma_test", return_value=RdmaTestReport(dry_run=True)) as call:
+        result = runner.invoke(main, ["setup", "rdma-test", "--dry-run", "--hosts", "h1,h2", *flag])
+    assert result.exit_code == 0, result.output
+    assert call.call_args.kwargs["offline"] is expected

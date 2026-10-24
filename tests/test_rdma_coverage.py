@@ -628,3 +628,78 @@ def test_heartbeat_propagates_the_step_exception():
 
     with pytest.raises(RdmaTestError, match="nope"):
         _with_heartbeat("x", boom, interval_s=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Test image distribution goes through the launch's distribution
+# ---------------------------------------------------------------------------
+
+
+class _Config:
+    """Just enough SparkrunConfig for distribution scoping."""
+
+    def __init__(self, ssh_user="configuser"):
+        self.ssh_user = ssh_user
+        self.ssh_key = None
+        self.ssh_options = []
+        self.hf_cache_dir = "/cache/hf"
+
+    def for_cluster(self, cluster):
+        if cluster is not None and cluster.user:
+            from copy import copy
+
+            scoped = copy(self)
+            scoped.ssh_user = cluster.user
+            return scoped
+        return self
+
+
+def _prepare(cluster, ssh_kwargs, *, offline=False, side_effect=None):
+    from sparkrun.api.setup._rdma import _prepare_container
+
+    with (
+        mock.patch("sparkrun.orchestration.distribution.distribute_resources", side_effect=side_effect) as dist,
+        mock.patch("sparkrun.api.setup._rdma._start_containers", return_value=([], {})),
+    ):
+        _prepare_container(
+            ["h1", "h2"], "img:1", ssh_kwargs, need_gpu=True, mount_ssh=True, config=_Config(), cluster=cluster, offline=offline
+        )
+    return dist
+
+
+def test_image_uses_the_clusters_transfer_mode_and_connection():
+    cluster = ClusterDefinition(name="c", hosts=["h1", "h2"], user="clusteruser", transfer_mode="delegated", topology="switch")
+    dist = _prepare(cluster, {"ssh_user": "clusteruser"}, offline=True)
+    args, kwargs = dist.call_args
+    assert args[0] == "img:1" and args[1] == "" and args[2] == ["h1", "h2"]
+    assert args[4].ssh_user == "clusteruser"
+    assert kwargs["transfer_mode"] == "delegated"
+    assert kwargs["topology"] == "switch"
+    assert kwargs["offline"] is True
+
+
+def test_image_distribution_connects_as_an_explicit_user_override():
+    cluster = ClusterDefinition(name="c", hosts=["h1", "h2"], user="clusteruser")
+    dist = _prepare(cluster, {"ssh_user": "override"})
+    assert dist.call_args.args[4].ssh_user == "override"
+    assert dist.call_args.kwargs["transfer_mode"] == "auto"
+
+
+def test_image_distribution_failure_is_an_rdma_test_error():
+    from sparkrun.orchestration.distribution import DistributionError
+
+    with pytest.raises(RdmaTestError, match="Could not distribute img:1.*h2"):
+        _prepare(None, {"ssh_user": "configuser"}, side_effect=DistributionError("Image distribution failed on: h2"))
+
+
+def test_offline_comes_from_the_cluster_unless_the_caller_chooses():
+    cluster = ClusterDefinition(name="c", hosts=["h1", "h2"], offline=True)
+    with (
+        mock.patch("sparkrun.api.setup._rdma._run_probe", return_value=_facts(_switch(("h1", "h2")))),
+        mock.patch("sparkrun.orchestration.networking.detect_cx7_for_hosts", return_value=_switch(("h1", "h2"))),
+        mock.patch("sparkrun.api.setup._rdma._prepare_container", side_effect=RdmaTestError("stop here")) as prep,
+    ):
+        for offline, expected in ((None, True), (False, False)):
+            with pytest.raises(RdmaTestError, match="stop here"):
+                rdma_test(_Sctx(), ["h1", "h2"], {}, suite="perftest", force_container=True, cluster=cluster, offline=offline)
+            assert prep.call_args.kwargs["offline"] is expected

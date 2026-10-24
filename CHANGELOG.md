@@ -56,6 +56,12 @@ first tagged release containing them, regardless of their original commit date.
   hosts' shared management subnet. The collective drops the page cache first, as a launch
   does, so a host whose cache filled free memory no longer fails with CUDA out of memory.
   Timeouts and out-of-memory failures are named in the report.
+- `setup rdma-test` distributes its test image the way a launch does: the cluster's
+  transfer mode and interface, image-distribution plugins such as OCI Relay, and offline
+  mode (`--offline/--online`, or the cluster's `offline:`). Previously every host pulled
+  from the registry itself. It also connects as the cluster's `user:` (an explicit
+  `--user` still wins); it used config or the local login, so it failed on clusters
+  whose login differs.
 - `setup rdma-test` reports progress through its long steps: a `[k/N]` line as each host
   pair finishes, and a periodic "still running" line with elapsed time during the image
   fetch and the NCCL collective. NCCL bus bandwidth is shown in Gb/s beside GB/s

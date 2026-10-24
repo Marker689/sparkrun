@@ -1229,6 +1229,7 @@ def rdma_test(
     link_type: str | None = "IB",
     force_container: bool = False,
     keep_containers: bool = False,
+    offline: bool | None = None,
     dry_run: bool = False,
 ) -> RdmaTestReport:
     """Verify RDMA bandwidth, latency and (optionally) a NCCL collective.
@@ -1258,6 +1259,9 @@ def rdma_test(
         link_type: perftest ``--force-link``; ``None`` to omit.
         force_container: Use the image even when perftest is on the host.
         keep_containers: Leave containers running for debugging.
+        offline: ``True`` / ``False`` for ``--offline`` / ``--online``; ``None``
+            follows the cluster's ``offline:`` setting. Offline, the test image
+            is only copied from where it already exists, never pulled.
         dry_run: Resolve and plan without running anything.
 
     Returns:
@@ -1268,12 +1272,14 @@ def rdma_test(
         RdmaTestError: Invalid arguments, or required containers could not be
             prepared. Discovery and coverage failures are returned in the report.
     """
+    from sparkrun.core.offline import resolve_offline
     from sparkrun.orchestration.networking import detect_cx7_for_hosts
 
     if suite not in ALL_SUITES:
         raise RdmaTestError("unknown suite %r (expected %s)" % (suite, ", ".join(ALL_SUITES)))
 
     config = getattr(sctx, "config", None)
+    offline_mode = resolve_offline(offline, cluster)
 
     # Enforced here rather than in the CLI so every caller passes the same
     # gate (the sidecar reaches this function directly), and *before* the
@@ -1368,7 +1374,16 @@ def rdma_test(
     container: str | None = None
     try:
         if need_container:
-            _prepare_container(host_list, resolved_image, ssh_kwargs, need_gpu=wants_nccl, mount_ssh=wants_nccl)
+            _prepare_container(
+                host_list,
+                resolved_image,
+                ssh_kwargs,
+                need_gpu=wants_nccl,
+                mount_ssh=wants_nccl,
+                config=config,
+                cluster=cluster,
+                offline=offline_mode.offline,
+            )
             container = CONTAINER_NAME
 
         if wants_perftest:
@@ -1410,6 +1425,26 @@ def rdma_test(
     return report
 
 
+def _operation_config(config, cluster: ClusterDefinition | None, ssh_kwargs: dict):
+    """The cluster-scoped config image distribution runs under, matching *ssh_kwargs*.
+
+    Distribution builds its SSH settings from a config rather than taking
+    them, so the config must name the user the probes and tests use (an
+    explicit ``--user`` outranks the cluster's ``user:``). Otherwise the image
+    would be fetched as one user and the containers started as another.
+    """
+    from copy import copy
+
+    from sparkrun.orchestration.primitives import build_ssh_kwargs
+
+    scoped = config.for_cluster(cluster)
+    user = ssh_kwargs.get("ssh_user")
+    if user and build_ssh_kwargs(scoped).get("ssh_user") != user:
+        scoped = copy(scoped)
+        scoped.ssh_user = user
+    return scoped
+
+
 def _prepare_container(
     host_list: list[str],
     image: str,
@@ -1417,24 +1452,67 @@ def _prepare_container(
     *,
     need_gpu: bool,
     mount_ssh: bool,
+    config=None,
+    cluster: ClusterDefinition | None = None,
+    offline: bool = False,
 ) -> None:
-    """Sync the image and start the container everywhere, or raise."""
-    from sparkrun.containers.sync import sync_image_to_hosts
+    """Distribute the image and start the container everywhere, or raise.
 
-    _say("Fetching %s on %d host(s) (first run pulls ~1 GB per host)...", image, len(host_list))
-    sync_failed = _with_heartbeat(
-        "image fetch",
-        lambda: sync_image_to_hosts(
-            image,
-            list(host_list),
-            ssh_user=ssh_kwargs.get("ssh_user"),
-            ssh_key=ssh_kwargs.get("ssh_key"),
-        ),
-    )
-    if sync_failed:
-        raise RdmaTestError(
-            "Could not fetch %s on: %s. Pull it manually or point --image at a reachable mirror." % (image, ", ".join(sync_failed))
+    The image goes through the same distribution a launch uses: the cluster's
+    transfer mode and interface, registered image-distribution providers (OCI
+    Relay) and offline mode. It used to be pulled by every host from the
+    registry directly, which ignored a ``delegated`` cluster and failed on an
+    air-gapped one that already held the image on the control machine.
+    """
+    from sparkrun.orchestration.distribution import DistributionError, distribute_resources
+
+    _say("Fetching %s on %d host(s) (first run transfers ~1 GB per host)...", image, len(host_list))
+    if config is not None:
+        op_config = _operation_config(config, cluster, ssh_kwargs)
+        transfer_mode = (cluster.transfer_mode if cluster is not None else None) or "auto"
+        try:
+            _with_heartbeat(
+                "image fetch",
+                lambda: distribute_resources(
+                    image,
+                    "",
+                    list(host_list),
+                    str(op_config.hf_cache_dir),
+                    op_config,
+                    dry_run=False,
+                    recipe_name="rdma-test",
+                    transfer_mode=transfer_mode,
+                    transfer_interface=cluster.transfer_interface if cluster is not None else None,
+                    topology=cluster.topology if cluster is not None else None,
+                    offline=offline,
+                ),
+            )
+        except DistributionError as exc:
+            hint = (
+                "Offline: load it on the control machine or a host first (docker pull / docker load)."
+                if offline
+                else "Pull it manually or point --image at a reachable mirror."
+            )
+            raise RdmaTestError("Could not distribute %s: %s. %s" % (image, exc, hint)) from exc
+    else:
+        # A bare context has no config to scope distribution by: every host pulls for itself.
+        from sparkrun.containers.sync import sync_image_to_hosts
+
+        sync_failed = _with_heartbeat(
+            "image fetch",
+            lambda: sync_image_to_hosts(
+                image,
+                list(host_list),
+                ssh_user=ssh_kwargs.get("ssh_user"),
+                ssh_key=ssh_kwargs.get("ssh_key"),
+                ssh_options=ssh_kwargs.get("ssh_options"),
+                offline=offline,
+            ),
         )
+        if sync_failed:
+            raise RdmaTestError(
+                "Could not fetch %s on: %s. Pull it manually or point --image at a reachable mirror." % (image, ", ".join(sync_failed))
+            )
 
     _say("Image ready on all %d host(s)", len(host_list))
 

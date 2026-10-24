@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from sparkrun.core.application_profile import render_identity_text
 
-import os
 import sys
 from dataclasses import asdict
 import textwrap
@@ -40,6 +39,7 @@ from sparkrun.api.setup._rdma import (
     available_suites,
     gated_suite_message,
 )
+from sparkrun.utils.env import resolve_ssh_user
 
 from . import setup
 from .._common import _get_context, resolve_host_context, dry_run_option, host_options, json_option, print_json
@@ -364,7 +364,7 @@ _SUITES_AT_IMPORT = _suites_at_import()
 
 @setup.command("rdma-test", hidden=not _rdma_test_enabled_at_import(), help=_rdma_help(_SUITES_AT_IMPORT))
 @host_options
-@click.option("--user", "-u", default=None, help="SSH username (default: from config or current user)")
+@click.option("--user", "-u", default=None, help="SSH username (default: the cluster's user, then config, then current user)")
 @click.option(
     "--suite",
     type=_SuiteChoice(_SUITES_AT_IMPORT),
@@ -404,6 +404,12 @@ _SUITES_AT_IMPORT = _suites_at_import()
 )
 @click.option("--force-container", is_flag=True, help="Use the image even when perftest is on the host")
 @click.option("--keep-containers", is_flag=True, help="Leave test containers running for debugging")
+@click.option(
+    "--offline/--online",
+    "offline",
+    default=None,
+    help="Copy the test image only from where it already exists, with no internet access. --online overrides a cluster set to offline.",
+)
 @json_option(help="Emit the full results as JSON")
 @dry_run_option
 @click.pass_context
@@ -424,6 +430,7 @@ def setup_rdma_test(
     link_type,
     force_container,
     keep_containers,
+    offline,
     output_json,
     dry_run,
 ):
@@ -450,9 +457,13 @@ def setup_rdma_test(
 
     hctx = resolve_host_context(hosts, hosts_file, cluster_name, sctx.config, sctx=sctx)
     host_list = hctx.host_list
-    cluster = hctx.cluster_mgr.get(hctx.cluster_name) if hctx.cluster_name else None
-    ssh_kwargs = build_ssh_kwargs(sctx.config)
-    ssh_kwargs["ssh_user"] = user or sctx.config.ssh_user or os.environ.get("USER", "root")
+    cluster = hctx.cluster_def
+    # The same precedence a launch on this cluster connects with: an explicit
+    # --user, then the cluster's user:, then config, then the local login.
+    # Reading only config/$USER here SSH-ed as the wrong user on any cluster
+    # whose login differs from the control machine's.
+    ssh_kwargs = build_ssh_kwargs(sctx.config.for_cluster(cluster))
+    ssh_kwargs["ssh_user"] = user or resolve_ssh_user(cluster.user if cluster is not None else None, sctx.config)
 
     if len(host_list) < 2:
         raise click.ClickException(
@@ -489,6 +500,7 @@ def setup_rdma_test(
             link_type=None if link_type == "auto" else link_type,
             force_container=force_container,
             keep_containers=keep_containers,
+            offline=offline,
             dry_run=dry_run,
         )
     except api.setup.RdmaTestError as exc:
