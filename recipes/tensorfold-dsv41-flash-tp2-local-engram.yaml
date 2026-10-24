@@ -1,0 +1,38 @@
+name: tensorfold-dsv41-flash-tp2-local-engram
+description: DeepSeek-V4.1-Flash EXL3 2.9bpw TP2 on two Sparks; model/rank-cache/kit on NFS, Engram on each node's local NVMe
+model: /home/marker/.cache/huggingface/tensorfold-dsv41/bundle
+runtime: tensorfold
+container: ghcr.io/spark-arena/tensorfold-dsv41:3ff3b2a
+min_nodes: 2
+max_nodes: 2
+defaults:
+  tf_family: dsv41
+  tensor_parallel: 2
+  port: 8000
+  served_model_name: deepseek-v4.1-flash
+  max_model_len: 1048576
+  max_num_seqs: 4
+  streams: 4
+  pool: 1048576
+  thinking: false
+  engram_dir: /var/tmp/tensorfold-dsv41/engram
+  max_tokens: 32768
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 20
+  rdma_hca: rocep1s0f0,roceP2p1s0f0
+  rdma_gid_index: 3
+  nccl_ib_gid_index: 3
+  tf_env:
+    TF_DS_REPLAY_FLOOR: 1
+    TF_SEED_RANDOM: 1
+    TF_TOP_K_MAX: 56
+distribution_config:
+  containers:
+    enabled: false
+
+# Engram is the latency-sensitive part of the bundle: keep it on each Spark's
+# local NVMe while model/rank-cache/kit stay on the shared NFS bundle.
+executor_config:
+  volumes:
+    - /var/tmp/tensorfold-dsv41/engram
