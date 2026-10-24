@@ -1,13 +1,16 @@
 """Dense FP8 tuning and installation contracts without a GPU dependency."""
 
+import io
 import json
 import logging
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from click.testing import CliRunner
 
+from sparkrun.core.progress import PROGRESS
 from sparkrun.scripts import sglang_tune_fp8 as script
 from sparkrun.tuning.sglang import SglangTuner, install_sglang_fp8_configs
 
@@ -253,9 +256,31 @@ def test_existing_experimental_registry_gains_tuning_path_without_reset():
     assert not RegistryManager._backfill_default_subpaths([entry, custom])
 
 
-@pytest.mark.parametrize(("level", "quiet"), [(logging.WARNING, True), (logging.INFO, False)])
+@pytest.mark.parametrize(("level", "quiet"), [(logging.WARNING, True), (PROGRESS, False), (logging.INFO, False)])
 def test_fp8_tuning_captures_output_unless_info_logging(level, quiet, tmp_path, monkeypatch):
     """A terminal it does not own (monitor TUI pins root to WARNING) must not be painted over."""
+    seen = {}
+
+    def fake_stream(host, script_text, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("sparkrun.orchestration.primitives.run_script_on_host_streaming", fake_stream)
+    # pytest captures sys.stdout; this test is about the log level, so own the terminal.
+    monkeypatch.setattr("sys.stdout", sys.__stdout__)
+    tuner = SglangTuner(host="localhost", image="test", model="test", output_dir=str(tmp_path), mode="fp8", shapes=((1792, 5120),))
+    root = logging.getLogger()
+    previous = root.level
+    root.setLevel(level)
+    try:
+        assert tuner._run_tune_for_tp(4, "3.7.1") == 0
+    finally:
+        root.setLevel(previous)
+    assert seen["quiet"] is quiet
+
+
+def test_fp8_tuning_streams_at_default_verbosity_but_not_when_stdout_is_captured(tmp_path, monkeypatch):
+    """The CLI default is PROGRESS; a swapped sys.stdout (Textual) still captures."""
     seen = {}
 
     def fake_stream(host, script_text, **kwargs):
@@ -266,9 +291,26 @@ def test_fp8_tuning_captures_output_unless_info_logging(level, quiet, tmp_path, 
     tuner = SglangTuner(host="localhost", image="test", model="test", output_dir=str(tmp_path), mode="fp8", shapes=((1792, 5120),))
     root = logging.getLogger()
     previous = root.level
-    root.setLevel(level)
+    root.setLevel(PROGRESS)
     try:
+        monkeypatch.setattr("sys.stdout", io.StringIO())
         assert tuner._run_tune_for_tp(4, "3.7.1") == 0
     finally:
         root.setLevel(previous)
-    assert seen["quiet"] is quiet
+    assert seen["quiet"] is True
+
+
+def test_fp8_tuning_failure_keeps_the_captured_output(tmp_path, monkeypatch, caplog):
+    def fake_stream(host, script_text, **kwargs):
+        return SimpleNamespace(returncode=3, stdout="", stderr="Traceback ...\nRuntimeError: no kernel for shape\n")
+
+    monkeypatch.setattr("sparkrun.orchestration.primitives.run_script_on_host_streaming", fake_stream)
+    tuner = SglangTuner(host="localhost", image="test", model="test", output_dir=str(tmp_path), mode="fp8", shapes=((1792, 5120),))
+    root = logging.getLogger()
+    previous = root.level
+    root.setLevel(logging.WARNING)
+    try:
+        assert tuner._run_tune_for_tp(4, "3.7.1") == 3
+    finally:
+        root.setLevel(previous)
+    assert "RuntimeError: no kernel for shape" in caplog.text

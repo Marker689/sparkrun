@@ -47,6 +47,8 @@ first tagged release containing them, regardless of their original commit date.
 - `setup rdma-test` reports progress through its long steps: a `[k/N]` line as each host
   pair finishes, and a periodic "still running" line with elapsed time during the image
   fetch and the NCCL collective.
+- SGLang FP8 kernel tuning streams its output again at default verbosity, and a failed
+  tune logs its captured output. Since the monitor terminal fix, it only streamed with `-v`.
 - Re-running `setup install` also repairs existing generated completion entries in
   Bash, Zsh, and Fish to point at the installed tool, including stale uvx cache paths.
   Surrounding shell settings and custom completion commands are preserved.
