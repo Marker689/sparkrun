@@ -38,6 +38,15 @@ first tagged release containing them, regardless of their original commit date.
 - `uvx sparkrun setup install` writes tab-completion for the installed tool instead of
   the first `sparkrun` on PATH, which under uvx is uvx's throwaway copy in the uv cache.
   After `uv cache clean`, that broke every new shell.
+- `setup rdma-test --suite nccl|all` no longer hangs for its full 10-minute budget on
+  clusters where a host runs docker bridge networks. Open MPI advertised those unroutable
+  `br-*` addresses and blocked in `MPI_Init`; its TCP traffic is now pinned to the
+  hosts' shared management subnet. The collective drops the page cache first, as a launch
+  does, so a host whose cache filled free memory no longer fails with CUDA out of memory.
+  Timeouts and out-of-memory failures are named in the report.
+- `setup rdma-test` reports progress through its long steps: a `[k/N]` line as each host
+  pair finishes, and a periodic "still running" line with elapsed time during the image
+  fetch and the NCCL collective.
 - Re-running `setup install` also repairs existing generated completion entries in
   Bash, Zsh, and Fish to point at the installed tool, including stale uvx cache paths.
   Surrounding shell settings and custom completion commands are preserved.
