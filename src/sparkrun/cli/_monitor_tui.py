@@ -16,14 +16,16 @@ import time
 from typing import TYPE_CHECKING, Any
 from collections.abc import Callable, Sequence
 
+import click
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Footer, Header, Static
 
-from sparkrun.api import LogTarget, RunResult, StopResult, open_log_target, run, stop
+from sparkrun.api import LogTarget, RunResult, StopResult, open_log_target, post_launch, run, stop
 from sparkrun.core.application_profile import get_application_profile
 from sparkrun.cli._monitor_metrics import RuntimeMetricsScraper, _at, _spark_palette, _sparkline
 from sparkrun.cli._monitor_logs import (
@@ -35,7 +37,7 @@ from sparkrun.cli._monitor_logs import (
     entry_plain_text,
     workload_rows,
 )
-from sparkrun.cli._monitor_recipes import RecipeLaunch, RecipePickerScreen
+from sparkrun.cli._monitor_recipes import BackgroundWork, RecipeLaunch, RecipePickerScreen, call_ui, local_post_commands_refusal
 from sparkrun.core.log_source import SCOPE_ALL, LogLine
 from sparkrun.core.monitoring import HostActivity, MonitorFrame, MonitorSample
 
@@ -381,6 +383,75 @@ _TABLE_COLS: list[tuple[str, str, Callable[[MonitorSample], str]]] = [
 ]
 
 
+class QuitWhileBusyScreen(ModalScreen[bool]):
+    """Confirms quitting while a launch or stop is still running; dismisses True to quit.
+
+    The work cannot be cancelled (see :class:`BackgroundWork`), so quitting
+    restores the shell and then waits for it. Saying so up front is the
+    difference between a deliberate wait and a shell that looks hung, where a
+    Ctrl-C would leave the launch half-done.
+    """
+
+    DEFAULT_CSS = """
+    QuitWhileBusyScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }
+    #quit-dialog {
+        width: 64;
+        height: auto;
+        border: thick $warning;
+        background: $background-lighten-2;
+        padding: 1 2;
+    }
+    #quit-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #quit-buttons {
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+    #quit-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("left", "app.focus_previous", "Previous", show=False, priority=True),
+        Binding("right", "app.focus_next", "Next", show=False, priority=True),
+        Binding("escape", "cancel", "Keep monitoring", priority=True),
+        Binding("q", "cancel", "Keep monitoring", show=False, priority=True),
+    ]
+
+    def __init__(self, busy: Sequence[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.busy = tuple(busy)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="quit-dialog"):
+            yield Static("Work in progress", id="quit-title")
+            # Descriptions carry recipe names (registry content): plain text.
+            yield Static("Still running: %s." % "; ".join(self.busy), id="quit-busy", markup=False)
+            yield Static("Quitting returns to the shell, then waits for it to finish; interrupting it there can leave it half-done.")
+            with Horizontal(id="quit-buttons"):
+                yield Button("Keep monitoring", id="quit-cancel")
+                yield Button("Quit and wait", id="quit-confirm", variant="warning")
+
+    def on_mount(self) -> None:
+        self.query_one("#quit-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "quit-confirm":
+            self.dismiss(True)
+        elif event.button.id == "quit-cancel":
+            self.action_cancel()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -493,6 +564,28 @@ class ClusterMonitorApp(App):
         self._saved_root_level: int | None = None
         # Terminal-bound handlers owned by library/plugin loggers, likewise.
         self._saved_logger_handlers: list[tuple[logging.Logger, logging.Handler]] = []
+        # Worker-thread calls that quitting would wait on; see BackgroundWork.
+        self.background_work = BackgroundWork()
+
+    async def run_async(self, **kwargs: Any) -> Any:
+        """Run the app, then say what the shell is still waiting for.
+
+        Runs after the screen is restored and before ``asyncio.run`` joins the
+        worker threads, which is the silent wait this explains.
+        """
+        try:
+            return await super().run_async(**kwargs)
+        finally:
+            self._announce_unfinished_work()
+
+    def _announce_unfinished_work(self) -> None:
+        for description in self.background_work.descriptions():
+            click.echo("Waiting for %s to finish..." % description, err=True)
+
+    def _report_from_thread(self, message: str, *, severity: str = "information") -> None:
+        """A toast while the app runs; a stderr line once it has gone (a launch can outlive it)."""
+        if not call_ui(self, self.notify, message, severity=severity):
+            click.echo(message, err=True)
 
     # -- layout -------------------------------------------------------------
 
@@ -750,13 +843,15 @@ class ClusterMonitorApp(App):
         # No hosts=: api.stop must resolve the job's recorded placement (job
         # metadata, then cluster) — the monitored host list is a view, never a
         # placement authority, and passing it would override the real TP>1 hosts.
-        try:
-            result = stop(workload_id=cluster_id, cluster=self._cluster, cache_dir=self._cache_dir, sctx=self._sctx)
-        except Exception as error:  # noqa: BLE001 - a stop failure must never break the app
-            logger.debug("Stop of %s failed", cluster_id, exc_info=True)
-            self.call_from_thread(self.notify, f"Stop failed for {cluster_id}: {error}", severity="error")
-            return
-        self.call_from_thread(self._on_stop_finished, cluster_id, result)
+        with self.background_work.track(f"the stop of {cluster_id}", blocks_quit=True):
+            try:
+                result = stop(workload_id=cluster_id, cluster=self._cluster, cache_dir=self._cache_dir, sctx=self._sctx)
+            except Exception as error:  # noqa: BLE001 - a stop failure must never break the app
+                logger.debug("Stop of %s failed", cluster_id, exc_info=True)
+                self._report_from_thread(f"Stop failed for {cluster_id}: {error}", severity="error")
+                return
+        if not call_ui(self, self._on_stop_finished, cluster_id, result):
+            click.echo("Stop of %s %s" % (cluster_id, "finished" if result.success else "failed"), err=True)
 
     def _on_stop_finished(self, cluster_id: str, result: StopResult) -> None:
         if result.success:
@@ -792,7 +887,8 @@ class ClusterMonitorApp(App):
     def _on_recipe_picked(self, launch: RecipeLaunch | None) -> None:
         if launch is None:
             return
-        self.notify(f"Launching {launch.label}…")
+        placed = tuple(getattr(launch.plan, "host_list", None) or ())
+        self.notify(f"Launching {launch.label} on {', '.join(placed)}…" if placed else f"Launching {launch.label}…")
         self._recipe_run_worker(launch)
 
     @work(thread=True, exclusive=False, group="recipe-run")
@@ -800,28 +896,77 @@ class ClusterMonitorApp(App):
         """Launch off the UI thread; api.run does blocking SSH/docker work.
 
         exclusive=False (like the stop worker): a second launch must never
-        cancel one that is already in flight.
+        cancel one that is already in flight. The preflight's plan is passed
+        through, so the launch is the placement the parameter modal checked.
         """
-        try:
-            result = run(launch.options, sctx=self._sctx)
-        except Exception as error:  # noqa: BLE001 - a launch failure must never break the app
-            logger.debug("Recipe launch of %s failed", launch.label, exc_info=True)
-            self.call_from_thread(self.notify, f"Launch failed: {error}", severity="error")
-            return
-        source: tuple[str, str] | None = None
-        if result.rc == 0 and not result.dry_run:
-            # Resolve the pane's target here: the workstation-side metadata is
-            # written by run(), and the occupancy sweep can be many seconds
-            # behind, so the frame is the slow path, not the source of truth.
+        with self.background_work.track(f"the launch of {launch.label}", blocks_quit=True) as describe:
             try:
-                target = open_log_target(result.workload_id, cluster=self._cluster, cache_dir=self._cache_dir, sctx=self._sctx)
-                for candidate in target.sources:
-                    if candidate.container:
-                        source = (candidate.host, candidate.container)
-                        break
-            except Exception:  # noqa: BLE001 - the occupancy poll is the fallback
-                logger.debug("Log source resolve for %s failed", result.workload_id, exc_info=True)
-        self.call_from_thread(self._on_recipe_launched, result, source)
+                result = run(launch.options, sctx=self._sctx, plan=launch.plan)
+            except Exception as error:  # noqa: BLE001 - a launch failure must never break the app
+                logger.debug("Recipe launch of %s failed", launch.label, exc_info=True)
+                self._report_from_thread(f"Launch failed: {error}", severity="error")
+                return
+            launched = result.rc == 0 and not result.dry_run
+            source = self._launch_log_source(result) if launched else None
+            if not call_ui(self, self._on_recipe_launched, result, source):
+                click.echo(
+                    "Launched %s as %s" % (launch.label, result.workload_id)
+                    if launched
+                    else "Launch of %s finished (rc=%s)" % (launch.label, result.rc),
+                    err=True,
+                )
+            if launched:
+                describe(f"the post-launch hooks of {launch.label}")
+                self._run_post_launch(result, launch)
+
+    def _launch_log_source(self, result: RunResult) -> tuple[str, str] | None:
+        """The first (host, container) of a fresh launch's logs, or None to wait for the sweep."""
+        # Resolved here: the workstation-side metadata is written by run(), and
+        # the occupancy sweep can be many seconds behind, so the frame is the
+        # slow path, not the source of truth.
+        try:
+            target = open_log_target(result.workload_id, cluster=self._cluster, cache_dir=self._cache_dir, sctx=self._sctx)
+        except Exception:  # noqa: BLE001 - the occupancy poll is the fallback
+            logger.debug("Log source resolve for %s failed", result.workload_id, exc_info=True)
+            return None
+        for candidate in target.sources:
+            if candidate.container:
+                return candidate.host, candidate.container
+        return None
+
+    def _run_post_launch(self, result: RunResult, launch: RecipeLaunch) -> None:
+        """Readiness, ``post_exec`` and ``stop_after_post``, as ``sparkrun run`` does after launching.
+
+        ``api.post_launch`` reuses the trust verdict ``run`` recorded on the
+        launch. Its output is logged (the sink keeps it off the screen) and its
+        failures become toasts. Local ``post_commands`` never run here: the
+        parameter modal refuses those recipes (``local_post_commands_refusal``),
+        and this guard covers a launch that reached the app another way.
+        """
+        handle = result.launch_result
+        recipe = getattr(handle, "recipe", None) or launch.options.recipe
+        if isinstance(recipe, str) or not (getattr(recipe, "post_exec", None) or getattr(recipe, "post_commands", None)):
+            # The picker always launches a loaded recipe; a bare name has no hooks to inspect.
+            return
+        refusal = local_post_commands_refusal(recipe, launch.label)
+        if refusal is not None:
+            self._report_from_thread(f"Post-launch hooks of {launch.label} not run. {refusal}", severity="error")
+            return
+        if handle is None:
+            self._report_from_thread(
+                f"Post-launch hooks of {launch.label} not run: the launch returned no lifecycle handle", severity="error"
+            )
+            return
+        try:
+            outcome = post_launch(result, trust=launch.options.trust, sctx=self._sctx)
+        except Exception as error:  # noqa: BLE001 - a hook failure must never break the app
+            logger.debug("Post-launch lifecycle of %s failed", launch.label, exc_info=True)
+            self._report_from_thread(f"Post-launch hooks of {launch.label} failed: {error}", severity="error")
+            return
+        if outcome.stopped:
+            self._report_from_thread(f"{launch.label}: post-launch hooks finished; workload stopped (stop_after_post)")
+        else:
+            self._report_from_thread(f"{launch.label}: post-launch hooks finished")
 
     def _on_recipe_launched(self, result: RunResult, source: tuple[str, str] | None = None) -> None:
         if result.rc != 0:
@@ -907,7 +1052,8 @@ class ClusterMonitorApp(App):
                 wanted.setdefault(workload.cluster_id, []).append(activity.host)
         for gone in [cid for cid in self._metrics_targets if cid not in wanted]:
             self._metrics_targets.pop(gone, None)
-        self.call_from_thread(self._on_metrics_collected, set(wanted), {}, {})
+        if not call_ui(self, self._on_metrics_collected, set(wanted), {}, {}):
+            return
         # The workload's authoritative source set right now: a re-resolved
         # target names a restarted rank's new container, so the scraper can
         # forget the old one instead of summing both forever.
@@ -955,7 +1101,8 @@ class ClusterMonitorApp(App):
             if lines and not cancel.is_set():
                 # Publish completed workloads before reading the next one, so
                 # a stalled source cannot hold back already collected samples.
-                self.call_from_thread(self._on_metrics_collected, set(wanted), {cluster_id: lines}, live)
+                if not call_ui(self, self._on_metrics_collected, set(wanted), {cluster_id: lines}, live):
+                    return
 
     def _on_metrics_collected(self, wanted: set[str], collected: dict[str, list[LogLine]], live: dict[str, set[tuple[str, str]]]) -> None:
         """UI thread: commit this poll's samples and repaint open pane footers."""
@@ -1067,4 +1214,15 @@ class ClusterMonitorApp(App):
     def action_quit(self) -> None:
         if self._is_log_open():
             return
+        busy = self.background_work.descriptions(blocking_only=True)
+        if busy:
+            # ctrl+q is an app-level priority binding, so it reaches here with
+            # the confirmation already up; one dialog is enough.
+            if not isinstance(self.screen, QuitWhileBusyScreen):
+                self.push_screen(QuitWhileBusyScreen(busy), callback=self._on_quit_confirmed)
+            return
         self.exit()
+
+    def _on_quit_confirmed(self, confirmed: bool | None) -> None:
+        if confirmed:
+            self.exit()

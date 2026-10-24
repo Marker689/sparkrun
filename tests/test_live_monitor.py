@@ -2327,3 +2327,312 @@ def test_metrics_poll_finishes_and_publishes_healthy_workloads_despite_slow_sour
 
     asyncio.run(_run())
     assert reads[0].is_set()  # app shutdown still cancels its readers
+
+
+# -- recipe launch: plan reuse, post-launch lifecycle, quitting mid-launch ------
+
+
+def _launched_result(workload_id: str = "sparkrun_aa_bb", *, launch_result=None, dry_run: bool = False):
+    from sparkrun.api import RunResult
+
+    return RunResult(
+        workload_id=workload_id,
+        host_list=("h1",),
+        placement=None,
+        scheduler="greedy",
+        runtime="vllm-ray",
+        executor="docker",
+        started_at=time.time(),
+        dry_run=dry_run,
+        is_solo=True,
+        rc=0,
+        launch_result=launch_result,
+    )
+
+
+def _monitor_app(tmp_path):
+    from sparkrun.cli._monitor_tui import ClusterMonitorApp
+
+    session = _FakeLiveMonitorSession(MonitorFrame(hosts=(HostActivity(host="h1"),)))
+    app = ClusterMonitorApp(session, ["h1"], interval=1, cache_dir=str(tmp_path))
+    notes: list[tuple[str, str]] = []
+    app.notify = lambda message, severity="information", **_kw: notes.append((severity, message))  # type: ignore[method-assign]
+    return app, notes
+
+
+async def _until(pilot, predicate, tries: int = 100) -> None:
+    for _ in range(tries):
+        if predicate():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError("condition never met")
+
+
+def test_recipe_launch_hands_the_preflight_plan_to_run(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from types import SimpleNamespace
+    from sparkrun.api import RunOptions
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+
+    calls: list[tuple] = []
+
+    def _fake_run(options, **kwargs):
+        calls.append((options, kwargs.get("plan")))
+        return _launched_result()
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", _fake_run)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", mock.Mock(side_effect=RuntimeError("no metadata")))
+    app, notes = _monitor_app(tmp_path)
+    preflight = SimpleNamespace(host_list=("h1",))
+    options = RunOptions(recipe="demo-recipe")
+    launch = RecipeLaunch(options=options, label="demo-recipe", plan=preflight)
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            await _until(pilot, lambda: bool(calls))
+
+    asyncio.run(_run())
+    assert calls == [(options, preflight)]
+    assert ("information", "Launching demo-recipe on h1…") in notes
+
+
+def _hooked_launch_result(*, post_exec=None, post_commands=None):
+    from types import SimpleNamespace
+
+    recipe = SimpleNamespace(post_exec=post_exec or [], post_commands=post_commands or [])
+    return _launched_result(launch_result=SimpleNamespace(recipe=recipe, recipe_trusted=True))
+
+
+def test_recipe_launch_runs_the_post_launch_lifecycle(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import PostLaunchResult, RunOptions
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+
+    result = _hooked_launch_result(post_exec=["curl localhost"])
+    lifecycle: list[tuple] = []
+
+    def _fake_post_launch(run_result, **kwargs):
+        lifecycle.append((run_result, kwargs.get("trust")))
+        return PostLaunchResult(stopped=True)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: result)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.post_launch", _fake_post_launch)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", mock.Mock(side_effect=RuntimeError("no metadata")))
+    app, notes = _monitor_app(tmp_path)
+    launch = RecipeLaunch(options=RunOptions(recipe="demo-recipe", trust=True), label="demo-recipe")
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(launch)
+            await _until(pilot, lambda: any("post-launch hooks finished" in message for _s, message in notes))
+            assert app.background_work.descriptions() == []
+
+    asyncio.run(_run())
+    # The same result and the same authorization the launch carried.
+    assert lifecycle == [(result, True)]
+    assert any("stop_after_post" in message for _s, message in notes)
+
+
+def test_recipe_launch_reports_post_launch_failures(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import RunOptions, SparkrunError
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+
+    def _failing_post_launch(_result, **_kwargs):
+        raise SparkrunError("post_exec[1] failed (exit 3)")
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: _hooked_launch_result(post_exec=["false"]))
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.post_launch", _failing_post_launch)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", mock.Mock(side_effect=RuntimeError("no metadata")))
+    app, notes = _monitor_app(tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe"))
+            await _until(pilot, lambda: any(severity == "error" for severity, _m in notes))
+
+    asyncio.run(_run())
+    assert ("error", "Post-launch hooks of demo-recipe failed: post_exec[1] failed (exit 3)") in notes
+
+
+def test_recipe_launch_never_runs_local_post_commands(tmp_path, monkeypatch):
+    """post_commands take the terminal; the monitor refuses them rather than run them under the TUI."""
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import RunOptions
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+
+    post_launch = mock.Mock()
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: _hooked_launch_result(post_commands=["sudo x"]))
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.post_launch", post_launch)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", mock.Mock(side_effect=RuntimeError("no metadata")))
+    app, notes = _monitor_app(tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe"))
+            await _until(pilot, lambda: any(severity == "error" for severity, _m in notes))
+
+    asyncio.run(_run())
+    post_launch.assert_not_called()
+    assert any("post_commands" in message and "run demo-recipe" in message for _s, message in notes)
+
+
+def test_recipe_launch_without_hooks_skips_the_lifecycle(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    from sparkrun.api import RunOptions
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+
+    post_launch = mock.Mock()
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", lambda options, **kwargs: _hooked_launch_result())
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.post_launch", post_launch)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", mock.Mock(side_effect=RuntimeError("no metadata")))
+    app, _notes = _monitor_app(tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            app._on_recipe_picked(RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe"))
+            await _until(pilot, lambda: app._pending_log_open is not None)
+            await _until(pilot, lambda: app.background_work.descriptions() == [])
+
+    asyncio.run(_run())
+    post_launch.assert_not_called()
+
+
+def test_quit_during_a_launch_asks_first(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    import asyncio
+    import threading
+    from sparkrun.api import RunOptions
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+    from textual.widgets import Static
+    from sparkrun.cli._monitor_tui import QuitWhileBusyScreen
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _slow_run(options, **_kwargs):
+        entered.set()
+        assert release.wait(5), "test did not release the launch"
+        return _launched_result(dry_run=True)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", _slow_run)
+    app, _notes = _monitor_app(tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            try:
+                app._on_recipe_picked(RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe"))
+                assert await asyncio.to_thread(entered.wait, 3)
+                await pilot.press("q")
+                await pilot.pause(0.1)
+                assert isinstance(app.screen, QuitWhileBusyScreen)
+                assert "the launch of demo-recipe" in str(app.screen.query_one("#quit-busy", Static).content)
+                # ctrl+q is a priority binding that reaches action_quit too: one dialog.
+                await pilot.press("ctrl+q")
+                await pilot.pause(0.1)
+                assert len([s for s in app.screen_stack if isinstance(s, QuitWhileBusyScreen)]) == 1
+                # Keep monitoring is the focused default.
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                assert not isinstance(app.screen, QuitWhileBusyScreen)
+                assert app.is_running
+
+                await pilot.press("q")
+                await pilot.pause(0.1)
+                await pilot.click("#quit-confirm")
+                await pilot.pause(0.1)
+                assert app._exit
+            finally:
+                release.set()
+
+    asyncio.run(_run())
+
+
+def test_quit_without_work_in_flight_exits_at_once(tmp_path):
+    pytest.importorskip("textual")
+    import asyncio
+
+    app, _notes = _monitor_app(tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause(0.05)
+            await pilot.press("q")
+            await pilot.pause(0.1)
+            assert app._exit
+
+    asyncio.run(_run())
+
+
+def test_exit_names_the_launch_the_shell_waits_for_and_late_results_go_to_stderr(tmp_path, monkeypatch, capsys):
+    """After the screen is restored the shell says what it is waiting on; the late outcome must not raise."""
+    pytest.importorskip("textual")
+    import asyncio
+    import threading
+    from sparkrun.api import RunOptions
+    from sparkrun.cli._monitor_recipes import RecipeLaunch
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    worker_errors: list[BaseException] = []
+
+    def _slow_run(options, **_kwargs):
+        entered.set()
+        assert release.wait(10), "test did not release the launch"
+        return _launched_result()
+
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.run", _slow_run)
+    monkeypatch.setattr("sparkrun.cli._monitor_tui.open_log_target", mock.Mock(side_effect=RuntimeError("no metadata")))
+    app, _notes = _monitor_app(tmp_path)
+    original_post = app._run_post_launch
+
+    def _post(result, launch):
+        try:
+            original_post(result, launch)
+        except BaseException as error:  # noqa: BLE001 - recorded for the assertion below, then re-raised
+            worker_errors.append(error)
+            raise
+        finally:
+            finished.set()
+
+    app._run_post_launch = _post  # type: ignore[method-assign]
+
+    async def _auto(pilot):
+        app._on_recipe_picked(RecipeLaunch(options=RunOptions(recipe="demo-recipe"), label="demo-recipe"))
+        assert await asyncio.to_thread(entered.wait, 3)
+        app.exit()
+
+    async def _run():
+        await app.run_async(headless=True, size=(110, 30), auto_pilot=_auto)
+        # run_async has returned: the screen is gone and the launch still runs.
+        assert "Waiting for the launch of demo-recipe to finish..." in capsys.readouterr().err
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    assert worker_errors == []
+    assert "Launched demo-recipe as sparkrun_aa_bb" in capsys.readouterr().err
+
+
+def test_report_from_thread_falls_back_to_stderr_when_the_app_is_gone(tmp_path, capsys):
+    pytest.importorskip("textual")
+    app, notes = _monitor_app(tmp_path)
+    app._report_from_thread("Stop failed for x: boom", severity="error")
+    assert notes == []
+    assert "Stop failed for x: boom" in capsys.readouterr().err
