@@ -942,3 +942,16 @@ def test_relaunch_under_the_same_cluster_id_keeps_earlier_cache_claims(tmp_path:
     # A rewrite that names no claims (e.g. a plugin's own launch path) must not erase them either.
     save_job_metadata(cluster_id, mock_recipe, ["host-a"], cache_dir=str(tmp_path))
     assert load_job_metadata(cluster_id, cache_dir=str(tmp_path))["model_cache_claims"] == [first, second]
+
+
+def test_forget_model_cache_claims_keeps_the_rest_of_the_record(tmp_path: Path, mock_recipe):
+    from sparkrun.orchestration.job_metadata import forget_model_cache_claims
+
+    cluster_id = _make_cluster_id("f", "5")
+    first, second = {"claim": "a", "host": "host-a"}, {"claim": "b", "host": "host-b"}
+    save_job_metadata(cluster_id, mock_recipe, ["host-b"], cache_dir=str(tmp_path), model_cache_claims=[first, second])
+    forget_model_cache_claims(cluster_id, [first], cache_dir=str(tmp_path))
+    meta = load_job_metadata(cluster_id, cache_dir=str(tmp_path))
+    assert meta["model_cache_claims"] == [second] and meta["hosts"] == ["host-b"]
+    forget_model_cache_claims(cluster_id, [second], cache_dir=str(tmp_path))
+    assert "model_cache_claims" not in load_job_metadata(cluster_id, cache_dir=str(tmp_path))

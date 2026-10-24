@@ -275,3 +275,53 @@ def test_waiting_acquisition_supervises_previously_acquired_leases(tmp_path, mon
                 assert not contender.local._processes - {owner.process.process for owner in contender._owners.values()}
             finally:
                 blocker.release_leases()
+
+
+def test_alias_that_cannot_yet_see_our_nonce_reuses_the_lease(tmp_path, monkeypatch):
+    # On NFS the second name may read the lock file before the holder's nonce
+    # is visible there; it then flocks against our own lease. It must
+    # recognize the holder as itself instead of waiting forever.
+    monkeypatch.setattr(_publication, "_WAIT_INTERVAL", 0.05)
+    cache = tmp_path / "actual"
+    cache.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(cache, target_is_directory=True)
+    with ModelHostIO() as io:
+        first = io.lock("localhost", str(cache), "org/model")
+        assert (cache / _cache_agent.STATE / "org--model.lock").read_text().splitlines()[0] == first
+        original = io.read
+        monkeypatch.setattr(io, "read", lambda host, path: None if path.endswith(".lock") else original(host, path))
+        assert io.lock("127.0.0.1", str(alias), "org/model") == first
+        assert len(io._owners) == 1
+        io.publish("127.0.0.1", str(alias), "org/model", str(alias / "published"), "ready")
+    assert (cache / "published").read_text() == "ready"
+
+
+def test_busy_lease_wait_gives_up_after_the_configured_ceiling(tmp_path, monkeypatch):
+    monkeypatch.setattr(_publication, "_WAIT_INTERVAL", 0.05)
+    monkeypatch.setattr("sparkrun.core.model_distribution.lease_timeout", lambda config=None: 0.2)
+    with ModelHostIO() as holder:
+        holder.lock(None, str(tmp_path), "org/model")
+        with ModelHostIO() as contender:
+            with pytest.raises(ModelArtifactError, match="model_cache_lease_timeout_s") as exc:
+                contender.lock(None, str(tmp_path), "org/model")
+            assert f"operation {holder._operation}" in str(exc.value)
+            assert not contender._owners
+        holder.check_leases()
+
+
+def test_lease_timeout_setting():
+    from sparkrun.core.cluster_manager import ClusterDefinition, ClusterDistributionConfig, ResourceDistributionPrefs
+    from sparkrun.core.config import SparkrunConfig
+    from sparkrun.core.model_distribution import DEFAULT_MODEL_CACHE_LEASE_TIMEOUT_S, lease_timeout
+
+    assert lease_timeout(SparkrunConfig()) == DEFAULT_MODEL_CACHE_LEASE_TIMEOUT_S
+    assert lease_timeout({"model_cache_lease_timeout_s": 0}) is None
+    assert lease_timeout({"model_cache_lease_timeout_s": 90}) == 90
+    for bad in (-1, float("inf"), "1h", True):
+        with pytest.raises(ModelArtifactError, match="model_cache_lease_timeout_s"):
+            lease_timeout({"model_cache_lease_timeout_s": bad})
+    prefs = ResourceDistributionPrefs.from_dict({"lease_timeout_s": 600})
+    assert prefs.to_dict() == {"lease_timeout_s": 600} and not prefs.is_default()
+    cluster = ClusterDefinition(name="c", hosts=["a"], distribution=ClusterDistributionConfig(model=prefs))
+    assert lease_timeout(SparkrunConfig().for_cluster(cluster)) == 600

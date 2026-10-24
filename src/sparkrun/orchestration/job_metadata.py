@@ -821,6 +821,28 @@ def _merge_claims(previous, current):
     return merged
 
 
+def forget_model_cache_claims(cluster_id: str, refs, cache_dir: str | None = None, *, sctx: "SparkrunContext | None" = None) -> None:
+    """Drop already-released claim *refs* from a job record, keeping everything else.
+
+    ``save_job_metadata`` carries earlier claims forward, so a released ref left
+    in the record would make every later stop target its host again.
+    """
+    cache_dir = _resolve_cache_dir(cache_dir, sctx)
+    meta = load_job_metadata(cluster_id, cache_dir=cache_dir)
+    if not meta or not meta.get("model_cache_claims"):
+        return
+    kept = [ref for ref in meta["model_cache_claims"] if ref not in refs]
+    if len(kept) == len(meta["model_cache_claims"]):
+        return
+    if kept:
+        meta["model_cache_claims"] = kept
+    else:
+        del meta["model_cache_claims"]
+    from sparkrun.utils.fs import atomic_private_write
+
+    atomic_private_write(Path(cache_dir) / "jobs" / f"{_filename_digest(cluster_id)}.yaml", yaml.safe_dump(meta, default_flow_style=False))
+
+
 def remove_job_metadata(
     cluster_id: str,
     cache_dir: str | None = None,

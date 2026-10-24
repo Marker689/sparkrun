@@ -575,6 +575,10 @@ class StopResult:
     retained so the workload can still be found and stopped."""
     dry_run: bool = False
     """True when nothing was torn down; the result previews the target."""
+    warnings: tuple[str, ...] = ()
+    """Problems that leave the workload stopped but its bookkeeping behind,
+    e.g. model cache claims that could not be released (see
+    ``model-cache reconcile``).  Not failures: :attr:`success` ignores them."""
 
     @property
     def success(self) -> bool:
