@@ -15,8 +15,63 @@ first tagged release containing them, regardless of their original commit date.
 - The `cluster monitor` recipe picker groups runtime variants into families (such
   as `vllm`) and offers an opt-in **All registries** toggle. Enabled registries with
   `Stemless: no` then appear in recipe searches and registry filter choices.
+- `model-cache reconcile MODEL` / `--all` releases workload claims whose workload is
+  gone. It previews by default (`--apply` releases) and releases a claim only when a
+  status sweep observed every claimed host without the workload, the claim is this
+  controller's, no unswept executor or pending operation could hold it, and it is older
+  than `--min-age-minutes` (default 60). The manual single-claim form is now
+  `reconcile --claim`, which, like `pin`, accepts a ref such as `main`.
+- `model-cache prune` sizes and the `model_cache_prune` config accept human-readable
+  values (`500G`, `1.5TiB`, `500GB`). `list` and `delete` point claimed revisions at
+  `reconcile` before `--force`, and every `model-cache` option has help text.
+- Native vLLM, SGLang, Atlas and MAX launches check a local model directory (an absolute
+  `model:` or `resolved_model_path`) on every target before replacing a running workload:
+  readable `config.json`, weight files and the shards its index names, and the other
+  files of a split GGUF. Docker and local executors also check access through the
+  workload's mounts and user. A local model with no known revision renders
+  `{launch.model_revision}` as an empty string.
+- Application profiles can declare default plugins, installed through the managed plugin
+  lifecycle when missing, with persistent opt-outs (`plugins.defaults.enabled`,
+  `plugins.defaults.suppressed`, `SPARKRUN_NO_DEFAULT_PLUGINS`) and `plugins sync`. The
+  stock sparkrun profile declares none, so this changes nothing for sparkrun itself.
+
+### Changed
+
+- Concurrent preparations of the same model wait for the holder's publication lease
+  instead of failing, and the wait names the holding controller, PID and operation.
+  Warm launches no longer take the control-machine cache lease.
 
 ### Fixed
+
+- Relaunching a workload under the same id no longer drops the earlier launch's model
+  cache claims, which `stop` could then never release and which blocked deletes.
+- A same-id relaunch releases the earlier launch's model cache claims on hosts where the
+  replacement confirmed that launch is gone, instead of carrying them forward (each
+  restart of an `export systemd` unit added one, protecting every older revision from
+  pruning). `stop` also tears the id down on hosts only an earlier launch used, so their
+  claims are released, and warns (naming `model-cache reconcile`) when a host could not
+  confirm.
+- `model-cache reconcile --all` keeps claims whose workload may run under an executor
+  this controller has turned off (for example `executor.local`, possibly launched by
+  another controller). Claims now record their executor; for older claims, a job record
+  here naming a swept executor decides. A 5-minute allowance for clock skew is added to
+  `--min-age-minutes`.
+- Waiting on another preparation's publication lease is bounded:
+  `model_cache_lease_timeout_s` (cluster: `distribution.model.lease_timeout_s`), default
+  24 hours, 0 for no limit. On a shared NFS cache reached through two hosts, a launch no
+  longer waits forever on its own lease.
+- `model_cache_prune.max_bytes` rejects 0, which pruned every eligible revision; set
+  `enabled: false` to stop pruning.
+- `cluster monitor` launches no longer narrow the scheduler's candidates to its own
+  displayed placement, so a relaunch evicts the copy it replaces wherever it runs and
+  derives the same workload id as `sparkrun run`. The launch reuses the dialog's plan
+  instead of planning again.
+- `cluster monitor` launches run the recipe's post-launch lifecycle (`post_exec`,
+  readiness, `stop_after_post`). Recipes with `post_commands`, which run on this machine
+  with the terminal, are refused there with a pointer to `sparkrun run`.
+- Quitting `cluster monitor` while a launch or stop is in flight asks first, and after
+  the screen is restored says what it is waiting for. Workers that finish after exit
+  no longer print a traceback.
 
 - Recipe catalogs disambiguate same-stem variants within a registry using their
   full relative paths. Listing, detail views, and shell completion preserve these
