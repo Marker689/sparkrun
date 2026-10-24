@@ -282,7 +282,9 @@ def _render(report) -> None:
         n = report.nccl
         label = "NCCL %s (%s) across %d host(s)" % (n.binary, n.msg_size, len(n.hosts))
         if n.sample is not None:
-            label += " — avg bus bandwidth %.2f GB/s" % n.sample.avg_bus_bw
+            # nccl-tests reports decimal GB/s; the Gb/s figure is what reads
+            # against the link rates the perftest lines above are graded on.
+            label += " — avg bus bandwidth %.2f GB/s (%.1f Gb/s)" % (n.sample.avg_bus_bw, n.sample.avg_bus_bw * 8)
         _echo_status(n.status, label, indent="  ")
         if n.detail and n.status in (STATUS_WARN, STATUS_FAIL):
             click.echo("         → %s" % n.detail)
@@ -349,6 +351,7 @@ def _report_to_dict(report) -> dict:
                 "status": report.nccl.status,
                 "detail": report.nccl.detail,
                 "avg_bus_bw_gbytes": report.nccl.sample.avg_bus_bw if report.nccl.sample else None,
+                "avg_bus_bw_gbits": report.nccl.sample.avg_bus_bw * 8 if report.nccl.sample else None,
             }
             if report.nccl is not None
             else None

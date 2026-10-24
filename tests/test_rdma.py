@@ -1277,3 +1277,27 @@ def test_cli_advertises_full_and_removes_quick_option(runner, v, patched_cluster
     assert result.exit_code == 2, result.output
     assert "No such option" in result.output and "--quick" in result.output
     call.assert_not_called()
+
+
+@pytest.mark.parametrize("output_json", [False, True])
+def test_cli_reports_nccl_bus_bandwidth_in_gbytes_and_gbits(runner, v, patched_cluster_mgr, monkeypatch, output_json):
+    import json
+
+    from sparkrun.api.setup._rdma import NcclTestResult, RdmaTestReport
+
+    monkeypatch.setenv("SPARKRUN_FEATURE_CLI_SETUP_RDMA_TEST", "1")
+    sample = parse_nccl_busbw(REAL_NCCL_OUTPUT)
+    report = RdmaTestReport(
+        hosts=("h1", "h2"),
+        nccl=NcclTestResult(hosts=("h1", "h2"), binary="all_gather_perf", msg_size="16G", sample=sample, status=STATUS_OK),
+    )
+    args = ["setup", "rdma-test", "--hosts", "h1,h2"] + (["--json"] if output_json else [])
+    with mock.patch("sparkrun.api.setup.rdma_test", return_value=report):
+        result = runner.invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    if output_json:
+        nccl = json.loads(result.output)["nccl"]
+        assert nccl["avg_bus_bw_gbits"] == pytest.approx(nccl["avg_bus_bw_gbytes"] * 8)
+    else:
+        assert "avg bus bandwidth %.2f GB/s (%.1f Gb/s)" % (sample.avg_bus_bw, sample.avg_bus_bw * 8) in result.output
