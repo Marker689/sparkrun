@@ -25,17 +25,70 @@ first tagged release containing them, regardless of their original commit date.
   must be listening before the serving rank starts.
 - Docs: `docs/TENSORFOLD.md` covers the runtime, NFS weights, TP limits, the
   DeepSeek bundle layout and the hardware validation checklist.
-
-### Changed
-- The `tensorfold` monitor log colorizer is now wired to the new in-tree
-  runtime instead of only an out-of-tree expectation; the DeepSeek fork mode
-  logs under the same prefixes and shares it.
-
 - The `cluster monitor` recipe picker groups runtime variants into families (such
   as `vllm`) and offers an opt-in **All registries** toggle. Enabled registries with
   `Stemless: no` then appear in recipe searches and registry filter choices.
+- `model-cache reconcile MODEL` / `--all` releases workload claims whose workload is
+  gone. It previews by default (`--apply` releases) and releases a claim only when a
+  status sweep observed every claimed host without the workload, the claim is this
+  controller's, no unswept executor or pending operation could hold it, and it is older
+  than `--min-age-minutes` (default 60). The manual single-claim form is now
+  `reconcile --claim`, which, like `pin`, accepts a ref such as `main`.
+- `model-cache prune` sizes and the `model_cache_prune` config accept human-readable
+  values (`500G`, `1.5TiB`, `500GB`). `list` and `delete` point claimed revisions at
+  `reconcile` before `--force`, and every `model-cache` option has help text.
+- Native vLLM, SGLang, Atlas and MAX launches check a local model directory (an absolute
+  `model:` or `resolved_model_path`) on every target before replacing a running workload:
+  readable `config.json`, weight files and the shards its index names, and the other
+  files of a split GGUF. Docker and local executors also check access through the
+  workload's mounts and user. A local model with no known revision renders
+  `{launch.model_revision}` as an empty string.
+- Application profiles can declare default plugins, installed through the managed plugin
+  lifecycle when missing, with persistent opt-outs (`plugins.defaults.enabled`,
+  `plugins.defaults.suppressed`, `SPARKRUN_NO_DEFAULT_PLUGINS`) and `plugins sync`. The
+  stock sparkrun profile declares none, so this changes nothing for sparkrun itself.
+
+### Changed
+
+- The `tensorfold` monitor log colorizer is now wired to the new in-tree
+  runtime instead of only an out-of-tree expectation; the DeepSeek fork mode
+  logs under the same prefixes and shares it.
+- Concurrent preparations of the same model wait for the holder's publication lease
+  instead of failing, and the wait names the holding controller, PID and operation.
+  Warm launches no longer take the control-machine cache lease.
 
 ### Fixed
+
+- Relaunching a workload under the same id no longer drops the earlier launch's model
+  cache claims, which `stop` could then never release and which blocked deletes.
+- A same-id relaunch releases the earlier launch's model cache claims on hosts where the
+  replacement confirmed that launch is gone, instead of carrying them forward (each
+  restart of an `export systemd` unit added one, protecting every older revision from
+  pruning). `stop` also tears the id down on hosts only an earlier launch used, so their
+  claims are released, and warns (naming `model-cache reconcile`) when a host could not
+  confirm.
+- `model-cache reconcile --all` keeps claims whose workload may run under an executor
+  this controller has turned off (for example `executor.local`, possibly launched by
+  another controller). Claims now record their executor; for older claims, a job record
+  here naming a swept executor decides. A 5-minute allowance for clock skew is added to
+  `--min-age-minutes`.
+- Waiting on another preparation's publication lease is bounded:
+  `model_cache_lease_timeout_s` (cluster: `distribution.model.lease_timeout_s`), default
+  24 hours, 0 for no limit. On a shared NFS cache reached through two hosts, a launch no
+  longer waits forever on its own lease.
+- `model_cache_prune.max_bytes` rejects 0, which pruned every eligible revision; set
+  `enabled: false` to stop pruning.
+- `cluster monitor` launches no longer narrow the scheduler's candidates to its own
+  displayed placement, so a relaunch evicts the copy it replaces wherever it runs and
+  derives the same workload id as `sparkrun run`. The launch reuses the dialog's plan
+  instead of planning again.
+- `cluster monitor` launches run the recipe's post-launch lifecycle (`post_exec`,
+  readiness, `stop_after_post`). Recipes with `post_commands`, which run on this machine
+  with the terminal, are refused there with a pointer to `sparkrun run`.
+- Quitting `cluster monitor` while a launch or stop is in flight asks first, and after
+  the screen is restored says what it is waiting for. Workers that finish after exit
+  no longer print a traceback.
+
 - Recipe catalogs disambiguate same-stem variants within a registry using their
   full relative paths. Listing, detail views, and shell completion preserve these
   choices; unique recipes keep their short names, including under search filters.
@@ -56,10 +109,42 @@ first tagged release containing them, regardless of their original commit date.
 - `uvx sparkrun setup install` writes tab-completion for the installed tool instead of
   the first `sparkrun` on PATH, which under uvx is uvx's throwaway copy in the uv cache.
   After `uv cache clean`, that broke every new shell.
+- Launching an untrusted recipe from `cluster monitor` now shows what its trust checkbox
+  authorizes: the recipe's hooks and its container-isolation overrides (host mounts,
+  privileged mode, executor selection, pre-placed paths), as `sparkrun run` does. The
+  checkbox previously listed only the hooks, and rendered recipe text as markup, so a
+  hook could restyle or hide what was shown.
+- `cluster monitor` no longer exits with a markup error when a recipe description,
+  model name, typed override or error message contains square brackets (`[/think]`,
+  `[/]`); such text is displayed as written.
+- Local HF model directories that keep a `pytorch_model.bin.index.json` beside their
+  safetensors weights (for example, a download filtered to `*.safetensors` and `*.json`)
+  pass the new pre-launch check again. Like the loaders, it reads the safetensors index
+  when one exists.
+- `setup rdma-test --suite nccl|all` no longer hangs for its full 10-minute budget on
+  clusters where a host runs docker bridge networks. Open MPI advertised those unroutable
+  `br-*` addresses and blocked in `MPI_Init`; its TCP traffic is now pinned to the
+  hosts' shared management subnet. The collective drops the page cache first, as a launch
+  does, so a host whose cache filled free memory no longer fails with CUDA out of memory.
+  Timeouts and out-of-memory failures are named in the report.
+- `setup rdma-test` distributes its test image the way a launch does: the cluster's
+  transfer mode and interface, image-distribution plugins such as OCI Relay, and offline
+  mode (`--offline/--online`, or the cluster's `offline:`). Previously every host pulled
+  from the registry itself. It also connects as the cluster's `user:` (an explicit
+  `--user` still wins); it used config or the local login, so it failed on clusters
+  whose login differs.
+- `setup rdma-test` reports progress through its long steps: a `[k/N]` line as each host
+  pair finishes, and a periodic "still running" line with elapsed time during the image
+  fetch and the NCCL collective. NCCL bus bandwidth is shown in Gb/s beside GB/s
+  (`--json`: `avg_bus_bw_gbits`), so it reads against the link rates.
+  The inventory line breaks its counts down as hosts, shared subnets, pairs and paths
+  (`4 hosts reached on 2 subnets (6 pairs, 12 paths; switch topology)`), and notes when
+  `--suite nccl` does not measure them.
+- SGLang FP8 kernel tuning streams its output again at default verbosity, and a failed
+  tune logs its captured output. Since the monitor terminal fix, it only streamed with `-v`.
 - Re-running `setup install` also repairs existing generated completion entries in
   Bash, Zsh, and Fish to point at the installed tool, including stale uvx cache paths.
   Surrounding shell settings and custom completion commands are preserved.
-
 
 ## [0.4.1] — 2026-10-19
 

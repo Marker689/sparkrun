@@ -258,7 +258,7 @@ def test_auto_prune_is_opt_in_and_excludes_the_requested_repository(tmp_path):
     manifest, current, _ = tracked(tmp_path)
     prepare_model("org/model", ["localhost"], cache_dir=str(tmp_path), manifest=manifest)
     assert old.exists()
-    config = {"model_cache_prune": {"enabled": True, "max_bytes": 0, "min_age_days": 0}}
+    config = {"model_cache_prune": {"enabled": True, "max_bytes": 1, "min_age_days": 0}}
     prepare_model("org/model", ["localhost"], cache_dir=str(tmp_path), manifest=manifest, config=config)
     assert current.exists() and not old.exists()
 
@@ -403,8 +403,9 @@ def _claimed(root, workload, *, created=1.0):
     return token, path
 
 
-def _sweep(monkeypatch, *, running=(), errors=None, pending=(), jobs=(), swept=("docker",)):
-    coverage = tuple(SimpleNamespace(target=SimpleNamespace(executor=name)) for name in swept)
+def _sweep(monkeypatch, *, running=(), errors=None, pending=(), jobs=(), swept=("docker",), gated=None):
+    coverage = tuple(SimpleNamespace(target=SimpleNamespace(executor=name), status_scope="host") for name in swept)
+    monkeypatch.setattr("sparkrun.orchestration.executors._base._GATED_OFF_EXECUTORS", dict(gated or {}))
     snapshot = SimpleNamespace(running_cluster_ids=lambda: tuple(running), observation_errors=dict(errors or {}), coverage=coverage)
     records = [SimpleNamespace(workload_id=w, metadata={"executor": e}) for w, e in jobs]
     monkeypatch.setattr("sparkrun.api._jobs.list_jobs", lambda **kw: records)
@@ -471,6 +472,93 @@ def test_reconcile_all_keeps_foreign_and_malformed_claims(tmp_path, monkeypatch,
     (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
     assert (result.status, result.action) == (status, None)
     assert token in json.loads(path.read_text())["claims"]
+
+
+@pytest.mark.parametrize(
+    "gated,status",
+    [
+        ({"local": ("executor.local", "host")}, "unverified"),
+        # Another substrate's executor cannot hold a workload on these hosts.
+        ({"k8s": ("executor.k8s", "k8s")}, "orphaned"),
+    ],
+)
+def test_reconcile_all_keeps_claims_an_executor_turned_off_here_could_hold(tmp_path, monkeypatch, gated, status):
+    # Another controller may have launched it under that executor, leaving no
+    # job record here, so the docker sweep finding nothing proves nothing.
+    token, path = _claimed(tmp_path, GONE)
+    _sweep(monkeypatch, gated=gated)
+    (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    assert result.status == status
+    if status == "unverified":
+        assert "enable executor.local" in result.reason
+        assert token in json.loads(path.read_text())["claims"]
+
+
+def _record_executor(path, token, executor):
+    record = json.loads(path.read_text())
+    record["claims"][token]["executor"] = executor
+    path.write_text(json.dumps(record))
+
+
+def test_reconcile_all_requires_the_claims_recorded_executor_in_the_sweep(tmp_path, monkeypatch):
+    token, path = _claimed(tmp_path, GONE)
+    _record_executor(path, token, "local")
+    _sweep(monkeypatch)
+    (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    assert (result.status, result.action) == ("unverified", None)
+    assert "local" in result.reason
+    assert token in json.loads(path.read_text())["claims"]
+
+
+def test_reconcile_all_releases_a_recorded_swept_executor_despite_gated_peers(tmp_path, monkeypatch):
+    # The claim says where its workload ran, so an unrelated gated executor
+    # no longer has to block it.
+    token, path = _claimed(tmp_path, GONE)
+    _record_executor(path, token, "docker")
+    _sweep(monkeypatch, gated={"local": ("executor.local", "host")})
+    (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    assert (result.status, result.action) == ("orphaned", "released")
+
+
+@pytest.mark.parametrize(("jobs", "status"), [([(GONE, "docker")], "orphaned"), ([(GONE, None)], "unverified"), ([], "unverified")])
+def test_reconcile_all_lets_a_job_record_place_a_legacy_claim(tmp_path, monkeypatch, jobs, status):
+    # Claims written before they recorded an executor would otherwise all stay
+    # unverified on stable, where executor.local is gated off by default.
+    token, path = _claimed(tmp_path, GONE)
+    _sweep(monkeypatch, jobs=jobs, gated={"local": ("executor.local", "host")})
+    (result,) = model_cache.reconcile_claims(cache_dir=str(tmp_path), dry_run=False)
+    assert result.status == status
+    assert (token in json.loads(path.read_text())["claims"]) is (status != "orphaned")
+
+
+def test_launch_claims_record_their_executor(tmp_path):
+    from sparkrun.models.usage import set_workload_executor
+
+    manifest, _, path = tracked(tmp_path)
+    with usage_operation():
+        begin_workload(GONE, {})
+        set_workload_executor("local")
+        with ModelHostIO() as io:
+            record_use(io, "localhost", str(tmp_path), manifest)
+        token = workload_claims()[0]["claim"]
+        activate_workload()
+    assert json.loads(path.read_text())["claims"][token]["executor"] == "local"
+
+
+def test_gated_off_executor_registration_is_recorded(monkeypatch):
+    from sparkrun.orchestration.executors import _base
+
+    class Gated(_base.Executor):
+        executor_name = "gated-test"
+        required_feature_flag = "executor.gated-test"
+
+    monkeypatch.setattr(_base, "_GATED_OFF_EXECUTORS", {})
+    monkeypatch.setattr(Gated, "is_multi_extension", lambda self, v: False)
+    Gated.on_registration(Gated.__new__(Gated), None)
+    assert _base.gated_off_executors() == {"gated-test": ("executor.gated-test", "host")}
+    monkeypatch.setattr(Gated, "is_multi_extension", lambda self, v: True)
+    Gated.on_registration(Gated.__new__(Gated), None)
+    assert _base.gated_off_executors() == {}
 
 
 def test_reconcile_all_skips_the_status_sweep_without_claims(tmp_path, monkeypatch):
@@ -585,6 +673,20 @@ def test_auto_prune_config_accepts_sizes(monkeypatch):
         None, [("h1", "/hf")], config=SimpleNamespace(get=lambda key, default=None: policy.get(key, default)), exclude_repos=()
     )
     assert calls[0]["max_bytes"] == 2**40 and calls[0]["min_free_bytes"] is None
+
+
+@pytest.mark.parametrize("value", [0, "0", "0G"])
+def test_auto_prune_config_rejects_a_zero_budget(monkeypatch, value):
+    from sparkrun.models import cache
+
+    host_cache = Mock()
+    monkeypatch.setattr(cache, "host_cache", host_cache)
+    policy = {"model_cache_prune": {"enabled": True, "max_bytes": value}}
+    with pytest.raises(ModelArtifactError, match="max_bytes must be positive"):
+        cache.auto_prune(
+            None, [("h1", "/hf")], config=SimpleNamespace(get=lambda key, default=None: policy.get(key, default)), exclude_repos=()
+        )
+    host_cache.assert_not_called()
 
 
 @pytest.mark.parametrize("action,force", [("inventory", False), ("delete", True)])

@@ -1515,6 +1515,13 @@ def launch_inference(
     executor = host_executors[host_list[0]]
     executor.bind_host_executors(host_executors)
     runtime.executor = executor
+    if not dry_run:
+        from sparkrun.models.usage import set_workload_executor
+
+        # One name for every host, or none: a mixed launch keeps the
+        # conservative unrecorded-executor treatment in reconcile.
+        names = {getattr(ex, "executor_name", None) for ex in host_executors.values()}
+        set_workload_executor(names.pop() if len(names) == 1 else None)
 
     # Preflight: verify the host paths this launch will bind actually exist on
     # the substrate where the workload runs — pre-placed weights (whose

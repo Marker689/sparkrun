@@ -65,7 +65,12 @@ def validate_local_model(path: Path, model_format: str = "auto") -> list[str]:
         return []
     _json_object(config)
     files = {str(config)}
-    indexes = sorted(path.glob("*.index.json"))
+    # Choose the index the way the loaders choose weights: safetensors first.
+    # A download filtered to "*.safetensors" + "*.json" keeps the
+    # pytorch_model.bin index (it is JSON) without the .bin shards it names,
+    # and the loaders never read it, so requiring its shards refused a usable
+    # checkpoint.
+    indexes = sorted(path.glob("*.safetensors.index.json")) or sorted(path.glob("*.index.json"))
     if indexes:
         for index in indexes:
             weights = _json_object(index).get("weight_map")

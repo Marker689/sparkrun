@@ -19,6 +19,7 @@ model_transfer_max_streams: 16         # total rsync processes per copy operatio
 model_transfer_idle_timeout_s: 600     # cancel a copy/download whose bytes stop advancing
 model_transfer_timeout_s: 0            # optional total ceiling; 0 (default) = none
 model_transfer_stall_retries: 1        # resume a stalled rsync this many times
+model_cache_lease_timeout_s: 86400     # wait this long for a busy cache lease; 0 = no limit
 # model_distribution_fallback: true   # optional override of provider policy
 ```
 
@@ -310,6 +311,16 @@ Confirmed `stop`/`stop-all` releases the corresponding claims and restarts the
 retention age. A failed or interrupted activation retains its claims; neither
 age nor a dead controller proves that remote workloads stopped.
 
+A relaunch under the same workload id (an `export systemd` unit restarting, or
+`run` again) keeps the earlier launch's claims in the job record. At the
+replacement barrier it releases them on every host where its status sweep, through
+the executor the earlier launch recorded, saw that workload not running; where it
+still runs, its containers are replaced by name without confirmation and the
+claim is kept for the next stop. `stop` also tears the id down on hosts that only
+an earlier launch claimed (the scheduler may have placed the relaunch elsewhere),
+which is a no-op where nothing runs. If a claim still cannot be released, `stop`
+succeeds with a warning naming `model-cache reconcile` and keeps the job record.
+
 Retry a normal stop to reconcile a known workload. Otherwise let sparkrun find
 the claims whose workload is gone (default cluster, or `--cluster`/`--hosts`):
 
@@ -322,9 +333,16 @@ sparkrun model-cache reconcile org/model        # one model only
 It sweeps the targets' status once and releases a claim only when every host in
 the claim was observed, its workload runs on none of them, no pending operation
 on this control machine names it, and it is older than `--min-age-minutes`
-(default 60). Claims of another distribution's workloads (status cannot see
-them) are kept, as are claims that may belong to a workload launched through an
-executor whose feature flag has since been turned off. The age floor covers a launch that has claimed its model but not
+(default 60) plus five minutes of allowance for clock skew: `created` is the
+clock of whichever control machine launched it, so even `--min-age-minutes 0`
+keeps a claim made in the last five minutes. Claims of another distribution's
+workloads (status cannot see them) are kept. A claim records the executor its
+launch used, and is kept unless the sweep queried that executor. A claim from an
+older sparkrun records none, and is kept while any executor on the cluster's
+substrate is turned off by a feature flag on this machine (another controller may
+have launched it through `local`, leaving no job record here); enable the flag
+named in the reason, for this run if need be (`SPARKRUN_FEATURE_EXECUTOR_LOCAL=1`),
+so the sweep covers it. The age floor covers a launch that has claimed its model but not
 yet started containers, possibly from another control machine; lower it only
 when nothing else is launching. Claims on unreachable hosts, or naming hosts
 outside the targets, are reported and kept.
@@ -351,7 +369,7 @@ model_cache_prune:
   enabled: false                  # opt in explicitly
   min_age_days: 7
   min_free_bytes: 100G             # free-space target per cache
-  # max_bytes: 500G               # optional private snapshot budget
+  # max_bytes: 500G               # optional private snapshot budget (must be positive)
 ```
 
 Enabling it requires at least one byte target. Sizes take a plain byte count or
@@ -592,8 +610,12 @@ never deletes a shared canonical blob. Copied files are not skipped based only
 on equal sizes when a checksum repair has identified corruption.
 
 Core holds per-cache/repository `flock` leases across acquisition and provider
-calls. Concurrent preparations wait for a busy lease without an overall acquisition
-deadline, reporting the holder's controller, PID and operation every ten seconds.
+calls. Concurrent preparations wait for a busy lease, reporting the holder's
+controller, PID and operation every ten seconds, for up to
+`model_cache_lease_timeout_s` (cluster `distribution.model.lease_timeout_s`;
+default 86400, `0` waits without limit). Because a lease spans the holder's whole
+download, a healthy wait can last hours; the ceiling only fails a launch queued
+behind a holder that is stuck, and its error names the holder and the setting.
 Waiting remains cancellable and continues monitoring leases already acquired;
 failure to acquire is reported separately from losing a held lease.
 
@@ -605,7 +627,10 @@ reuse to account for changes during the gap. Leases remain exclusive: transfers
 sharing a source still serialize, while an independent warm target can launch.
 Metadata writes, repairs, and eviction retain the same locking contract.
 
-An operation nonce recognizes leases reached through shared-cache aliases;
+An operation nonce recognizes leases reached through shared-cache aliases, both
+before locking and when an alias finds the lease busy and reads our own nonce as
+its holder. The holder writes the nonce through a separate, fsynced write, since
+NFS shows other clients only data the writer has flushed;
 complete aliases are omitted from transfer after observation. Core monitors the
 holder processes and treats lease loss as terminal: streaming commands are
 cancelled and providers receive cancellation through their request. Local Hub

@@ -13,17 +13,21 @@ here touches the running workload view.
 
 from __future__ import annotations
 
+import itertools
 import shlex
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from textual import events, work
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ItemGrid, Vertical
+from textual.content import Content
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Input, OptionList, ProgressBar, Select, Static
@@ -40,6 +44,7 @@ from sparkrun.api import (
     untrusted_hooks,
 )
 from sparkrun.api._resolve import resolve_recipe  # private-module import; CLI precedent: cli/_run.py resolve_operation_target
+from sparkrun.core.application_profile import get_application_profile
 from sparkrun.core.bootstrap import get_runtime
 from sparkrun.core.recipe import is_local_model_path, recipe_matches_query
 from sparkrun.core.resolve import apply_recipe_overrides
@@ -50,6 +55,97 @@ if TYPE_CHECKING:
     from sparkrun.core.recipe import Recipe
 
 
+class BackgroundWork:
+    """Blocking calls still running on worker threads, by description.
+
+    Textual's thread workers run on the event loop's default executor, and a
+    cancelled worker only stops *waiting*: its thread keeps going until the call
+    returns. ``asyncio.run`` then joins those threads after the screen is
+    restored, so quitting during a launch, a first catalog load (which may clone
+    registries) or a scheduler check left the shell blocked with nothing on it.
+    The app reads this registry to confirm a quit that would wait on a launch,
+    and to say what it is waiting for once the screen is gone. The calls are not
+    abandoned on daemon threads instead: a launch interrupted halfway leaves a
+    half-started workload, the catalog load writes the registry cache, and
+    planning prepares provider transports.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ids = itertools.count()
+        self._entries: dict[int, tuple[str, bool]] = {}
+
+    @contextmanager
+    def track(self, description: str, *, blocks_quit: bool = False) -> Iterator[Callable[[str], None]]:
+        """Register *description* while the block runs; yields a callable that renames it.
+
+        *blocks_quit* marks work that quitting must not appear to cut short (a
+        launch): the app asks before it waits on it.
+        """
+        key = next(self._ids)
+
+        def _describe(text: str) -> None:
+            with self._lock:
+                self._entries[key] = (text, blocks_quit)
+
+        _describe(description)
+        try:
+            yield _describe
+        finally:
+            with self._lock:
+                self._entries.pop(key, None)
+
+    def descriptions(self, *, blocking_only: bool = False) -> list[str]:
+        """What is still running, oldest first."""
+        with self._lock:
+            return [text for text, blocks in self._entries.values() if blocks or not blocking_only]
+
+
+@contextmanager
+def tracked_work(app: App, description: str, *, blocks_quit: bool = False) -> Iterator[Callable[[str], None]]:
+    """``app.background_work.track`` when the app keeps one; a no-op otherwise."""
+    tracker = getattr(app, "background_work", None)
+    if not isinstance(tracker, BackgroundWork):
+        yield lambda _text: None
+        return
+    with tracker.track(description, blocks_quit=blocks_quit) as describe:
+        yield describe
+
+
+def call_ui(app: App, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
+    """``app.call_from_thread`` that drops the call once the app has stopped; True when it ran.
+
+    A worker can outlive the app (see :class:`BackgroundWork`). After exit
+    ``call_from_thread`` raises ``RuntimeError``, and during shutdown the
+    callback meets widgets that are already pruned; either way the worker
+    raised and Textual printed a traceback over the restored shell. Failures
+    are only swallowed when the app is no longer running, so a broken callback
+    in a live app still surfaces.
+    """
+    if not app.is_running:
+        return False
+    try:
+        app.call_from_thread(callback, *args, **kwargs)
+    except Exception:
+        if app.is_running:
+            raise
+        return False
+    return True
+
+
+def local_post_commands_refusal(recipe: "Recipe", name: str) -> str | None:
+    """Why the monitor will not launch *recipe*, or None when it can.
+
+    ``post_commands`` run on this machine with the terminal handed to them
+    (``orchestration/hooks.py``: a ``sudo`` prompt must keep working), which
+    would take the terminal from the TUI. The CLI is the place for them.
+    """
+    if not getattr(recipe, "post_commands", None):
+        return None
+    command = get_application_profile().command
+    return f"This recipe runs post_commands on this machine, which need the terminal; launch it with: {command} run {name}"
+
+
 @dataclass(frozen=True)
 class RecipeLaunch:
     """A validated launch request handed from the params modal to the app."""
@@ -57,6 +153,13 @@ class RecipeLaunch:
     options: RunOptions
     label: str
     """RecipeSummary.name, for notifications."""
+    plan: Any = field(default=None, compare=False)
+    """The ``RunPlan`` the Run preflight built from exactly ``options``.
+
+    Handed to ``api.run(options, plan=plan)`` so the launch is the placement
+    the preflight checked, decided once, without another hardware probe and
+    occupancy sweep. ``None`` makes ``run`` plan for itself.
+    """
 
 
 class RecipeActivated(Message):
@@ -124,6 +227,8 @@ class RuntimeChecks:
     """Non-selectable hosts and why, as ``(host, short reason)`` pairs."""
     ok: bool = True
     """False when the plan itself failed (no placement exists to launch)."""
+    plan: Any = field(default=None, compare=False)
+    """The ``RunPlan`` behind ``selected``, when planning succeeded."""
 
 
 # Scheduler rejections are identifiers (``_occupancy_base._rejections``); the
@@ -267,14 +372,16 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
     @work(thread=True, exclusive=True, group="recipes")
     def _load_worker(self, request: int, include_hidden: bool) -> None:
         """Fetch the catalog off the UI thread; first use may clone registries."""
+        app = self.app
         failure = None
-        try:
-            recipes = search_recipes(include_hidden=include_hidden, sctx=self.sctx)
-        except Exception as error:  # noqa: BLE001 - a catalog failure must not break the app
-            failure = str(error)
-            recipes = []
-        families = {name: _runtime_family(name, self.sctx) for name in {s.runtime.lower() for s in recipes if s.runtime}}
-        self.app.call_from_thread(self._on_loaded, recipes, request, families, failure)
+        with tracked_work(app, "the recipe catalog load"):
+            try:
+                recipes = search_recipes(include_hidden=include_hidden, sctx=self.sctx)
+            except Exception as error:  # noqa: BLE001 - a catalog failure must not break the app
+                failure = str(error)
+                recipes = []
+            families = {name: _runtime_family(name, self.sctx) for name in {s.runtime.lower() for s in recipes if s.runtime}}
+        call_ui(app, self._on_loaded, recipes, request, families, failure)
 
     def _on_loaded(self, recipes: list[RecipeSummary], request: int, families: dict[str, str], failure: str | None = None) -> None:
         # The screen can be dismissed while the catalog is still loading (the
@@ -299,11 +406,11 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
         filters = self.query_one("#recipe-filters", OptionList)
         options = [Option("All recipes", id="all")]
         for runtime in sorted(set(self._runtime_families.values())):
-            options.append(Option(f"Runtime: {runtime}", id=f"runtime:{runtime}"))
+            options.append(Option(Content(f"Runtime: {runtime}"), id=f"runtime:{runtime}"))
         if any(s.registry is None for s in self._recipes):
             options.append(Option("Local recipes", id="registry:"))
         for registry in sorted({s.registry for s in self._recipes if s.registry}):
-            options.append(Option(f"@{registry}", id=f"registry:{registry}"))
+            options.append(Option(Content(f"@{registry}"), id=f"registry:{registry}"))
         selected = next((i for i, option in enumerate(options) if option.id == self._filter), 0)
         self._filter = options[selected].id or "all"
         with self.prevent(OptionList.OptionHighlighted):
@@ -345,7 +452,7 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
         # Index ids, not names: two registry recipes can share one qualified name.
         for idx, summary in enumerate(self._shown):
             prompt = f"{summary.name} — {summary.model}" if summary.model else summary.name
-            listed.add_option(Option(prompt, id=str(idx)))
+            listed.add_option(Option(Content(prompt), id=str(idx)))
 
         target = next((i for i, s in enumerate(self._shown) if s.name == keep), 0)
         listed.highlighted = target
@@ -363,25 +470,29 @@ class RecipePickerScreen(Screen[RecipeLaunch | None]):
             self.query_one("#recipe-meta-desc", Static).update(desc)
 
     @staticmethod
-    def _render_meta(summary: RecipeSummary) -> tuple[str, str, str]:
+    def _render_meta(summary: RecipeSummary) -> tuple[Content, Content, Content]:
         """Info box fields, in render order: identity, decision stats, prose.
 
         Only what a launch decision needs: which recipe (the name carries its
         registry qualifier), what it runs, how many hosts it needs, and the
         parallelism and memory knobs. Paths and other provenance internals are
         left out. The description closes the box.
+
+        Recipe fields are registry content, so they are substituted as plain
+        text: parsed as markup, a ``[/think]`` in a description raised at
+        render time and exited the app.
         """
         tp = summary.tensor_parallel if summary.tensor_parallel is not None else "runtime default"
         gpu_mem = summary.gpu_memory_utilization if summary.gpu_memory_utilization is not None else "recipe default"
-        head = "\n".join(
-            [
-                f"[bold]{summary.name}[/bold]",
-                f"model: {summary.model or '-'}",
-                f"runtime: {summary.runtime or '-'}",
-            ]
+        head = Content.from_markup(
+            "[bold]$name[/bold]\nmodel: $model\nruntime: $runtime",
+            name=summary.name,
+            model=summary.model or "-",
+            runtime=summary.runtime or "-",
         )
-        stats = f"min nodes: {summary.min_nodes} · tensor parallel: {tp} · gpu memory util: {gpu_mem}"
-        return head, stats, summary.description or "[dim]no description[/dim]"
+        stats = Content(f"min nodes: {summary.min_nodes} · tensor parallel: {tp} · gpu memory util: {gpu_mem}")
+        desc = Content(summary.description) if summary.description else Content.from_markup("[dim]no description[/dim]")
+        return head, stats, desc
 
     # -- events -------------------------------------------------------------
 
@@ -497,11 +608,12 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
     and the picker immediately opens the parameter modal; Cancel dismisses with
     ``None`` and the worker's result is discarded. The parameter modal reuses it
     as a preflight: it passes the final ``RunOptions`` so the plan sees the
-    knobs, and a failure there returns to the settings instead of launching. A
-    failed plan in the picker flow is advisory:
-    ``run()`` re-plans from the parameters the next modal collects and
-    feasibility can change with them (a lower tensor parallel may fit where the
-    recipe default did not), so the parameters modal opens either way.
+    knobs, and a failure there returns to the settings instead of launching;
+    success hands its plan to the launch. A failed plan in the picker flow is
+    advisory: the Run preflight re-plans from the parameters the next modal
+    collects and feasibility can change with them (a lower tensor parallel may
+    fit where the recipe default did not), so the parameters modal opens either
+    way.
     """
 
     DEFAULT_CSS = """
@@ -577,17 +689,24 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
     @work(thread=True, exclusive=True, group="runtime-checks")
     def _checks_worker(self) -> None:
         """Plan the launch, then check each candidate host's availability and memory fit off the UI thread."""
+        # Cancel only stops Textual waiting on this thread: the plan keeps
+        # running, and its result lands on a detached screen that ignores it.
+        app = self.app
+        with tracked_work(app, f"the scheduler check for {self.summary.name}"):
+            outcome = self._run_checks()
+        call_ui(app, *outcome)
+
+    def _run_checks(self) -> tuple[Any, ...]:
+        """``(handler, *args)`` for the UI thread: the checks, or why planning failed."""
         try:
             options = self.options or RunOptions(recipe=deepcopy(self.recipe), cluster=self.cluster, hosts=self.hosts or None)
             run_plan = plan(options, sctx=self.sctx)
         except (InsufficientCapacity, HostsUnreachable) as error:
             # The plan failed on capacity, not on an unknown: the scheduler's
             # own per-host rejections say which rows are dead ends.
-            self.app.call_from_thread(self._checks_failed, str(error), self._blocked_checks(error))
-            return
+            return self._checks_failed, str(error), self._blocked_checks(error)
         except Exception as error:  # noqa: BLE001 - the modal owns the failure, the app must survive it
-            self.app.call_from_thread(self._checks_failed, str(error))
-            return
+            return self._checks_failed, str(error)
 
         selected = tuple(run_plan.host_list)
         scheduler = run_plan.scheduler
@@ -644,8 +763,9 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
             notes=notes,
             warnings=tuple(warnings),
             reasons=tuple(reasons.items()),
+            plan=run_plan,
         )
-        self.app.call_from_thread(self._checks_ready, checks)
+        return self._checks_ready, checks
 
     def _checks_ready(self, checks: RuntimeChecks) -> None:
         # Cancel may have closed the modal while the worker ran; the picker's
@@ -685,8 +805,8 @@ class RuntimeChecksScreen(ModalScreen[RuntimeChecks | None]):
         )
 
     def _checks_failed(self, message: str, checks: RuntimeChecks | None = None) -> None:
-        # In the picker flow this is advisory: ``run()`` re-plans from the final
-        # RunOptions, so a plan that fails on the recipe defaults (say, TP too
+        # In the picker flow this is advisory: the Run preflight re-plans from the
+        # final RunOptions, so a plan that fails on the recipe defaults (say, TP too
         # high for the free capacity) is recoverable by editing the knobs in the
         # next modal. Without a plan there is no fit data, so every host stays
         # selectable and pre-checked, exactly like the CLI's default candidate
@@ -879,9 +999,15 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         self._default_knobs: list[tuple[str, Any]] = []
         self._env_keys: list[str] = []
         # The options a Run press built; the preflight's callback launches them
-        # only if the scheduler still accepts every selected host.
+        # only if the scheduler still accepts every candidate host.
         self._pending_options: RunOptions | None = None
         self._refreshing_hosts = False
+        # The host boxes as this modal last set them from a scheduler check, and
+        # whether the user has toggled one since. Untouched boxes only *show*
+        # the placement; launching with them as the candidate list would make
+        # the display authoritative over placement (see _candidate_hosts).
+        self._default_selection = self._eligible_selection(checks, checks.selected)
+        self._hosts_edited = False
 
     # -- layout -------------------------------------------------------------
 
@@ -898,7 +1024,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         env = getattr(self.recipe, "env", None) or {}
         self._env_keys = sorted(env)
         with Vertical(id="params-dialog"):
-            yield Static(f"Run [bold]{self.summary.name}[/bold]?", id="param-title")
+            yield Static(Content.from_markup("Run [bold]$name[/bold]?", name=self.summary.name), id="param-title")
             with Horizontal(id="param-cols"):
                 with Vertical(id="param-short"):
                     yield Static("Tensor parallel", classes="param-label")
@@ -936,7 +1062,7 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                             reasons = dict(self.checks.reasons)
                             for index, host in enumerate(self.hosts):
                                 eligible = host in self.checks.selectable
-                                label = host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})"
+                                label = Content(host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})")
                                 yield Checkbox(
                                     label,
                                     # A disabled row cannot be unchecked, so an
@@ -948,8 +1074,11 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                                     id=f"param-host-{index}",
                                 )
                     if self.pending_hooks:
-                        yield Static("Untrusted hooks need authorization", classes="param-label")
-                        yield Checkbox(self._hooks_label(), id="param-trust")
+                        yield Static("Untrusted recipe needs authorization", classes="param-label")
+                        # The summary is recipe content, so it is never parsed as markup,
+                        # and the checkbox names nothing the recipe can influence.
+                        yield Static(self._trust_summary(), id="param-trust-summary", markup=False)
+                        yield Checkbox("Authorize the hooks and overrides above", id="param-trust")
                     with Vertical(id="param-adv-long"):
                         yield from self._knob_fields(knob for knob in _LAUNCH_KNOBS if knob.column == "long")
                         for index, (key, value) in enumerate(self._default_knobs):
@@ -967,6 +1096,12 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                     yield Button("Check hosts", id="param-recheck")
                     yield Button("Cancel", id="param-cancel")
                     yield Button("Run", id="param-run", variant="primary")
+
+    def on_mount(self) -> None:
+        # Say so before any parameters are typed: Run will refuse this recipe.
+        refusal = local_post_commands_refusal(self.recipe, self.summary.name)
+        if refusal is not None:
+            self._set_error(refusal)
 
     @classmethod
     def _knob_fields(cls, knobs: Iterable[_Knob]) -> ComposeResult:
@@ -992,11 +1127,50 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                     input_kwargs["type"] = "number"
                 yield Input(placeholder=knob.placeholder, id=widget_id, **input_kwargs)
 
-    def _hooks_label(self) -> str:
-        parts = [f"{kind}: {', '.join(commands)}" for kind, commands in self.pending_hooks.items()]
-        return "Authorize hooks — " + "; ".join(parts)
+    def _trust_summary(self) -> str:
+        """What the trust checkbox authorizes: the same summary ``sparkrun run`` prompts with.
+
+        ``RunOptions(trust=True)`` authorizes the recipe's container-isolation
+        overrides (host mounts, privileged mode, executor selection, pre-placed
+        paths) as well as its hooks, so both are listed. Listing only the hooks
+        let one tick grant mounts the user never saw.
+        """
+        from sparkrun.core.launcher import recipe_isolation_overrides
+        from sparkrun.utils.text import format_hook_summary
+
+        try:
+            isolation = recipe_isolation_overrides(self.recipe)
+        except Exception:  # noqa: BLE001 - disclosure must not break the modal
+            isolation = ["Could not list this recipe's container-isolation overrides; trusting it allows any it declares."]
+        return format_hook_summary(self.summary.name, self.pending_hooks, isolation=isolation)
 
     # -- hosts --------------------------------------------------------------
+
+    def _eligible_selection(self, checks: RuntimeChecks, selected: Iterable[str]) -> frozenset[str]:
+        """The hosts a box shows checked: chosen and still eligible under *checks*."""
+        chosen = set(selected)
+        return frozenset(host for host in self.hosts if host in checks.selectable and host in chosen)
+
+    def _candidate_hosts(self, selected: tuple[str, ...]) -> tuple[str, ...]:
+        """The candidate list the launch hands the scheduler.
+
+        Pre-checked boxes are the scheduler's own placement. Passing them back
+        as ``RunOptions.hosts`` narrows the candidate set to that placement, and
+        ``api.run`` derives a greedy cluster_id from, and evicts the superseded
+        deployment within, the candidate set only: a relaunch could then miss
+        the copy it replaces on an unchecked host, or get a cluster_id that
+        ``sparkrun run`` / ``stop`` / ``status`` never derive. Untouched boxes
+        therefore launch with every eligible monitored host; with none
+        disabled that is exactly what ``sparkrun run`` gets from the monitor's
+        cluster/hosts flags. Disabled rows (unreachable, no memory headroom)
+        stay out, as their boxes say: the scheduler does not check memory fit,
+        so offering them would only get the launch placed where this dialog
+        then refuses it. A selection the user actually changed is a candidate
+        list of their own, like ``--hosts a,b``.
+        """
+        if self._hosts_edited and frozenset(selected) != self._default_selection:
+            return selected
+        return tuple(host for host in self.hosts if host in self.checks.selectable)
 
     def _host_boxes(self) -> list[tuple[str, Checkbox]]:
         return [(host, self.query_one(f"#param-host-{index}", Checkbox)) for index, host in enumerate(self.hosts)]
@@ -1024,6 +1198,9 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                 self.query_one(target).set_class(event.value, "-shown")
             return
         if checkbox_id.startswith("param-host-"):
+            # Programmatic updates are posted under prevent() (_apply_checks), so
+            # every change that reaches here is the user's.
+            self._hosts_edited = True
             self._update_hosts_note()
 
     # -- actions ------------------------------------------------------------
@@ -1041,7 +1218,8 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
 
     def _set_error(self, message: str) -> None:
         try:
-            self.query_one("#param-error", Static).update(f"[red]{message}[/red]" if message else "")
+            # The message quotes user input and plan errors; substitute it as text.
+            self.query_one("#param-error", Static).update(Content.from_markup("[red]$message[/red]", message=message) if message else "")
         except Exception:
             pass
 
@@ -1167,6 +1345,11 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         except Exception as error:  # noqa: BLE001 - keep the dialog open with the reason
             self._set_error(f"Cannot prepare launch: {error}")
             return
+        refusal = local_post_commands_refusal(recipe, self.summary.name)
+        if refusal is not None and not refresh_hosts and not knobs.get("dry_run"):
+            # A dry run executes no hooks, so it stays available for review.
+            self._set_error(refusal)
+            return
         trust = bool(self.pending_hooks) and self.query_one("#param-trust", Checkbox).value
         if self.pending_hooks and not trust and not refresh_hosts:
             # Without authorization api.run refuses asynchronously and the typed
@@ -1174,8 +1357,6 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
             self._set_error("Authorize the hooks to run this recipe")
             return
         if self.hosts:
-            # The checked hosts are the candidate list: the scheduler still places
-            # within them, exactly as the CLI does with its resolved host_list.
             selected = tuple(host for host, box in self._host_boxes() if box.value)
             # A stale rejection must not prevent checking new parameters or
             # recovered capacity. Recheck the full candidate set, then return
@@ -1183,16 +1364,18 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
             # otherwise eligible hosts still requires a selection.
             refresh_hosts = refresh_hosts or (not selected and not self.checks.selectable)
             if refresh_hosts:
-                selected = self.hosts
-            if not selected:
-                self._set_error("Select at least one host")
-                return
+                candidates = self.hosts
+            else:
+                candidates = self._candidate_hosts(selected)
+                if not candidates:
+                    self._set_error("Select at least one host")
+                    return
         else:
-            selected = ()
+            candidates = ()
         options = RunOptions(
             recipe=recipe,
             cluster=self.cluster,
-            hosts=selected or None,
+            hosts=candidates or None,
             overrides=overrides,
             trust=trust,
             scheduler=knobs.get("scheduler"),
@@ -1229,8 +1412,9 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
         """Act on the scheduler's answer to a Run press.
 
         Cancel keeps the typed settings; a clean check launches the pending
-        options; anything else refreshes the host rows from the new check and
-        stays here, so the user can adjust and retry.
+        options with the plan the check made from them; anything else refreshes
+        the host rows from the new check and stays here, so the user can adjust
+        and retry.
         """
         if not self.is_attached:
             return
@@ -1244,9 +1428,11 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
             self._set_error("" if checks.ok else "; ".join(checks.warnings) or "Scheduler check failed")
             return
         reasons = dict(checks.reasons)
-        bad = [host for host in selected if host not in checks.selectable]
+        bad = [host for host in options.hosts or () if host not in checks.selectable]
         if checks.ok and not bad:
-            self.dismiss(RecipeLaunch(options=options, label=self.summary.name))
+            # The plan was built from exactly these options a moment ago, so the
+            # launch reuses it: placement is decided once, by this check.
+            self.dismiss(RecipeLaunch(options=options, label=self.summary.name, plan=checks.plan))
             return
         self._apply_checks(checks, selected)
         if bad:
@@ -1260,6 +1446,11 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
 
     def _apply_checks(self, checks: RuntimeChecks, selected: tuple[str, ...]) -> None:
         """Refresh placement, labels, and checkboxes from a new scheduler check."""
+        # Boxes the user never changed (or changed back) keep reading as the
+        # displayed placement after this refresh; a real edit stays an edit.
+        untouched = not self._hosts_edited or frozenset(box_host for box_host, box in self._host_boxes() if box.value) == (
+            self._default_selection
+        )
         self.checks = checks
         reasons = dict(checks.reasons)
         if self.hosts:
@@ -1269,12 +1460,18 @@ class RunParamsScreen(ModalScreen[RecipeLaunch | None]):
                 self.query_one("#param-hosts-title", Static).update(title)
             except Exception:  # noqa: BLE001 - the host section is optional
                 pass
-        for host, box in self._host_boxes():
-            eligible = host in checks.selectable
-            box.disabled = not eligible
-            box.label = host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})"
-            # A disabled row cannot be unchecked by hand, so a host the new
-            # check rejected must end unchecked; eligible rows keep the user's
-            # own selection.
-            box.value = eligible and host in selected
+        # Not a user edit: the Changed messages these assignments post must not
+        # mark the selection as the user's candidate list.
+        with self.prevent(Checkbox.Changed):
+            for host, box in self._host_boxes():
+                eligible = host in checks.selectable
+                box.disabled = not eligible
+                box.label = Content(host if eligible else f"{host} ({reasons.get(host, 'insufficient resources')})")
+                # A disabled row cannot be unchecked by hand, so a host the new
+                # check rejected must end unchecked; eligible rows keep the user's
+                # own selection.
+                box.value = eligible and host in selected
+        if untouched:
+            self._default_selection = self._eligible_selection(checks, selected)
+            self._hosts_edited = False
         self._update_hosts_note()

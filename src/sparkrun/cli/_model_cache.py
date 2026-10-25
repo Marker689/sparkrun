@@ -355,7 +355,7 @@ def pin_cache(model, revision, remove, endpoint, **kwargs):
     type=click.FloatRange(min=0),
     default=api.RECONCILE_MIN_AGE_SECONDS / 60,
     show_default=True,
-    help="Keep younger claims, which may belong to a launch still preparing.",
+    help="Keep younger claims, which may belong to a launch still preparing. Five minutes are added for clock skew.",
 )
 @endpoint_option
 @click.pass_context

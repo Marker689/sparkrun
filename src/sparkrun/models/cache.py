@@ -117,6 +117,10 @@ def auto_prune(io, locations, *, config, exclude_repos):
                 sizes[key] = parse_byte_size(policy[key])
             except ValueError as exc:
                 raise ModelArtifactError("model_cache_prune.%s: %s" % (key, exc)) from exc
+    if sizes.get("max_bytes") == 0:
+        # A zero budget is met only by an empty cache, so every launch would
+        # evict every eligible revision: far more likely a typo than a policy.
+        raise ModelArtifactError("model_cache_prune.max_bytes must be positive; to stop pruning set enabled: false")
     from sparkrun.feedback import get_feedback
 
     for host, root in locations:
