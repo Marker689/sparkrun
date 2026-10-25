@@ -1325,3 +1325,31 @@ def test_cli_forwards_the_offline_choice(runner, v, patched_cluster_mgr, monkeyp
         result = runner.invoke(main, ["setup", "rdma-test", "--dry-run", "--hosts", "h1,h2", *flag])
     assert result.exit_code == 0, result.output
     assert call.call_args.kwargs["offline"] is expected
+
+
+@pytest.mark.parametrize(
+    ("suite", "uncovered", "subnets", "expected"),
+    [
+        (
+            "nccl",
+            (),
+            {"192.168.11.0/24": ("a", "b", "c", "d"), "192.168.12.0/24": ("a", "b", "c", "d")},
+            "Inventory: 4 hosts reached on 2 subnets (6 pairs, 12 paths; switch topology; not measured by --suite nccl)",
+        ),
+        (
+            "perftest",
+            ("d",),
+            # A subnet only one host is on offers no path, so it is not counted.
+            {"192.168.11.0/24": ("a", "b", "c"), "192.168.13.0/24": ("d",)},
+            "Inventory: 3 of 4 hosts reached on 1 subnet (6 pairs, 12 paths; switch topology)",
+        ),
+    ],
+)
+def test_inventory_line_breaks_down_hosts_subnets_pairs_and_paths(suite, uncovered, subnets, expected):
+    from sparkrun.api.setup._rdma import RdmaTestReport
+    from sparkrun.api.setup._rdma_plan import RdmaCoverage
+    from sparkrun.cli._setup._rdma import _inventory_line
+
+    coverage = RdmaCoverage(discovered=True, topology="switch", subnets=subnets, uncovered_hosts=uncovered, pair_count=6, path_count=12)
+    report = RdmaTestReport(suite=suite, hosts=("a", "b", "c", "d"), coverage=coverage)
+    assert _inventory_line(report) == expected

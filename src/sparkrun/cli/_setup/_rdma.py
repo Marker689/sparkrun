@@ -208,12 +208,7 @@ def _render(report) -> None:
 
     coverage = report.coverage
     if coverage.discovered:
-        basis = "%s topology" % coverage.topology if coverage.topology else "observed subnets; topology unspecified"
-        _echo_status(
-            coverage.status,
-            "Inventory coverage: %d host pair(s), %d candidate path(s) (%s)" % (coverage.pair_count, coverage.path_count, basis),
-            indent="",
-        )
+        _echo_status(coverage.status, _inventory_line(report), indent="")
         for issue in coverage.issues:
             _echo_status(issue.status, issue.detail)
         if coverage.status == STATUS_FAIL:
@@ -294,6 +289,36 @@ def _render(report) -> None:
             for line in n.raw.strip().splitlines()[-15:]:
                 click.echo("    %s" % line)
         click.echo()
+
+
+def _plural(count: int, noun: str) -> str:
+    return "%d %s%s" % (count, noun, "" if count == 1 else "s")
+
+
+def _inventory_line(report) -> str:
+    """``X hosts reached on Y subnets (Z pairs, N paths; basis)``.
+
+    The pair and path counts alone read like a measurement, and under
+    ``--suite nccl`` nothing is measured pair by pair, so the line breaks the
+    numbers down to what discovery found: hosts with an RDMA path, the
+    subnets they share (a subnet with one host offers no path and is reported
+    on its own), and the pairs and paths those give.
+    """
+    coverage = report.coverage
+    total = len(report.hosts)
+    reached = total - len(coverage.uncovered_hosts)
+    hosts = _plural(reached, "host") if reached == total else "%d of %s" % (reached, _plural(total, "host"))
+    shared = sum(1 for members in coverage.subnets.values() if len(members) > 1)
+    basis = "%s topology" % coverage.topology if coverage.topology else "topology unspecified"
+    if report.suite == SUITE_NCCL:
+        basis += "; not measured by --suite nccl"
+    return "Inventory: %s reached on %s (%s, %s; %s)" % (
+        hosts,
+        _plural(shared, "subnet"),
+        _plural(coverage.pair_count, "pair"),
+        _plural(coverage.path_count, "path"),
+        basis,
+    )
 
 
 def _report_to_dict(report) -> dict:

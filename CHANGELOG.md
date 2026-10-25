@@ -121,6 +121,9 @@ first tagged release containing them, regardless of their original commit date.
   pair finishes, and a periodic "still running" line with elapsed time during the image
   fetch and the NCCL collective. NCCL bus bandwidth is shown in Gb/s beside GB/s
   (`--json`: `avg_bus_bw_gbits`), so it reads against the link rates.
+  The inventory line breaks its counts down as hosts, shared subnets, pairs and paths
+  (`4 hosts reached on 2 subnets (6 pairs, 12 paths; switch topology)`), and notes when
+  `--suite nccl` does not measure them.
 - SGLang FP8 kernel tuning streams its output again at default verbosity, and a failed
   tune logs its captured output. Since the monitor terminal fix, it only streamed with `-v`.
 - Re-running `setup install` also repairs existing generated completion entries in
