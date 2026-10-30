@@ -19,6 +19,12 @@ first tagged release containing them, regardless of their original commit date.
   environment-variable rank placement.  The DeepSeek family serves a prepared
   per-rank-cache bundle and is selected by the same runtime, not by a second
   plugin.
+- `tensorfold` runtime: the Jayleaton Zig engine family (`tf_family: jayleaton`).
+  It runs the two Jayleaton binaries, the `TF_DSV41_*` serving profile, a
+  per-rank local Engram/prepared/AOT layout and a pre-placed model pack on NFS;
+  the recipe keeps the existing served-model name and port while the model may
+  be registered under a synthetic HF-cache id.  TP=2 only; the binary, assets
+  and image remain external to this repository.
 - Native cluster orchestration can start worker ranks before rank 0
   (`RuntimePlugin.native_start_order()`) and reserve a contiguous rendezvous
   port range (`native_rendezvous_port_span()`), for engines whose followers

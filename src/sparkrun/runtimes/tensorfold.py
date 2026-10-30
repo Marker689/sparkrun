@@ -46,6 +46,7 @@ from sparkrun.core.readiness import (
     OPENAI_RESPONSES_STREAM,
 )
 from sparkrun.core.validation import RecipeIssue
+from sparkrun.runtimes import _tensorfold_jayleaton as _jayleaton
 from sparkrun.runtimes._util import default_env_hf_offline, parse_flag_value_from_command
 from sparkrun.runtimes.base import RuntimePlugin, render_flag_value
 from sparkrun.utils.data import integer_setting
@@ -71,7 +72,7 @@ _TP_FAMILIES: dict[str, tuple[str, str]] = {
 _DSV41_FAMILY = "dsv41"
 
 #: Every family that implies a multi-rank launch.
-_ALL_FAMILIES = frozenset({*_TP_FAMILIES, _DSV41_FAMILY})
+_ALL_FAMILIES = frozenset({*_TP_FAMILIES, _DSV41_FAMILY, _jayleaton.FAMILY})
 
 #: Recipe ``defaults`` key naming the engine's rank-placement family.
 _FAMILY_KEY = "tf_family"
@@ -217,7 +218,7 @@ class TensorFoldRuntime(RuntimePlugin):
     # --- config surface -----------------------------------------------------
 
     def known_config_keys(self) -> frozenset[str]:
-        return frozenset(_TENSORFOLD_FLAG_MAP) | _TENSORFOLD_OWNED_KEYS | _DSV41_OWNED_KEYS
+        return frozenset(_TENSORFOLD_FLAG_MAP) | _TENSORFOLD_OWNED_KEYS | _DSV41_OWNED_KEYS | _jayleaton.owned_keys()
 
     def serve_flag_map(self):
         return _TENSORFOLD_FLAG_MAP
@@ -276,6 +277,10 @@ class TensorFoldRuntime(RuntimePlugin):
         return TensorFoldRuntime._family(config) == _DSV41_FAMILY
 
     @staticmethod
+    def _is_jayleaton(config) -> bool:
+        return _jayleaton.is_jayleaton(config)
+
+    @staticmethod
     def _is_prepared_bundle(recipe: "Recipe") -> bool:
         bundle = getattr(getattr(recipe, "cluster_config", None), "resolved_model_path", None) or recipe.model
         return isinstance(bundle, str) and os.path.isabs(bundle)
@@ -296,6 +301,8 @@ class TensorFoldRuntime(RuntimePlugin):
         ``validate_recipe`` refuse a multi-rank request the engine cannot use.
         """
         config = self._config(recipe, {})
+        if self._is_jayleaton(config):
+            return _jayleaton.world_size(parallelism, config)
         if self._family(config) in _ALL_FAMILIES and self._requires_tp(config):
             return max(1, parallelism.tensor_parallel)
         return 1
@@ -305,6 +312,8 @@ class TensorFoldRuntime(RuntimePlugin):
         if recipe is None:
             return "head_first"
         config = self._config(recipe, overrides)
+        if self._is_jayleaton(config):
+            return _jayleaton.start_order(config)
         if self._family(config) in _ALL_FAMILIES and self._requires_tp(config):
             return "workers_first"
         return "head_first"
@@ -313,6 +322,10 @@ class TensorFoldRuntime(RuntimePlugin):
         self, recipe: "Recipe | None", overrides: dict[str, Any] | None = None, *, num_nodes: int = 1, init_port: int = 25000
     ) -> int | None:
         """The port carried in ``NCCL_COMM_ID``/``TF_TP_PORT`` (some families use +1)."""
+        if recipe is not None:
+            config = self._config(recipe, overrides)
+            if self._is_jayleaton(config):
+                return _jayleaton.rendezvous_port(config, init_port)
         return init_port
 
     def native_rendezvous_port_span(self, recipe: "Recipe | None" = None, overrides: dict[str, Any] | None = None) -> int:
@@ -320,6 +333,8 @@ class TensorFoldRuntime(RuntimePlugin):
         if recipe is None:
             return 1
         config = self._config(recipe, overrides)
+        if self._is_jayleaton(config):
+            return _jayleaton.rendezvous_port_span(config)
         return 2 if (self._family(config) in _ALL_FAMILIES and self._requires_tp(config)) else 1
 
     # --- upstream command construction -------------------------------------
@@ -508,6 +523,8 @@ class TensorFoldRuntime(RuntimePlugin):
     ) -> str:
         """Generate the solo serve command (upstream shape only)."""
         config = self._config(recipe, overrides)
+        if self._is_jayleaton(config):
+            return _jayleaton.generate_command(recipe, config, is_cluster=is_cluster)
         if self._is_dsv41(config):
             # The native path never executes this string: each rank gets its
             # own argv from generate_node_command() (the followers use a
@@ -548,6 +565,15 @@ class TensorFoldRuntime(RuntimePlugin):
                 "TensorFold multi-node launch needs defaults.tf_family (glm, nemotron or dsv41); "
                 "the native CUDA engine has no generic tensor-parallel flag"
             )
+        if family == _jayleaton.FAMILY:
+            return _jayleaton.generate_node_command(
+                recipe,
+                config,
+                head_ip=head_ip,
+                num_nodes=num_nodes,
+                node_rank=node_rank,
+                init_port=init_port,
+            )
         if family == _DSV41_FAMILY:
             if num_nodes not in _DSV41_WORLDS:
                 raise ValueError("the dsv41 family supports tp=2 or tp=4 (got %d nodes)" % num_nodes)
@@ -575,6 +601,8 @@ class TensorFoldRuntime(RuntimePlugin):
 
     def validate_recipe(self, recipe: "Recipe") -> list[str | RecipeIssue]:
         config = self._config(recipe, {})
+        if self._is_jayleaton(config):
+            return _jayleaton.validate(recipe, config, self)
         if self._is_dsv41(config):
             return self._validate_dsv41(recipe, config)
         return self._validate_upstream(recipe, config)
@@ -668,6 +696,9 @@ class TensorFoldRuntime(RuntimePlugin):
         for key in ("pipeline_parallel", "data_parallel", "expert_parallel"):
             if dims[key] > 1:
                 raise RuntimeError("TensorFold does not support %s" % key)
+        if family == _jayleaton.FAMILY:
+            _jayleaton.prepare(recipe, hosts, chain)
+            return
         if family == _DSV41_FAMILY:
             if dims["tensor_parallel"] not in _DSV41_WORLDS:
                 raise RuntimeError(
@@ -709,6 +740,7 @@ class TensorFoldRuntime(RuntimePlugin):
         commands["nccl_lib"] = "ldconfig -p 2>/dev/null | grep -m1 'libnccl\\.so\\.2' | awk '{print $NF}' || echo unknown"
         commands["tensorfold_dsv41"] = "/opt/tensorfold-dsv41/bin/tensorfold-native --version 2>/dev/null | head -1 || echo unknown"
         commands["tensorfold_dsv41_lanes"] = "test -x /opt/tensorfold-dsv41/bin/tf-dsv41-lanes && echo present || echo missing"
+        commands.update(_jayleaton.version_commands())
         return commands
 
     # --- cluster lifecycle --------------------------------------------------

@@ -241,11 +241,80 @@ network.
    and a chat completion, then stop/restart and confirm the caches are reused.
 7. Report the exact engine tag, CUDA/NCCL versions, model pack and revision.
 
+## Jayleaton Zig engine family
+
+The runtime also drives the Jayleaton Zig port of DeepSeek-V4.1
+(`jayleaton/deepseek-v41-tensorfold-spark`, the `tensorfold-dsv41-zig` image).  It
+is a **different engine variant**, not another build of the bertholomus fork:
+
+- rank 0: `tensorfold-dsv41 serve <pack> ...`
+- rank 1: `tf-dsv41-m1 follow <pack> <assets>`
+- rank 1 starts first, then rank 0 (the native cluster path's `workers_first`
+  order);
+- the serving profile is the `TF_DSV41_*` set, not `TF_DS_*`;
+- per-rank Engram, prepared weights, AOT/cache assets and session state live on
+  local NVMe, while the pack itself may stay on NFS.
+
+Select it with `tf_family: jayleaton`; it is TP=2 only and the recipe must name
+an explicit image (there is no platform default for this fork).  A pre-built
+image is required; the runtime does not build it for you.  The same is true of
+the rank assets: pack the rank's Engram shards, generate `rope.bin`,
+`engram-host.bin` and the AOT cubins with the Jayleaton tools, and put them in
+the mount paths below.  `scripts/run-zig.sh <rank> --check-aot` from the
+upstream recipe is the asset gate.
+
+```yaml
+model: marker/DeepSeek-V4.1-Flash-1017-EXL3-2.8bpw-Abliterated
+container: tensorfold-dsv41-zig:local
+cluster_config:
+  resolved_model_path: /home/marker/.cache/huggingface/jayleaton-flash17-ablit
+defaults:
+  tf_family: jayleaton
+  tensor_parallel: 2
+  port: 8000
+  served_model_name: deepseek-v4.1-flash
+  tf_port: 29571
+  assets_dir: /assets
+  engram_dir: /engram
+  prepared_dir: /prepared
+  state_dir: /state
+  cache_dir: /cache
+executor_config:
+  volumes:
+    - /var/tmp/jayleaton/engram:/engram:ro
+    - /var/tmp/jayleaton/assets:/assets:ro
+    - /var/tmp/jayleaton/prepared:/prepared
+    - /var/tmp/jayleaton/state:/state
+    - /var/tmp/jayleaton/state/sessions:/sessions
+    - /var/tmp/jayleaton/cache:/cache
+env:
+  TF_DSV41_CONTEXT: "1048576"
+  TF_DSV41_BIAS_VL: /home/marker/.cache/huggingface/jayleaton-flash17-ablit
+  # ... the rest of config/prod-zig-flash17.env.example
+```
+
+The model id is only the recipe identity; `cluster_config.resolved_model_path`
+is the pre-placed pack path and skips download/distribution.  Registering that
+pack as a synthetic HF-cache entry (`model/marker/...` in `hf cache ls`) makes
+the same files available in the container's HF-cache mount, but the engine reads
+the pack via the explicit resolved path.  Because the Engram and prepared
+directories are rank-specific, pass the head host first explicitly when the
+cluster's default order is not the head's:
+
+```bash
+sparkrun run <recipe> --hosts <head>,<worker>
+```
+
+The engine ignores `dashboard`/`metrics_open`; use its own `/health`,
+`/v1/models` and request log (`TF_DSV41_REQUEST_LOG`).  A canary is
+`17 * 23` -> `391`; thinking is on by default via `TF_DSV41_THINKING=1`.
+
 ## Known limitations / non-goals
 
-- No generic TP for arbitrary models.  Only `glm`, `nemotron` and the DeepSeek
-  fork are wired; other families run solo and a multi-node request is refused
-  with an actionable message.
+- No generic TP for arbitrary models.  Only `glm`, `nemotron`, the bertholomus DeepSeek
+  fork (`dsv41`) and the Jayleaton Zig fork (`jayleaton`) are wired; other
+  families run solo and a multi-node request is refused with an actionable
+  message.
 - >2 ranks upstream is unqualified; the DeepSeek fork's TP4 is image-pinned and
   experimental.
 - No macOS/`--speed-up` (upstream-only) and no CPU execution.

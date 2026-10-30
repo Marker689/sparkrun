@@ -543,3 +543,100 @@ def test_dsv41_dashboard_is_rank0_only():
     assert "--metrics-open" in head
     assert "--dashboard" not in follower
     assert "--metrics-open" not in follower
+
+
+# --- Jayleaton Zig engine family -------------------------------------------
+
+_JAY_MODEL = "marker/DeepSeek-V4.1-Flash-1017-EXL3-2.8bpw-Abliterated"
+_JAY_PATH = "/home/marker/.cache/huggingface/jayleaton-flash17-ablit"
+_JAY_IMAGE = "tensorfold-dsv41-zig:local"
+
+
+def _jayleaton_recipe(defaults=None, **extra):
+    data = {
+        "name": "jayleaton-tp2",
+        "model": _JAY_MODEL,
+        "runtime": "tensorfold",
+        "container": _JAY_IMAGE,
+        "min_nodes": 2,
+        "max_nodes": 2,
+        "cluster_config": {"resolved_model_path": _JAY_PATH},
+    }
+    base_defaults = {
+        "tf_family": "jayleaton",
+        "tensor_parallel": 2,
+        "port": 8000,
+        "served_model_name": "deepseek-v4.1-flash",
+        "max_model_len": 1048576,
+        "max_num_seqs": 4,
+        "max_tokens": 32768,
+        "assets_dir": "/assets",
+        "engram_dir": "/engram",
+    }
+    if defaults:
+        base_defaults.update(defaults)
+    data["defaults"] = base_defaults
+    data.update(extra)
+    return Recipe.from_dict(data)
+
+
+def test_jayleaton_is_a_multi_node_family():
+    runtime = TensorFoldRuntime()
+    recipe = _jayleaton_recipe()
+    parallelism = SimpleNamespace(tensor_parallel=2, pipeline_parallel=1, data_parallel=1)
+    assert runtime.world_size(parallelism, recipe=recipe, cluster=None) == 2
+    assert runtime.native_start_order(recipe) == "workers_first"
+    assert runtime.native_rendezvous_port_span(recipe) == 1
+    assert runtime.native_rendezvous_port(recipe, None) == 29571
+
+
+def test_jayleaton_rank_commands():
+    runtime = TensorFoldRuntime()
+    head = runtime.generate_node_command(_jayleaton_recipe(), {}, head_ip="10.0.0.1", num_nodes=2, node_rank=0, init_port=29571)
+    worker = runtime.generate_node_command(_jayleaton_recipe(), {}, head_ip="10.0.0.1", num_nodes=2, node_rank=1, init_port=29571)
+    assert "/opt/tensorfold/bin/tensorfold-dsv41 serve %s" % _JAY_PATH in head
+    assert "--host 0.0.0.0" in head
+    assert "--port 8000" in head
+    assert "--name deepseek-v4.1-flash" in head
+    assert "TF_TP_RANK=0" in head
+    assert "TF_TP_WORLD=2" in head
+    assert "TF_TP_MASTER=10.0.0.1" in head
+    assert "TF_DSV41_ASSETS=/assets" in head
+    assert "TF_DSV41_ENGRAM_DIR=/engram" in head
+    assert "/opt/tensorfold/bin/tf-dsv41-m1 follow %s /assets" % _JAY_PATH in worker
+    assert "TF_TP_RANK=1" in worker
+    assert "--port 8000" not in worker
+
+
+def test_jayleaton_cluster_preview_and_solo_refusal():
+    runtime = TensorFoldRuntime()
+    preview = runtime.generate_command(_jayleaton_recipe(), {}, is_cluster=True)
+    assert "/opt/tensorfold/bin/tensorfold-dsv41 serve %s" % _JAY_PATH in preview
+    with pytest.raises(ValueError, match="multi-node only"):
+        runtime.generate_command(_jayleaton_recipe(), {}, is_cluster=False)
+
+
+def test_jayleaton_validation_and_prepare():
+    runtime = TensorFoldRuntime()
+    recipe = _jayleaton_recipe()
+    messages = [str(issue) for issue in runtime.validate_recipe(recipe)]
+    assert not any("TP=2" in m or "flash17" in m or "explicit container" in m for m in messages)
+    runtime.prepare(recipe, ["h1", "h2"])
+    with pytest.raises(RuntimeError, match="exactly two hosts"):
+        runtime.prepare(recipe, ["h1"])
+
+
+def test_jayleaton_requires_explicit_image_and_two_ranks():
+    runtime = TensorFoldRuntime()
+    data = {
+        "name": "jay-bad",
+        "model": _JAY_MODEL,
+        "runtime": "tensorfold",
+        "min_nodes": 2,
+        "max_nodes": 2,
+        "cluster_config": {"resolved_model_path": _JAY_PATH},
+        "defaults": {"tf_family": "jayleaton", "tensor_parallel": 4},
+    }
+    messages = [str(issue) for issue in runtime.validate_recipe(Recipe.from_dict(data))]
+    assert any("TP=2" in message for message in messages)
+    assert any("explicit container" in message for message in messages)
