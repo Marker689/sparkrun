@@ -23,6 +23,7 @@ defaults:
   state_dir: /state
   cache_dir: /cache
 env:
+  TF_EXPERIMENTAL: deepseek
   TF_DSV41_CONTEXT: "1048576"
   TF_DSV41_ASSETS: /assets
   TF_DSV41_R1: "1"
