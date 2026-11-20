@@ -4,9 +4,9 @@ This is the external image for the **Jayleaton Zig** DeepSeek-V4.1 engine
 selected by `tf_family: jayleaton` in the sparkrun TensorFold runtime.
 
 It is built from [jayleaton/deepseek-v41-tensorfold-spark](https://github.com/jayleaton/deepseek-v41-tensorfold-spark)
-(`config/tensorfold.rev` / `config/tensorfold.repo`, `docker/zig/Dockerfile`).  The hardware-validated pin is
-`7b79ef92d846138d51638b677c473392a56e240c` (`tensorfold-native 1.1.8`), whose rank-1 entry point is
-`tf-dsv41 follow PACK ASSETS` (the older pin called it `tf-dsv41-m1`).  The image is not part of the
+(`config/tensorfold.rev` / `config/tensorfold.repo`, `docker/zig/Dockerfile`).  The hardware-validated pin is upstream TensorFold `f212eeabde0fc2ac3234ca947a69cc7714abaca2` plus
+recipe patches `0001`-`0091` (tree `d73f715ca9892d6f8801f33d2164780390490746`, `tensorfold-native 1.2.5`),
+whose rank-1 entry point is `tf-dsv41 follow PACK ASSETS` (the older pin called it `tf-dsv41-m1`).  The image is not part of the
 sparkrun package; build it on an ARM64 DGX Spark and load the same image on
 both nodes:
 

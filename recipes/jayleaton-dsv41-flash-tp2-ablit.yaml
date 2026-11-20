@@ -2,7 +2,7 @@ name: jayleaton-dsv41-flash-tp2-ablit
 description: DeepSeek-V4.1-Flash-1017 jayleaton EXL3 2.8bpw + Keys L10-35 wo_b abliteration on the Jayleaton Zig engine, TP2; weights on NFS, Engram/prepared/assets local
 model: marker/DeepSeek-V4.1-Flash-1017-EXL3-2.8bpw-Abliterated
 runtime: tensorfold
-container: tensorfold-dsv41-zig:local
+container: tensorfold-dsv41-zig:latest
 min_nodes: 2
 max_nodes: 2
 cluster_config:
